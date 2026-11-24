@@ -2463,7 +2463,8 @@ export async function sharedRun<
  * [param windowedTaken] slots of [param taken] were taken so. A lane holding a slot taken for a
  * headless engine gives it back and takes one counted for a window before it draws a windowed share,
  * which it does only for a windowed share no other lane holds or waits for a windowed slot for, or
- * once no headless work is left. A wait for a windowed slot ends once the windowed shares left are
+ * once no headless work is left. A lane on a slot taken for a window gives it back and takes a
+ * headless one once no windowed share is left for it. A wait for a windowed slot ends once the windowed shares left are
  * fewer than the lanes holding or waiting for one, and that lane takes a headless slot instead.
  */
 export async function runShares<
@@ -2504,7 +2505,7 @@ export async function runShares<
   const windowedFloors = windowedFloor(units.filter((unit) => unit.windowed).map((unit) => unit.suite));
   const needed = (held: LaneSlot): number =>
     peakOf(shares.peek(held.windowed), times, MEMORY_PER_ENGINE, windowedFloors).bytes;
-  /** Each going lane's slot, by lane. */
+  /** Each lane's slot, by lane. A lane ends only once every share is handed out or the run fails. */
   const laneSlots = new Map<number, LaneSlot>();
   /** How many lanes hold a slot taken for a window or wait for one. */
   const windowedClaims = (): number =>
@@ -2600,10 +2601,9 @@ export async function runShares<
    * holds none or one of the other kind, or null once its wait for a windowed slot is ended.
    */
   const slotOfItsKind = async (held: LaneSlot): Promise<string | null> => {
-    // A slot taken for a window still counts one once its lane runs headless, which holds back other
-    // engines but never lets more start than the memory budget has room for.
+    // A slot of the other kind is given back, so a lane done with its window counts as headless.
     const windowed = wantsWindow(held);
-    if (held.lock !== null && windowed && !held.windowed) {
+    if (held.lock !== null && windowed !== held.windowed) {
       slots.release(held.lock);
       held.lock = null;
     }
@@ -2784,7 +2784,6 @@ export async function runShares<
       }
       return ran;
     } finally {
-      laneSlots.delete(at);
       if (held.lock !== null) {
         doneWith(slots, held.lock, handed);
       }

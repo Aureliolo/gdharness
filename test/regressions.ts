@@ -132687,6 +132687,11 @@ function testWindowedEnginesRunTogetherGetWhatEachGetsAlone(): void {
       `the scene runner's input reaches the scene: ${JSON.stringify(lone)}`,
     );
     assert.notEqual(lone.display, 'headless', 'the engine has a window');
+    const peaks = readEnginePeaks(project);
+    assert.ok(
+      peaks.test_windowed_lane !== undefined && peaks.test_lane === undefined,
+      `a windowed engine's peak is kept for windowed lanes alone: ${JSON.stringify(peaks)}`,
+    );
     // Each probe suite is sized by what the engine alone was seen to hold, in place of the flat
     // figure a window is taken to need, so a small machine fits as many as it really can.
     const held = readTimes(aloneTimes)[`res://tests/${names[0] ?? ''}_test.gd`];
@@ -133429,9 +133434,9 @@ function testTheRunSaysWhyOneWindowedEngineHoldsThemAll(): void {
       '44 test functions in 22 suites over 5 engines, one of them windowed and followed in its slot by a headless one. One engine holds all 2 windowed suites, since the windowed suites are too small a part of the work to deal out.',
     ],
     [
-      'with windowed work under two engines of it on Windows',
+      'with two short windowed suites on Windows',
       said(2, 2, 20, {}),
-      '8 test functions in 4 suites over 3 engines, one of them windowed. One engine holds all 2 windowed suites, since the windowed suites are too small a part of the work to deal out.',
+      '8 test functions in 4 suites over 4 engines, 2 of them windowed.',
     ],
     [
       'with two windowed engines on Windows',
@@ -133556,8 +133561,9 @@ function testWindowedUnitsKeepTheirNeedAndAreDealtSlowestFirst(): void {
 
 /**
  * A shared run's lanes on headless slots run headless shares beside the windowed lane rather than
- * giving their slots back to wait for a window that lane opens, and a gate's run on a machine with
- * room for every lane runs on every one.
+ * giving their slots back to wait for a window that lane opens. Once the windowed lane's window ends,
+ * its slot counts as a headless one, and a gate's run on a machine with room for every lane runs on
+ * every one.
  */
 async function testNoLaneGivesAHeadlessSlotBackForAWindowAnotherLaneOpens(): Promise<void> {
   const msPerSecond = 2;
@@ -133626,14 +133632,21 @@ async function testNoLaneGivesAHeadlessSlotBackForAWindowAnotherLaneOpens(): Pro
           },
         };
         let running = 0;
+        let windowedRunning = 0;
         let atOnce = 0;
+        let besideAWindow = 0;
         const lanesRan = new Set<number>();
         const ran = await sharedRun(started, slots, units, declared, {}, async (plan, index) => {
           running += 1;
+          windowedRunning += plan.windowed ? 1 : 0;
           atOnce = Math.max(atOnce, running);
+          if (windowedRunning > 0) {
+            besideAWindow = Math.max(besideAWindow, running - windowedRunning);
+          }
           lanesRan.add(plan.lane);
           await delay(plan.cost * msPerSecond);
           running -= 1;
+          windowedRunning -= plan.windowed ? 1 : 0;
           return { index, printed: { started: null }, suites: plan.suites.length };
         });
         assert.ok(started.shared, `${scenario.name}: the run is shared`);
@@ -133650,7 +133663,12 @@ async function testNoLaneGivesAHeadlessSlotBackForAWindowAnotherLaneOpens(): Pro
         if (scenario.follows) {
           assert.equal(lanesRan.size, lanesOf(plans), `${scenario.name}: every lane runs`);
         } else {
-          assert.equal(atOnce, 2, `${scenario.name}: a headless engine runs beside the windowed one`);
+          assert.equal(besideAWindow, 1, `${scenario.name}: a headless engine runs beside the windowed one`);
+          assert.equal(
+            atOnce,
+            3,
+            `${scenario.name}: once the window ends its slot counts as headless, so three headless engines run`,
+          );
         }
       } finally {
         rmSync(directory, { recursive: true, force: true });
@@ -133766,6 +133784,159 @@ async function testAWaitForAWindowNoShareNeedsEnds(): Promise<void> {
   assert.ok(
     ran.some(([lane, windowed]) => lane === 1 && !windowed),
     `and lane 1, which waited for a window, runs headless ones: ${JSON.stringify(ran)}`,
+  );
+}
+
+/**
+ * A lane that went for the last headless share and found another lane had drawn it goes back for a
+ * window while a windowed share is left, rather than leaving that share to the windowed lane's next
+ * turn.
+ */
+async function testALaneThatDrawsNothingGoesBackForAWindowLeft(): Promise<void> {
+  const units = [planUnit('w0', 50, true), planUnit('w1', 50, true), planUnit('h0', 50, false)];
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  let takes = 0;
+  const calls: string[] = [];
+  const slots = {
+    take: (...args: unknown[]): Promise<string> => {
+      takes += 1;
+      const lock = `${args[6] === 'test_windowed_lane' ? 'W' : 'H'}${String(takes)}`;
+      calls.push(`take ${lock}`);
+      return Promise.resolve(lock);
+    },
+    release: (lock: string) => {
+      calls.push(`release ${lock}`);
+    },
+  };
+  // The lanes file tells one lane until the first lane has drawn its windowed share, then three, on
+  // one tick, so both lanes it held back go for the one headless share together.
+  let told = 1;
+  const toldThree = delay(20).then(() => {
+    told = 3;
+  });
+  const raised = {
+    ceiling: 3,
+    past: (_above: number, signal: AbortSignal) =>
+      new Promise<number>((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(new Error('over'));
+        });
+      }),
+    told: () => Promise.resolve(told),
+    untilTold: () => toldThree,
+  };
+  let windowedRunning = 0;
+  let windowedAtOnce = 0;
+  await runShares(
+    slots,
+    units,
+    declared,
+    3,
+    ['W0', 'H0', 'H00'],
+    {},
+    async (plan, index) => {
+      windowedRunning += plan.windowed ? 1 : 0;
+      windowedAtOnce = Math.max(windowedAtOnce, windowedRunning);
+      calls.push(`lane ${String(plan.lane)} runs ${plan.suites.map((suite) => suite.path).join(',')}`);
+      await delay(plan.cost * 2);
+      windowedRunning -= plan.windowed ? 1 : 0;
+      return { index, printed: { started: null } };
+    },
+    undefined,
+    undefined,
+    raised,
+    2,
+    1,
+  );
+  assert.equal(windowedAtOnce, 2, `the second windowed share runs beside the first: ${calls.join('; ')}`);
+  assert.ok(
+    calls.includes('lane 2 runs res://w1.gd'),
+    `run in lane 2, which found no headless share: ${calls.join('; ')}`,
+  );
+}
+
+/** An engine reused for the next share is handed a headless one, whatever its lane may take. */
+async function testAReusedEngineIsHandedNoWindowedShare(): Promise<void> {
+  const units = [
+    ...Array.from({ length: 6 }, (_, at) => planUnit(`w${String(at)}`, 100, true)),
+    ...Array.from({ length: 9 }, (_, at) => planUnit(`h${String(at)}`, 100, false)),
+  ];
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  // A second window never has room, so windowed shares wait for lane 0, which holds the first.
+  const slots = {
+    take: (...args: unknown[]): Promise<string> =>
+      args[6] === 'test_windowed_lane'
+        ? new Promise<string>((_resolve, reject) => {
+            const signal = args[0];
+            if (signal instanceof AbortSignal) {
+              signal.addEventListener('abort', () => {
+                reject(new Error('ended'));
+              });
+            }
+          })
+        : Promise.resolve('N'),
+    release: () => undefined,
+  };
+  const wrong: string[] = [];
+  await runShares(
+    slots,
+    units,
+    declared,
+    3,
+    ['A', 'B', 'C'],
+    {},
+    async (plan, index, _lock, _holds, reuse) => {
+      await delay(plan.windowed ? 40 : 5);
+      for (let next = await reuse?.next(); next !== undefined && next !== null; next = await reuse?.next()) {
+        if (next.plan.windowed !== plan.windowed) {
+          wrong.push(
+            `engine ${String(index)} reused for ${next.plan.suites.map((suite) => suite.path).join(',')}`,
+          );
+        }
+        await delay(5);
+        reuse?.done({ index: next.index, printed: { started: null } });
+      }
+      return { index, printed: { started: null } };
+    },
+    undefined,
+    undefined,
+    undefined,
+    2,
+    1,
+  );
+  assert.deepEqual(wrong, [], 'no headless engine runs a windowed share');
+}
+
+/** A run held to some processors by `--cores` counts each windowed engine at what a window holds. */
+function testACoresRunCountsAWindowedEngineAtAWindow(): void {
+  const suites = [
+    ...Array.from({ length: 9 }, (_, at) => planSuite(`w${String(at)}`, 2, true)),
+    ...Array.from({ length: 20 }, (_, at) => planSuite(`h${String(at)}`, 2, false)),
+  ];
+  const declared = new Map(suites.map((suite) => [suite.path, suite.cases]));
+  // Timed with no peaks kept, so a windowed engine counts 3.0 GB and a headless one 1.5 GB.
+  const times = Object.fromEntries(
+    suites.map((suite) => [suite.path, { seconds: 30, cases: { test_0: 15, test_1: 15 } }]),
+  );
+  const options = { engines: 4, cores: 8, order: null, selected: [] };
+  const machine: DealMachine = { processors: 16, platform: 'win32', env: {} };
+  const dealtOn = (freeGiB: number) =>
+    dealtFor(
+      options,
+      { bytes: freeGiB * MEMORY_GIB, said: 'of memory free' },
+      suites,
+      times,
+      declared,
+      machine,
+    );
+  assert.deepEqual(
+    [7, 8, 9, 10, 11, 12].map((freeGiB) => dealtOn(freeGiB).byMemory.engines),
+    [1, 1, 1, 2, 2, 3],
+    'two windowed engines at 3.0 GB each come first, then headless ones at 1.5 GB',
+  );
+  assert.equal(
+    dealtOn(10).byMemory.held,
+    'the machine has 10.0 GB of memory free, 4.0 GB of it kept for everything else and 3.0 GB taken for each windowed engine and 1.5 GB for each headless one',
   );
 }
 
@@ -133889,8 +134060,8 @@ function testHeadlessEnginesAreSizedByHeadlessSuites(): void {
   const first = dealtFor(options, memory, suites, {}, declared, machine);
   assert.deepEqual(
     [first.byMemory.engines, first.plans.filter((plan) => plan.windowed).length],
-    [7, 1],
-    'a first run has room for its one windowed engine at 3.0 GB and six headless ones at 1.5 GB',
+    [6, 2],
+    'a first run has room for its two windowed engines at 3.0 GB and four headless ones at 1.5 GB',
   );
   assert.equal(
     first.byMemory.held,
@@ -135539,6 +135710,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testNoLaneGivesAHeadlessSlotBackForAWindowAnotherLaneOpens,
   testALaneKeepsItsWindowedSlotBetweenWindowedShares,
   testAWaitForAWindowNoShareNeedsEnds,
+  testALaneThatDrawsNothingGoesBackForAWindowLeft,
+  testAReusedEngineIsHandedNoWindowedShare,
+  testACoresRunCountsAWindowedEngineAtAWindow,
   testASharedRunStartsFromTheSlotsItsLanesTook,
   testAnEngineTakesItsSlotAndKeepsItsPeakByItsKind,
   testAWindowedLanesPeakIsReadBackApart,
