@@ -133246,7 +133246,7 @@ async function testARealScriptErrorBesideASkipReasonsScriptErrorLineIsCountedOnc
       ran.said.match(/an engine error in .+?(?=\. If the suite)/g),
       [
         `an engine error in ${suite} > test_runs: a real engine error`,
-        `an engine error in ${suite} > after: ${SCRIPT_ERROR}`,
+        `an engine error in ${suite} > after: ${SCRIPT_ERROR.slice(0, -1)}`,
       ],
       ran.said,
     );
@@ -133268,8 +133268,8 @@ async function testARealScriptErrorBesideASkipReasonsScriptErrorLineIsCountedOnc
             get(answer, 'engineErrors'),
             entries.map((entry) => get(entry, 'text')),
             uncaught.map((entry) => get(entry, 'text')),
-            /^one script error that failed no case; one engine error no suite declared; one case skipped/.test(
-              String(get(answer, 'verdict')),
+            String(get(answer, 'verdict')).startsWith(
+              'one script error that failed no case; one engine error no suite declared; one case skipped',
             ),
             uncaught.every((one) => entries.some((entry) => get(entry, 'index') === get(one, 'index'))),
           ],
