@@ -1427,23 +1427,39 @@ async function ranEngines(
 }
 
 /**
- * [param ran] as it stands, or once an engine ran out of memory and another failed, with every
- * failed engine run again by [param runAgain], one after another in the order they ran.
+ * Whether the engine began a case: a suite it printed has one, or the case it stopped in is not the
+ * first hook. An engine that ran out of memory before this has no verdict on any case.
+ */
+export function startedACase(printed: Pick<RunPrinted, 'suites' | 'running'>): boolean {
+  const during = printed.running?.during ?? null;
+  return (
+    [...printed.suites.values()].some((suite) => suite.cases.length > 0) ||
+    (during !== null && during !== 'before')
+  );
+}
+
+/**
+ * [param ran] as it stands, or once an engine ran out of memory and failed before it began a case,
+ * with each such engine run again by [param runAgain], one after another in the order they ran. Every
+ * other engine keeps its first verdict, so a case that failed beside the engine that starved stays failed.
  */
 export async function rerunAfterStarving<
   T extends Pick<EngineRan, 'index' | 'peakBytes'> & {
+    readonly printed: Pick<RunPrinted, 'suites' | 'running'>;
     readonly verdict: Pick<EngineVerdict, 'passed' | 'starved'>;
   },
 >(ran: readonly T[], say: (line: string) => void, runAgain: (engine: T) => Promise<T>): Promise<T[]> {
   if (!ran.some((engine) => engine.verdict.starved) || ran.every((engine) => engine.verdict.passed)) {
     return [...ran];
   }
-  say(outOfMemorySaid(ran));
-  const again: T[] = [];
+  const again = (engine: T): boolean =>
+    !engine.verdict.passed && engine.verdict.starved && !startedACase(engine.printed);
+  say(outOfMemorySaid(ran, ran.some(again)));
+  const result: T[] = [];
   for (const engine of ran) {
-    again.push(engine.verdict.passed ? engine : await runAgain(engine));
+    result.push(again(engine) ? await runAgain(engine) : engine);
   }
-  return again;
+  return result;
 }
 
 /** Writes the times the engines measured, saying so where they could not be written. */
@@ -1494,17 +1510,24 @@ export function memorySaid(room: number, lanes: number, held: string): string {
 }
 
 /**
- * What a run says when an engine ran out of memory: the failed engines run again, and each
- * engine's most held in this run, or that it was not read, shows what else held the machine.
+ * What a run says when an engine ran out of memory: whether the engines that ran out before their
+ * first case run again ([param runsAgain]) or every failure stands, and each engine's most held in
+ * this run, or that it was not read, which shows what else held the machine.
  */
-export function outOfMemorySaid(engines: readonly Pick<EngineRan, 'index' | 'peakBytes'>[]): string {
+export function outOfMemorySaid(
+  engines: readonly Pick<EngineRan, 'index' | 'peakBytes'>[],
+  runsAgain: boolean,
+): string {
   const held = engines
     .map(
       (engine) =>
         `engine ${String(engine.index)} ${engine.peakBytes === undefined ? 'unread' : gigabytes(engine.peakBytes)}`,
     )
     .join(', ');
-  return `An engine ran out of memory, so every engine that failed runs again, one at a time. The most each held in this run: ${held}.`;
+  const outcome = runsAgain
+    ? 'so each engine that ran out before its first case runs again, one at a time, and every other failure stands'
+    : 'and every engine that failed keeps its verdict, since each one that ran out had begun a case';
+  return `An engine ran out of memory, ${outcome}. The most each held in this run: ${held}.`;
 }
 
 /** How often a share held back for memory reads it again. */

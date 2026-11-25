@@ -795,6 +795,7 @@ import {
   judgeEngine,
   type LogRead,
   type RowShare,
+  type RunPrinted,
   readEngineLog,
   readExpected,
   readRun,
@@ -855,6 +856,7 @@ import {
   type RunResult,
   reachedAlsoSaid,
   reportsFault,
+  rerunAfterStarving,
   roomSaid,
   runShares,
   type ShareReuse,
@@ -862,6 +864,7 @@ import {
   silenceWhile,
   slowCasesOf,
   slowTimeSaid,
+  startedACase,
   startsSaid,
   suiteImport,
   takenLanes,
@@ -75009,10 +75012,10 @@ function testACrashInAReusedEngineFailsOnlyItsShareAndTheLaneGoesOn(): void {
 }
 
 /**
- * A share that ran out of memory in an engine that took several runs again alone, and each share has
- * the figure for what the engine held while it ran.
+ * A share that ran out of memory after it began a case, in an engine that took several, keeps its
+ * verdict and runs no more, and each share has the figure for what the engine held while it ran.
  */
-function testAnOutOfMemoryShareInAReusedEngineRunsAgainAlone(): void {
+function testAnOutOfMemoryShareThatBeganACaseInAReusedEngineIsNotRunAgain(): void {
   const engines = commandTestEngines();
   if (engines === null) {
     return;
@@ -75035,8 +75038,8 @@ function testAnOutOfMemoryShareInAReusedEngineRunsAgainAlone(): void {
     const logs = run.result.logs ?? '';
     assert.deepEqual(
       ['engine-0-again', 'engine-1-again', 'engine-2-again'].map((name) => existsSync(join(logs, name))),
-      [false, true, false],
-      `only the share that ran out of memory ran again: ${logs}`,
+      [false, false, false],
+      `no share ran again, since the one that ran out had begun a case: ${logs}`,
     );
   } finally {
     run.cleanup();
@@ -89399,22 +89402,125 @@ function checksPeaksReadBackFromTheTimes(gib: number, peaks: SuiteTimes): void {
 /** The out-of-memory line names every engine of the run in index order, with its figure or unread. */
 function testARunOutOfMemoryNamesEveryEngine(): void {
   const gib = 1024 ** 3;
-  const first = 'An engine ran out of memory, so every engine that failed runs again, one at a time.';
+  const again =
+    'An engine ran out of memory, so each engine that ran out before its first case runs again, one at a time, and every other failure stands.';
   assert.equal(
-    outOfMemorySaid([{ index: 0, peakBytes: 3.3 * gib }, { index: 1 }]),
-    `${first} The most each held in this run: engine 0 3.3 GB, engine 1 unread.`,
+    outOfMemorySaid([{ index: 0, peakBytes: 3.3 * gib }, { index: 1 }], true),
+    `${again} The most each held in this run: engine 0 3.3 GB, engine 1 unread.`,
   );
   assert.equal(
-    outOfMemorySaid([
-      { index: 0, peakBytes: 0.4 * gib },
-      { index: 1, peakBytes: 3.3 * gib },
-    ]),
-    `${first} The most each held in this run: engine 0 0.4 GB, engine 1 3.3 GB.`,
+    outOfMemorySaid(
+      [
+        { index: 0, peakBytes: 0.4 * gib },
+        { index: 1, peakBytes: 3.3 * gib },
+      ],
+      true,
+    ),
+    `${again} The most each held in this run: engine 0 0.4 GB, engine 1 3.3 GB.`,
   );
   assert.equal(
-    outOfMemorySaid([{ index: 0 }, { index: 1, peakBytes: 3.3 * gib }]),
-    `${first} The most each held in this run: engine 0 unread, engine 1 3.3 GB.`,
+    outOfMemorySaid([{ index: 0 }, { index: 1, peakBytes: 3.3 * gib }], false),
+    'An engine ran out of memory, and every engine that failed keeps its verdict, since each one that ran out had begun a case. The most each held in this run: engine 0 unread, engine 1 3.3 GB.',
   );
+}
+
+type StarvingEngine = {
+  readonly index: number;
+  readonly peakBytes: number;
+  readonly printed: Pick<RunPrinted, 'suites' | 'running'>;
+  readonly verdict: { readonly passed: boolean; readonly starved: boolean };
+};
+
+/** An engine as the rerun reads it: how it ended, and what it had printed of its cases. */
+function starvingEngine(
+  index: number,
+  how: 'passed' | 'failed' | 'starved',
+  printed: 'nothing' | 'before' | 'case' | 'ran a case',
+): StarvingEngine {
+  const cases =
+    printed === 'ran a case'
+      ? [{ name: 'test_it', func: 'test_it', row: null, verdict: 'PASSED', seconds: 1, at: 3 }]
+      : [];
+  const open = { path: 'res://a_test.gd', cases, closed: null, setUp: null };
+  const suites: RunPrinted['suites'] = new Map(printed === 'nothing' ? [] : [[open.path, open]]);
+  const during = printed === 'before' ? 'before' : printed === 'case' ? 'test_it' : null;
+  return {
+    index,
+    peakBytes: 1,
+    printed: { suites, running: printed === 'nothing' ? null : { suite: open.path, during } },
+    verdict: { passed: how === 'passed', starved: how === 'starved' },
+  };
+}
+
+/** Runs [param ran] through the rerun, each engine run again passing, and names the ones run again. */
+async function rerunsOf(ran: readonly StarvingEngine[]): Promise<{
+  again: number[];
+  said: string[];
+  result: StarvingEngine[];
+}> {
+  const again: number[] = [];
+  const said: string[] = [];
+  const result = await rerunAfterStarving(
+    ran,
+    (line) => said.push(line),
+    (engine) => {
+      again.push(engine.index);
+      return Promise.resolve({ ...engine, verdict: { passed: true, starved: false } });
+    },
+  );
+  return { again, said, result };
+}
+
+/** A starved engine that never began a case runs again, and a real failure beside it keeps its verdict. */
+async function testOnlyAnEngineThatStarvedBeforeAnyCaseRunsAgain(): Promise<void> {
+  const ran = [
+    starvingEngine(0, 'failed', 'ran a case'),
+    starvingEngine(1, 'starved', 'before'),
+    starvingEngine(2, 'passed', 'ran a case'),
+  ];
+  const { again, said, result } = await rerunsOf(ran);
+  assert.deepEqual(again, [1]);
+  assert.deepEqual(
+    result.map((engine) => engine.verdict.passed),
+    [false, true, true],
+    'the real failure stays failed',
+  );
+  assert.equal(result[0], ran[0]);
+  assert.equal(result[2], ran[2]);
+  assert.equal(said.length, 1);
+  assert.match(said[0] ?? '', /so each engine that ran out before its first case runs again/);
+}
+
+/** An engine that starved after it began a case keeps its verdict and is not run again. */
+async function testAnEngineThatStarvedAfterACaseBeganIsNotRunAgain(): Promise<void> {
+  for (const printed of ['case', 'ran a case'] as const) {
+    const ran = [starvingEngine(0, 'starved', printed), starvingEngine(1, 'failed', 'ran a case')];
+    const { again, said, result } = await rerunsOf(ran);
+    assert.deepEqual(again, [], printed);
+    assert.deepEqual([...result], ran, printed);
+    assert.equal(said.length, 1, printed);
+    assert.match(said[0] ?? '', /keeps its verdict/, printed);
+  }
+}
+
+/** Every starved engine that never began a case runs again alone, in order, as before. */
+async function testEveryEngineThatStarvedBeforeAnyCaseRunsAgainAlone(): Promise<void> {
+  const ran = [
+    starvingEngine(0, 'starved', 'nothing'),
+    starvingEngine(1, 'passed', 'ran a case'),
+    starvingEngine(2, 'starved', 'before'),
+  ];
+  const { again, result } = await rerunsOf(ran);
+  assert.deepEqual(again, [0, 2]);
+  assert.ok(result.every((engine) => engine.verdict.passed));
+}
+
+/** An engine began a case when a suite has one, or it stopped in a case rather than a first hook. */
+function testAnEngineBeganACaseWhenItPrintedOneOrStoppedInOne(): void {
+  assert.equal(startedACase(starvingEngine(0, 'starved', 'nothing').printed), false);
+  assert.equal(startedACase(starvingEngine(0, 'starved', 'before').printed), false);
+  assert.equal(startedACase(starvingEngine(0, 'starved', 'case').printed), true);
+  assert.equal(startedACase(starvingEngine(0, 'starved', 'ran a case').printed), true);
 }
 
 /** Suites of one 40 s case each, which a share holds whole, each seen to hold [param peakGiB]. */
@@ -133757,7 +133863,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDocsHeadingsHaveTheIdsMarkdownlintComputes,
   testTheCompileTimeOfAReusedShareIsReadFromTheRunnersLine,
   testACrashInAReusedEngineFailsOnlyItsShareAndTheLaneGoesOn,
-  testAnOutOfMemoryShareInAReusedEngineRunsAgainAlone,
+  testAnOutOfMemoryShareThatBeganACaseInAReusedEngineIsNotRunAgain,
   testAHungShareInAReusedEngineIsEndedByTheDeadlineOfItsOwn,
   testARunNotDealtInSharesStartsEveryEngineForItsOwnPart,
   testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited,
@@ -134109,6 +134215,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineIsReadForWhatItHolds,
   testAnEngineIsSizedByWhatItWasSeenToHold,
   testARunOutOfMemoryNamesEveryEngine,
+  testOnlyAnEngineThatStarvedBeforeAnyCaseRunsAgain,
+  testAnEngineThatStarvedAfterACaseBeganIsNotRunAgain,
+  testEveryEngineThatStarvedBeforeAnyCaseRunsAgainAlone,
+  testAnEngineBeganACaseWhenItPrintedOneOrStoppedInOne,
   testARunAddsALaneAsItsLanesRise,
   testAPacedRunsCompileCheckIsOneOfItsLanes,
   testAGatesRunFollowsItsLanesFile,

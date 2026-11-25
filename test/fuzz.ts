@@ -85,6 +85,7 @@ import { discardUsing } from '../src/scratch.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { ADDONS, installAddons, installedEditorDigest, installedRuntimeDigest } from '../src/setup.js';
 import { spawnHidden } from '../src/spawn.js';
+import type { RunPrinted } from '../src/suite-judge.js';
 import {
   type CasesBySuite,
   type DeclaredSuite,
@@ -101,6 +102,7 @@ import {
   type RunOrder,
   rerunAfterStarving,
   runShares,
+  startedACase,
 } from '../src/suite-run.js';
 import { inTurnFor, tryTake } from '../src/write-turns.js';
 import { greeting } from './support/greeting.js';
@@ -2542,18 +2544,20 @@ function suitesFollowTheOrder(order: RunOrder, suites: readonly string[], select
 interface FinishedEngine {
   readonly index: number;
   readonly peakBytes?: number;
+  readonly printed: Pick<RunPrinted, 'suites' | 'running'>;
   readonly verdict: { readonly passed: boolean; readonly starved: boolean };
   readonly again?: boolean;
 }
 
 /**
- * Failed engines run again only once one of them ran out of memory, one at a time, in the order they
- * ran. Engines that passed are never run again and stay where they were.
+ * Only an engine that failed, ran out of memory and began no case runs again, one at a time, in the
+ * order they ran. Every other engine keeps its first verdict and stays where it was.
  */
 async function failedEnginesRunAgainOneAtATime(): Promise<void> {
   const engine = fc.record({
     passed: fc.boolean(),
     starved: fc.boolean(),
+    started: fc.boolean(),
     delay: fc.nat({ max: 3 }),
     againPasses: fc.boolean(),
   });
@@ -2561,6 +2565,10 @@ async function failedEnginesRunAgainOneAtATime(): Promise<void> {
     fc.asyncProperty(fc.array(engine, { maxLength: 8 }), async (drawn) => {
       const ran: FinishedEngine[] = drawn.map((one, index) => ({
         index,
+        printed: {
+          suites: new Map(),
+          running: one.started ? { suite: 'res://a_test.gd', during: 'test_it' } : null,
+        },
         verdict: { passed: one.passed, starved: one.starved },
       }));
       let going = 0;
@@ -2580,21 +2588,29 @@ async function failedEnginesRunAgainOneAtATime(): Promise<void> {
           going -= 1;
           return {
             index: engineRan.index,
+            printed: engineRan.printed,
             verdict: { passed: one?.againPasses === true, starved: false },
             again: true,
           };
         },
       );
-      const failed = ran.filter((one) => !one.verdict.passed).map((one) => one.index);
-      const rerun = ran.some((one) => one.verdict.starved) && failed.length > 0;
-      assert.deepEqual(calls, rerun ? failed : [], 'every failed engine runs again once, in index order');
-      assert.equal(said.length, rerun ? 1 : 0);
+      const failed = ran.filter((one) => !one.verdict.passed);
+      const told = ran.some((one) => one.verdict.starved) && failed.length > 0;
+      const again = failed
+        .filter((one) => one.verdict.starved && !startedACase(one.printed))
+        .map((one) => one.index);
+      assert.deepEqual(
+        calls,
+        again,
+        'each failed engine that starved before a case runs again once, in index order',
+      );
+      assert.equal(said.length, told ? 1 : 0);
       assert.equal(result.length, ran.length);
       for (const [at, one] of ran.entries()) {
         const now = result[at];
         assert.equal(now?.index, one.index);
-        if (!rerun || one.verdict.passed) {
-          assert.equal(now, one, 'an engine that passed stays as it was');
+        if (!calls.includes(one.index)) {
+          assert.equal(now, one, 'an engine not run again stays as it was');
         }
       }
     }),
