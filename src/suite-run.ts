@@ -1558,6 +1558,10 @@ export class MemoryGate {
   private readonly turn = new Turns();
   /** Whether the run's first engine is yet to start, which is the only one a reservation holds. */
   private firstPending: boolean;
+  /** Whether the caller whose turn it is has found no room and waits for some. */
+  private stalled = false;
+  /** What callers waiting for their turn were asked to do once the caller ahead of them stalls. */
+  private readonly queuedWaits = new Set<() => void>();
   /** When the first engine began waiting for a reservation, and whether the run has said so. */
   private readonly wait: { since?: number; said?: true } = {};
 
@@ -1596,13 +1600,40 @@ export class MemoryGate {
   /**
    * Waits until an engine needing [param need] has room, one caller at a time, and answers its
    * admission. [param need] is asked at each look, since the share a caller would draw changes as
-   * others draw theirs.
+   * others draw theirs. [param waiting] is called once, before the caller waits for room, which
+   * includes waiting behind a caller that is itself waiting for room, so a lane can give back the
+   * slot it holds while it waits. It is not called for a caller that finds room at once.
    */
-  admit(signal: AbortSignal, need: () => number): Promise<Admitted> {
-    return this.turn.run(() => this.room(signal, need));
+  admit(signal: AbortSignal, need: () => number, waiting?: () => void): Promise<Admitted> {
+    let wait: (() => void) | undefined;
+    if (waiting !== undefined) {
+      let told = false;
+      wait = () => {
+        if (!told) {
+          told = true;
+          waiting();
+        }
+      };
+      if (this.stalled) {
+        wait();
+      } else {
+        this.queuedWaits.add(wait);
+      }
+    }
+    return this.turn
+      .run(() => this.room(signal, need, wait))
+      .finally(() => {
+        if (wait !== undefined) {
+          this.queuedWaits.delete(wait);
+        }
+      });
   }
 
-  private async room(signal: AbortSignal, need: () => number): Promise<Admitted> {
+  private async room(
+    signal: AbortSignal,
+    need: () => number,
+    waiting: (() => void) | undefined,
+  ): Promise<Admitted> {
     let unmark: (() => void) | undefined;
     let needed = 0;
     try {
@@ -1620,9 +1651,15 @@ export class MemoryGate {
           break;
         }
         unmark ??= this.slots.markWaiting();
+        this.stalled = true;
+        waiting?.();
+        for (const queued of this.queuedWaits) {
+          queued();
+        }
         await delay(this.lookMs, undefined, { signal });
       }
     } finally {
+      this.stalled = false;
       unmark?.();
     }
     this.firstPending = false;
@@ -1864,6 +1901,11 @@ export class HandedSlot {
   /** Whether a lend handed its lock over, so the lane that lent it takes it back. */
   get lent(): boolean {
     return this.handedInALend;
+  }
+
+  /** Whether the next {@link lend} hands its lock to the check, which then holds the lane until it ends. */
+  get lends(): boolean {
+    return this.inALane && this.wanted;
   }
 
   /**
@@ -2334,48 +2376,100 @@ export async function runShares<
     return true;
   };
   /**
-   * Takes the lane's slot and lends it to a check that wants one, and answers the slot. Answers
-   * 'again' when the lanes file tells the lane to stop, which gives its slot back first, and 'over'
+   * Takes the lane's slot, once [param admitted] holds the memory its share needs, and answers the
+   * slot. A slot lent to a check that wants one ends the admission first, since the check asks the
+   * gate for memory too, and once the check has ended a new pass begins. Answers 'again' for that,
+   * and when the lanes file tells the lane to stop, which gives its slot back first, and 'over'
    * once every share is handed out.
    */
   const slotHeld = async (
     at: number,
     held: { lock: string | null },
+    admitted: Admitted | undefined,
   ): Promise<{ readonly lock: string } | 'again' | 'over'> => {
     if (await parkedPastTheLanesTold(at, held)) {
+      admitted?.ended();
       return empty() ? 'over' : 'again';
     }
     held.lock ??= await slots.take(handedOut.signal);
     const lock = held.lock;
-    await handed?.lend(lock);
+    if (handed?.lends === true) {
+      admitted?.ended();
+      await handed.lend(lock);
+      return 'again';
+    }
     return (await fallenPast(at)) ? 'again' : { lock };
   };
+  /** Gives the lane's slot back to the machine while it waits for memory. */
+  const slotGivenBack = (held: { lock: string | null }): void => {
+    if (held.lock !== null) {
+      slots.release(held.lock);
+      held.lock = null;
+    }
+  };
   /**
-   * Takes the lane's slot and waits for the memory its share needs, or answers null once the run is
-   * over. The lanes file is read again after the slot and the check, and after memory, since a wait
-   * can outlast a fall. A lane told fewer lanes goes back to waiting for the lanes to rise instead of
-   * waiting for memory or drawing a share.
+   * Waits for the memory the lane's share needs, holding no slot while it waits. A lane told fewer
+   * lanes parks instead, as {@link slotHeld} answers.
+   */
+  const memoryWaited = async (
+    at: number,
+    held: { lock: string | null },
+  ): Promise<{ readonly admitted: Admitted | undefined } | 'again' | 'over'> => {
+    if (await parkedPastTheLanesTold(at, held)) {
+      return empty() ? 'over' : 'again';
+    }
+    return {
+      admitted: await memory?.admit(handedOut.signal, needed, () => {
+        slotGivenBack(held);
+      }),
+    };
+  };
+  /**
+   * One pass of {@link waitedFor}: memory first, then the slot. Answers the slot and admission, or
+   * 'again' when the lanes file or a heavier share than admitted asks for another pass, and 'over'
+   * once every share is handed out.
+   */
+  const memoryThenSlot = async (
+    at: number,
+    held: { lock: string | null },
+  ): Promise<{ readonly lock: string; readonly admitted: Admitted | undefined } | 'again' | 'over'> => {
+    const room = await memoryWaited(at, held);
+    if (typeof room === 'string') {
+      return room;
+    }
+    const { admitted } = room;
+    const got = await slotHeld(at, held, admitted);
+    if (typeof got === 'string') {
+      return got;
+    }
+    // With no lanes file nothing is awaited here, so the share admitted for is the one drawn. With
+    // one, a share another lane draws meanwhile may leave a heavier one, which is admitted again.
+    const fallen = raised !== undefined && (await fallenPast(at));
+    if (!fallen && (admitted === undefined || needed() <= admitted.need)) {
+      return { lock: got.lock, admitted };
+    }
+    admitted?.ended();
+    return 'again';
+  };
+  /**
+   * Waits for the memory the lane's share needs, holding no slot while it waits, then takes the
+   * lane's slot, or answers null once the run is over. The slot's own take judges memory again. The
+   * lanes file is read again after memory, the slot and the check, since a wait can outlast a fall.
+   * A lane told fewer lanes goes back to waiting for the lanes to rise instead of waiting for memory
+   * or drawing a share.
    */
   const waitedFor = async (
     at: number,
     held: { lock: string | null },
   ): Promise<{ readonly lock: string; readonly admitted: Admitted | undefined } | null> => {
     for (;;) {
-      const got = await slotHeld(at, held);
+      const got = await memoryThenSlot(at, held);
       if (got === 'over') {
         return null;
       }
-      if (got === 'again') {
-        continue;
+      if (got !== 'again') {
+        return got;
       }
-      const admitted = await memory?.admit(handedOut.signal, needed);
-      // With no lanes file nothing is awaited here, so the share admitted for is the one drawn. With
-      // one, a share another lane draws meanwhile may leave a heavier one, which is admitted again.
-      const fallen = raised !== undefined && (await fallenPast(at));
-      if (!fallen && (admitted === undefined || needed() <= admitted.need)) {
-        return { lock: got.lock, admitted };
-      }
-      admitted?.ended();
     }
   };
   /**
