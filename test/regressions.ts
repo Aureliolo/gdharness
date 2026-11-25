@@ -76913,7 +76913,12 @@ function eightSlotsWithTheKeptOnesHeld(
   return directory;
 }
 
-/** Slots 0 and 1 held by the gates' engines, 2 to 5 free, the kept 6 and 7 held, and a clock the checks move. */
+/** A process that stands for a gate or an engine's holder: alive, with a start a lock can name. */
+interface Tenant {
+  pid: number;
+  started: number;
+}
+
 interface LendRig {
   directory: string;
   side: EngineSlots;
@@ -76922,22 +76927,69 @@ interface LendRig {
   start: number;
   /** Moves the clock to [param at] and writes a count of [param spare] as of then. */
   at: (at: number, spare?: number) => void;
-  /** Seats the gate [param name] at [param when], or leaves its mark waiting. */
-  seat: (name: string, when: number, seated?: boolean) => void;
+  /** Seats the gate [param name], run by [param who], at [param when], or leaves its mark waiting. */
+  seat: (name: string, when: number, seated?: boolean, who?: Tenant) => void;
+  /** Makes [param slot] held by [param who], as an engine of its gate. */
+  engine: (slot: number, who: Tenant) => void;
+  /** Frees [param slot] as its engine ends. */
+  end: (slot: number) => void;
+  /** This process, which holds the kept slots. */
+  self: Tenant;
+  /** Two other live processes, which stand for two gates. */
+  a: Tenant;
+  b: Tenant;
+  /** What the process table says: each pid's parent. Empty unless a check fills it. */
+  parents: Map<number, number>;
 }
 
-async function withALendRig(run: (rig: LendRig) => Promise<void>): Promise<void> {
+/**
+ * A directory of [param count] slots whose kept ones are held and the first [param held] are held
+ * by this process, two gate stand-ins, and a clock the checks move. The process table is the one
+ * [param parents] gives, or unreadable where [param table] is false.
+ */
+async function withALendRig(
+  run: (rig: LendRig) => Promise<void>,
+  {
+    count = 8,
+    held = [0, 1],
+    table = true,
+  }: { count?: number; held?: readonly number[]; table?: boolean } = {},
+): Promise<void> {
   const started = await ownStart();
-  const directory = eightSlotsWithTheKeptOnesHeld(started, false, [0, 1]);
+  const kept = Array.from({ length: Math.max(2, Math.floor(count / 4)) }, (_, one) => count - 1 - one);
+  const directory = slotsWithGatesQueued({}, [...kept, ...held], started);
+  const old = new Date(Date.now() - 3_600_000);
+  for (const slot of kept) {
+    utimesSync(join(directory, `${String(slot)}.lock`), old, old);
+  }
+  const standIns = [0, 1].map(() =>
+    spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' }),
+  );
+  const tenant = async (pid: number | undefined): Promise<Tenant> => {
+    const said = pid === undefined ? undefined : (await startTimesOf([pid])).get(pid);
+    assert.ok(pid !== undefined && said !== undefined, 'a stand-in gate is listed');
+    return { pid, started: said };
+  };
+  const parents = new Map<number, number>();
   const realNow = Date.now;
   let now = realNow() + 3_600_000;
-  const start = now;
-  const holder = { pid: process.pid, started };
+  const self = { pid: process.pid, started };
   const rig: LendRig = {
     directory,
-    start,
-    side: new EngineSlots(directory, 8, holder, undefined, () => 'other'),
-    gate: new EngineSlots(directory, 8, holder, undefined, () => 'gate'),
+    start: now,
+    self,
+    a: await tenant(standIns[0]?.pid),
+    b: await tenant(standIns[1]?.pid),
+    parents,
+    side: new EngineSlots(directory, count, self, undefined, () => 'other', undefined, {
+      processes: () =>
+        Promise.resolve(
+          table ? new Map([...parents].map(([pid, parent]) => [pid, { parent, command: '' }])) : undefined,
+        ),
+    }),
+    gate: new EngineSlots(directory, count, self, undefined, () => 'gate', undefined, {
+      processes: () => Promise.resolve(new Map()),
+    }),
     at: (at, spare = 0) => {
       now = at;
       writeFileSync(
@@ -76945,13 +76997,19 @@ async function withALendRig(run: (rig: LendRig) => Promise<void>): Promise<void>
         JSON.stringify({ spare, pid: process.pid, started, written: at }),
       );
     },
-    seat: (name, when, seated = true) => {
-      writeFileSync(join(directory, QUEUED_FOLDER, `${name}.json`), JSON.stringify(holder));
+    seat: (name, when, seated = true, who = self) => {
+      writeFileSync(join(directory, QUEUED_FOLDER, `${name}.json`), JSON.stringify(who));
       if (seated) {
         const file = join(directory, QUEUED_FOLDER, `${name}.json.seated`);
         writeFileSync(file, '');
         utimesSync(file, new Date(when), new Date(when));
       }
+    },
+    engine: (slot, who) => {
+      writeFileSync(join(directory, `${String(slot)}.lock`), JSON.stringify(who));
+    },
+    end: (slot) => {
+      rmSync(join(directory, `${String(slot)}.lock`));
     },
   };
   try {
@@ -76961,6 +77019,9 @@ async function withALendRig(run: (rig: LendRig) => Promise<void>): Promise<void>
     Date.now = realNow;
     rig.side.releaseAll();
     rig.gate.releaseAll();
+    for (const standIn of standIns) {
+      standIn.kill();
+    }
     rmSync(directory, { recursive: true, force: true });
   }
 }
@@ -76972,6 +77033,211 @@ async function takesWhatItCan(slots: EngineSlots): Promise<string[]> {
     taken.push(basename(lock));
   }
   return taken;
+}
+
+/** The lock names of slots [param from] to [param to] inclusive, the highest first. */
+function locksDown(to: number, from: number): string[] {
+  return Array.from({ length: to - from + 1 }, (_, one) => `${String(to - one)}.lock`);
+}
+
+/** Two gates seated, sixteen slots with twelve for the gates, so each gate is owed six. */
+const SIX_EACH = { count: 16, held: [] } as const;
+
+/**
+ * A gate seated 0.5 s ago is owed its share whatever slots the older gate's engines hold: with the
+ * older gate on slots 0 to 5 and 6 to 11 free, nothing is lent until the younger gate has been seated
+ * ten seconds. Then its free part is lent and the older gate, running its whole share, lends none.
+ */
+async function testAGateSeatedHalfASecondAgoIsOwedItsSlotsWhateverTheOlderGatesHold(): Promise<void> {
+  await withALendRig(async ({ start, at, seat, engine, side, a, b }) => {
+    for (const slot of [0, 1, 2, 3, 4, 5]) {
+      engine(slot, a);
+    }
+    seat('gate-a', start - 60_000, true, a);
+    at(start);
+    assert.equal(await side.takeFree(), null, 'the free slots begin to stand free');
+    at(start + GATE_LEND_MS - 500);
+    seat('gate-b', start + GATE_LEND_MS - 500, true, b);
+    at(start + GATE_LEND_MS);
+    assert.equal(await side.takeFree(), null, 'nothing is lent while the younger gate has been seated 0.5 s');
+    at(start + GATE_LEND_MS + GATE_LEND_MS - 501);
+    assert.equal(await side.takeFree(), null, 'nor until it has been seated ten seconds');
+    at(start + GATE_LEND_MS + GATE_LEND_MS - 500);
+    assert.deepEqual(await takesWhatItCan(side), locksDown(11, 6), 'then its six free slots are lent');
+  }, SIX_EACH);
+}
+
+/**
+ * A gate's part is counted the same whether its engines hold the lowest slots or the highest. The
+ * younger gate, seated 6 s in, runs six engines and the older gate is idle.
+ */
+async function testAGatesFreePartDoesNotDependOnTheSlotNumbersItsEnginesHold(): Promise<void> {
+  for (const mine of [
+    [0, 1, 2, 3, 4, 5],
+    [6, 7, 8, 9, 10, 11],
+    [0, 3, 6, 9, 10, 11],
+  ]) {
+    await withALendRig(async ({ start, at, seat, engine, side, a, b }) => {
+      for (const slot of mine) {
+        engine(slot, a);
+      }
+      seat('gate-b', start - 60_000, true, b);
+      at(start);
+      assert.equal(await side.takeFree(), null);
+      at(start + 6000);
+      seat('gate-a', start + 6000, true, a);
+      at(start + GATE_LEND_MS);
+      const others = Array.from({ length: 12 }, (_, slot) => slot).filter((slot) => !mine.includes(slot));
+      assert.deepEqual(
+        await takesWhatItCan(side),
+        others.toReversed().map((slot) => `${String(slot)}.lock`),
+        `the idle older gate's six slots are lent beside engines on ${mine.join(', ')}`,
+      );
+    }, SIX_EACH);
+  }
+}
+
+/** Two gates each running half their share each lend their free half once it has stood ten seconds. */
+async function testTwoGatesRunningHalfTheirShareEachLendTheirFreeHalfAfterTenSeconds(): Promise<void> {
+  await withALendRig(async ({ start, at, seat, engine, side, a, b }) => {
+    for (const slot of [0, 2, 4]) {
+      engine(slot, a);
+    }
+    for (const slot of [1, 3, 5]) {
+      engine(slot, b);
+    }
+    seat('gate-a', start - 60_000, true, a);
+    at(start);
+    assert.equal(await side.takeFree(), null, 'nothing is lent before the slots have stood free');
+    at(start + 6000);
+    seat('gate-b', start + 6000, true, b);
+    at(start + GATE_LEND_MS - 1);
+    assert.equal(await side.takeFree(), null, 'nor just before ten seconds');
+    at(start + GATE_LEND_MS);
+    assert.deepEqual(await takesWhatItCan(side), locksDown(11, 9), "the older gate's free half is lent");
+    at(start + 6000 + GATE_LEND_MS - 1);
+    assert.equal(await side.takeFree(), null, "the younger gate's half waits for its own ten seconds");
+    at(start + 6000 + GATE_LEND_MS);
+    assert.deepEqual(await takesWhatItCan(side), locksDown(8, 6), 'then its free half is lent');
+    at(start + 10 * GATE_LEND_MS);
+    assert.equal(await side.takeFree(), null, 'and no more');
+  }, SIX_EACH);
+}
+
+/**
+ * A gate whose engine ends is owed that slot, lent only after it has stood free ten seconds. The
+ * older gate runs three engines on slots 0 to 2 and the younger one, seated 6 s in, six on 6 to 11.
+ */
+async function testAnEngineThatEndsGrowsItsGatesFreePartButLendsTheSlotOnlyAfterTenSeconds(): Promise<void> {
+  await withALendRig(async ({ start, at, seat, engine, end, side, a, b }) => {
+    for (const slot of [0, 1, 2]) {
+      engine(slot, b);
+    }
+    for (const slot of [6, 7, 8, 9, 10, 11]) {
+      engine(slot, a);
+    }
+    seat('gate-b', start - 60_000, true, b);
+    at(start);
+    assert.equal(await side.takeFree(), null);
+    at(start + 6000);
+    seat('gate-a', start + 6000, true, a);
+    at(start + GATE_LEND_MS);
+    assert.deepEqual(
+      await takesWhatItCan(side),
+      locksDown(5, 3),
+      "the older gate's three free slots are lent",
+    );
+    at(start + 20_000);
+    end(11);
+    assert.equal(await side.takeFree(), null, 'the slot a gate engine frees is not lent at once');
+    at(start + 20_000 + GATE_LEND_MS - 1);
+    assert.equal(await side.takeFree(), null, 'nor just before ten seconds');
+    at(start + 20_000 + GATE_LEND_MS);
+    assert.deepEqual(
+      await takesWhatItCan(side),
+      ['11.lock'],
+      'then it is lent, its gate engine having left it',
+    );
+  }, SIX_EACH);
+}
+
+/** An engine whose lock holder runs below a gate's process counts to that gate. */
+async function testAnEngineBelowAGatesProcessCountsToThatGate(): Promise<void> {
+  await withALendRig(async ({ start, at, seat, engine, side, a, b, self, parents }) => {
+    parents.set(self.pid, a.pid);
+    for (const slot of [0, 1, 2, 3, 4, 5]) {
+      engine(slot, self);
+    }
+    seat('gate-a', start - 60_000, true, a);
+    at(start);
+    assert.equal(await side.takeFree(), null);
+    at(start + GATE_LEND_MS - 1000);
+    seat('gate-b', start + GATE_LEND_MS - 1000, true, b);
+    at(start + GATE_LEND_MS);
+    assert.equal(
+      await side.takeFree(),
+      null,
+      'the engines below the older gate use its share, and the other is young',
+    );
+    at(start + 2 * GATE_LEND_MS - 1000);
+    assert.deepEqual(await takesWhatItCan(side), locksDown(11, 6), 'the younger gate lends its free part');
+  }, SIX_EACH);
+}
+
+/** With no process table, no engine can be placed under a gate and none of its slots is lent. */
+async function testNothingIsLentWhereTheProcessTableCannotBeRead(): Promise<void> {
+  await withALendRig(
+    async ({ start, at, seat, engine, side, a, b }) => {
+      engine(0, a);
+      seat('gate-a', start - 60_000, true, a);
+      seat('gate-b', start - 60_000, true, b);
+      at(start);
+      assert.equal(await side.takeFree(), null);
+      at(start + 5 * GATE_LEND_MS);
+      assert.equal(await side.takeFree(), null);
+    },
+    { ...SIX_EACH, table: false },
+  );
+}
+
+/**
+ * Side work never holds more than the free slots, however large the gates' free parts, and a slot
+ * it holds is not taken back from it. The older gate runs nine engines, over its share of six, so
+ * three slots stand free while the younger gate is idle.
+ */
+async function testSideWorkNeverTakesMoreThanTheFreeSlotsOrAnEngineBack(): Promise<void> {
+  await withALendRig(async ({ start, at, seat, engine, side, gate, directory, a, b }) => {
+    const mine = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+    for (const slot of mine) {
+      engine(slot, a);
+    }
+    seat('gate-a', start - 60_000, true, a);
+    at(start);
+    assert.equal(await side.takeFree(), null);
+    at(start + 6000);
+    seat('gate-b', start + 6000, true, b);
+    at(start + GATE_LEND_MS);
+    assert.equal(await side.takeFree(), null, "the older gate's own share is all its engines hold");
+    at(start + 6000 + GATE_LEND_MS);
+    assert.deepEqual(
+      await takesWhatItCan(side),
+      locksDown(11, 9),
+      "the idle gate's part is six, three slots stand free",
+    );
+    at(start + 10 * GATE_LEND_MS);
+    assert.equal(await side.takeFree(), null, 'nothing more is lent');
+    assert.equal(await gate.takeFree(), null, 'and the gate finds no slot free');
+    assert.deepEqual(
+      Array.from({ length: 12 }, (_, slot) => existsSync(join(directory, `${String(slot)}.lock`))),
+      Array.from({ length: 12 }, () => true),
+      "no gate engine's lock is touched and what side work holds stays held",
+    );
+    assert.deepEqual(
+      mine.map((slot) => holderOf(readFileSync(join(directory, `${String(slot)}.lock`), 'utf8'))?.pid),
+      mine.map(() => a.pid),
+      'the older gate still holds its slots',
+    );
+  }, SIX_EACH);
 }
 
 /**
@@ -77036,25 +77302,25 @@ async function testAGateThatTakesItsSlotsInTimeLendsNothing(): Promise<void> {
   });
 }
 
-/** Each seated gate's owed slots are timed from its own seat. */
+/** Each seated gate's free part is lent from its own seat. */
 async function testTwoSeatedGatesHaveTheirOwedSlotsLentOnTheirOwnSeats(): Promise<void> {
-  await withALendRig(async ({ start, at, seat, side }) => {
+  await withALendRig(async ({ start, at, seat, side, b }) => {
     seat('gate-1', start - 60_000);
     at(start);
     assert.equal(await side.takeFree(), null, 'the slots begin to stand free');
     at(start + 6001);
-    seat('gate-2', start + 6000);
+    seat('gate-2', start + 6000, true, b);
     at(start + GATE_LEND_MS);
     assert.deepEqual(
       await takesWhatItCan(side),
-      ['5.lock', '4.lock', '3.lock'],
-      "only the older gate's three slots of six are lent",
+      ['5.lock'],
+      "only the older gate's free one of its three is lent",
     );
     at(start + 16_000);
     assert.deepEqual(
       await takesWhatItCan(side),
-      ['2.lock'],
-      "and the younger gate's free one ten seconds after",
+      ['4.lock', '3.lock', '2.lock'],
+      "and the younger gate's three ten seconds after its seat",
     );
   });
 }
@@ -132907,6 +133173,13 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGateThatTakesItsSlotsInTimeLendsNothing,
   testTwoSeatedGatesHaveTheirOwedSlotsLentOnTheirOwnSeats,
   testNothingIsLentOnAStaleCountOrToAGateNotYetSeated,
+  testAGateSeatedHalfASecondAgoIsOwedItsSlotsWhateverTheOlderGatesHold,
+  testAGatesFreePartDoesNotDependOnTheSlotNumbersItsEnginesHold,
+  testTwoGatesRunningHalfTheirShareEachLendTheirFreeHalfAfterTenSeconds,
+  testAnEngineThatEndsGrowsItsGatesFreePartButLendsTheSlotOnlyAfterTenSeconds,
+  testAnEngineBelowAGatesProcessCountsToThatGate,
+  testNothingIsLentWhereTheProcessTableCannotBeRead,
+  testSideWorkNeverTakesMoreThanTheFreeSlotsOrAnEngineBack,
   testACountFromBeforeASeatIsStaleForSideWork,
   testTwoSideTakesInARowGetOneSpareGateSlotBetweenThem,
   testTwoConcurrentSideTakesUnderOneSpareSlotNeverHoldTwoGateSlots,
