@@ -1421,6 +1421,11 @@ async function ranEngines(
   }
   if (ran.some((engine) => engine.verdict.starved)) {
     say(outOfMemorySaid(ran));
+    const again: EngineRan[] = [];
+    for (const engine of ran) {
+      again.push(engine.verdict.passed ? engine : await runEngine(launch, engine.plan, engine.index, times));
+    }
+    return again;
   }
   return ran;
 }
