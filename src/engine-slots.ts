@@ -212,17 +212,6 @@ function nonEmpty(value: string | undefined): string | undefined {
 export const START_TOLERANCE_MS = 2000;
 /** How long a lock may stay empty before its taker is taken to have died writing it. */
 export const UNWRITTEN_MS = 10_000;
-
-/** How long a take lets its lock's write settle before it counts the folder again, past the clock's tick. */
-const LOCK_SETTLE_MS = 50;
-
-/** A live lock's slot, when it was written, its holder's pid and the memory it holds. */
-interface LiveMemory {
-  readonly slot: number;
-  readonly at: number;
-  readonly pid: number;
-  readonly bytes: number;
-}
 /**
  * How long a wait at a full set of slots goes without looking when nothing in their folder changes:
  * the look that finds a holder gone without giving its slot back. Every slot given back changes the
@@ -1982,15 +1971,14 @@ export class EngineSlots {
    * lock without a figure of its own counts the flat figure for each slot it stands for. One that
    * names no holder yet counts nothing, as a lock past the count does, since neither takes a slot.
    */
-  private async liveMemory(): Promise<LiveMemory[]> {
-    const live: LiveMemory[] = [];
+  private async liveMemory(): Promise<{ slot: number; at: number; bytes: number }[]> {
+    const live: { slot: number; at: number; bytes: number }[] = [];
     for (const { slot, lock, content } of await this.heldLocks()) {
       const holder = content === null ? null : holderOf(content);
       if (holder !== null) {
         live.push({
           slot,
           at: this.writtenAt(lock) ?? 0,
-          pid: holder.pid,
           bytes: holder.memory ?? ENGINE_MEMORY_BYTES * (holder.wants ?? 1),
         });
       }
@@ -2063,38 +2051,25 @@ export class EngineSlots {
   }
 
   /**
-   * Whether the lock just taken at [param lock] is one too many: the live locks, ordered by when
-   * they were written, then by holder and slot, hold more than the budget up to and including this
-   * one, and it is not the first. Every taker orders the same locks the same way, so two takers
-   * that both counted room for one engine before either took it cannot both keep theirs. A look
-   * that finds the lock inside the budget is taken again once its write has settled, since a lock
-   * written after the first look, within the clock's tick of this one, can sort before it.
+   * Whether the lock just taken at [param lock] is one too many: the folder counted again holds more
+   * than the budget, with another lock live, and this one is the newest. Two takers that both counted
+   * room for one engine before either took it then cannot both keep theirs, since each names the
+   * same newest lock.
    */
   private async overTheBudget(lock: string, need: number, line: SlotLine | undefined): Promise<boolean> {
-    const slot = Number(/(\d+)\.lock$/.exec(lock)?.[1]);
-    for (let look = 0; look < 2; look += 1) {
-      if (look > 0) {
-        await delay(LOCK_SETTLE_MS);
-      }
-      const live = (await this.liveMemory()).toSorted(
-        (a, b) => a.at - b.at || a.pid - b.pid || a.slot - b.slot,
-      );
-      const place = live.findIndex((one) => one.slot === slot);
-      if (place < 1) {
-        continue;
-      }
-      const through = live.slice(0, place + 1).reduce((sum, one) => sum + one.bytes, 0);
-      if (through > this.memoryBudget) {
-        const held = live.reduce((sum, one) => sum + one.bytes, 0);
-        this.drawn = {
-          ...this.drawn,
-          short: { budget: this.memoryBudget, held: held - need, ahead: 0, need },
-        };
-        await this.waitsForMemory(line);
-        return true;
-      }
+    const live = await this.liveMemory();
+    const held = live.reduce((sum, one) => sum + one.bytes, 0);
+    if (live.length < 2 || held <= this.memoryBudget) {
+      return false;
     }
-    return false;
+    const slot = Number(/(\d+)\.lock$/.exec(lock)?.[1]);
+    const newest = live.toSorted((a, b) => b.at - a.at || b.slot - a.slot)[0];
+    if (newest?.slot !== slot) {
+      return false;
+    }
+    this.drawn = { ...this.drawn, short: { budget: this.memoryBudget, held: held - need, ahead: 0, need } };
+    await this.waitsForMemory(line);
+    return true;
   }
 
   /**
