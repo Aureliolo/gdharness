@@ -3,7 +3,8 @@
  * operation by writing `{}` to the answer file named last, and otherwise runs like a game: it
  * holds GDH_HOLD_MB of touched memory, reached GDH_GROW_MB every 150 ms from GDH_GROW_AFTER_MS on,
  * starts one child that holds GDH_CHILD_MB, and stays up for GDH_STAY_MS. With GDH_OPERATION_HOLD_MB set, an operation
- * holds that much the same way and answers only once it has stayed up. A test run (one given
+ * holds that much the same way and answers only once it has stayed up. A run that stays up to its
+ * end exits with GDH_EXIT_CODE. A test run (one given
  * `--suites-in`) appends its own pid and its parent's to the file GDH_PID_FILE names.
  */
 
@@ -56,7 +57,7 @@ setTimeout(
     if (operation) {
       writeFileSync(last, '{}');
     }
-    process.exit(0);
+    process.exit(operation ? 0 : Number(process.env['GDH_EXIT_CODE'] ?? 0));
   },
   Number(process.env['GDH_STAY_MS'] ?? 20_000),
 );

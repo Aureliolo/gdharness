@@ -130662,7 +130662,7 @@ async function withMemoryProjects(
   holds: Record<string, string>,
   projects: readonly { readonly ceiling: number; readonly windowed: boolean }[],
   body: (
-    run: (which: number) => Promise<unknown>,
+    run: (which: number, timeoutMs?: number) => Promise<unknown>,
     paths: readonly string[],
     runtime: string,
     pids: string,
@@ -130692,12 +130692,12 @@ async function withMemoryProjects(
   try {
     await server.initialize('regression-test');
     await body(
-      async (which) => {
+      async (which, timeoutMs = 60_000) => {
         const response = await server.request(
           'tools/call',
           {
             name: 'project_test',
-            arguments: { projectPath: paths[which], path: 'res://tests', timeoutMs: 60_000 },
+            arguments: { projectPath: paths[which], path: 'res://tests', timeoutMs },
           },
           ENGINE_CALL_TIMEOUT_MS,
         );
@@ -130918,6 +130918,78 @@ async function testAWindowedRunWhoseHelperDiedIsStillEndedForItsMemory(): Promis
         peak > 1000 * 1024 * 1024 && peak < 1700 * 1024 * 1024,
         `the engine's own peak: ${String(peak)}`,
       );
+    },
+  );
+}
+
+/**
+ * An engine on the hidden desktop that exits on its own keeps the code it exited with.
+ */
+async function testAWindowedEngineThatExitsOnItsOwnAnswersItsExitCode(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  for (const code of ['3', '0']) {
+    await withMemoryProjects(
+      { GDH_HOLD_MB: '50', GDH_STAY_MS: '2000', GDH_EXIT_CODE: code },
+      [{ ceiling: 4000, windowed: true }],
+      async (run) => {
+        const answer = await run(0);
+        assert.equal(get(answer, 'exitCode'), Number(code), JSON.stringify(answer));
+        assert.equal(get(answer, 'memoryEnded'), undefined, JSON.stringify(answer));
+      },
+    );
+  }
+}
+
+/**
+ * A windowed run ended by its timeout answers what a headless one ended by its timeout does.
+ */
+async function testAWindowedRunEndedByItsTimeoutAnswersAsAHeadlessOneDoes(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  await withMemoryProjects(
+    { GDH_HOLD_MB: '50', GDH_STAY_MS: '60000' },
+    [
+      { ceiling: 4000, windowed: true },
+      { ceiling: 4000, windowed: false },
+    ],
+    async (run) => {
+      const windowed = await run(0, 8000);
+      const headless = await run(1, 8000);
+      for (const answer of [windowed, headless]) {
+        assert.equal(get(answer, 'timedOut'), true, JSON.stringify(answer));
+      }
+      assert.equal(get(headless, 'exitCode'), null, JSON.stringify(headless));
+      assert.equal(get(windowed, 'exitCode'), get(headless, 'exitCode'), JSON.stringify(windowed));
+      assert.equal(get(windowed, 'exitSignal'), get(headless, 'exitSignal'), JSON.stringify(windowed));
+    },
+  );
+}
+
+/**
+ * A run ended for its memory has no exit code of its own, on the hidden desktop as headless. The
+ * helper's exit after it ends the engine is not the engine's.
+ */
+async function testAWindowedRunEndedForItsMemoryAnswersNoExitCodeAsAHeadlessOneDoes(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  await withMemoryProjects(
+    { GDH_HOLD_MB: '600', GDH_GROW_MB: '100', GDH_STAY_MS: '20000' },
+    [
+      { ceiling: 300, windowed: true },
+      { ceiling: 300, windowed: false },
+    ],
+    async (run) => {
+      const windowed = await run(0);
+      const headless = await run(1);
+      for (const answer of [windowed, headless]) {
+        assert.match(String(get(answer, 'verdict')), MEMORY_END_SAID_ABOVE_300, JSON.stringify(answer));
+        assert.equal(get(answer, 'exitCode'), null, JSON.stringify(answer));
+      }
+      assert.equal(get(windowed, 'exitSignal'), get(headless, 'exitSignal'), JSON.stringify(windowed));
     },
   );
 }
@@ -136736,6 +136808,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheGuardOfAWindowedRunWatchesItsEngineNotTheHelper,
   testTheGuardOfARunWithoutTheWindowsHelperWatchesTheEngineItself,
   testAWindowedRunWhoseHelperDiedIsStillEndedForItsMemory,
+  testAWindowedRunEndedForItsMemoryAnswersNoExitCodeAsAHeadlessOneDoes,
+  testAWindowedEngineThatExitsOnItsOwnAnswersItsExitCode,
+  testAWindowedRunEndedByItsTimeoutAnswersAsAHeadlessOneDoes,
   testTwoWindowedRunsAtOnceEachKeepTheirOwnPeak,
   testAKeptPeakIsReplacedByTheNextWindowedRunsOwn,
   testTheCeilingVariableSetsIt,
