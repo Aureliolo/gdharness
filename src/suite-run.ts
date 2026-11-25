@@ -1346,7 +1346,7 @@ export async function takenLanes<P extends { readonly lane: number }>(
   );
   // A slot for each lane, taken only where one is free now: what the run was dealt holds only when
   // every lane starts at once. Held by memory, only the lanes memory has room for take one now.
-  // The rest take theirs in the slots' queue, then wait for memory holding them.
+  // The rest take theirs in the slots' queue, and give a slot back while they wait for memory.
   const startable = memoryHeld ? Math.min(byMemory.engines, lanes.length) : lanes.length;
   const granted =
     slotCommandOf() !== undefined && !run.ordered && lanes.length > 1
@@ -2304,8 +2304,8 @@ async function runLane(
  * when the run is held by memory. A lane still
  * waiting once every share is handed out stops waiting: a slot somebody else holds is not to keep a
  * run open that has nothing left to give it. A lane takes its slot, lends it to a compile check that
- * wants one, and only then waits for memory, so an engine memory admits never waits for a slot or a
- * check. With [param raised] it starts one lane more for each
+ * wants one, and then asks for memory. Short of memory, it gives the slot back while it waits, takes
+ * one again once there is room, and memory is judged again before its engine starts. With [param raised] it starts one lane more for each
  * the run is raised to, up to its ceiling, asking again until every share is handed out. A lane the
  * lanes file tells to stop reads the file again after each of its waits and before it draws, and gives
  * its slot back to the machine.
