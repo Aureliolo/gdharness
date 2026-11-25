@@ -1346,7 +1346,7 @@ export async function takenLanes<P extends { readonly lane: number }>(
   );
   // A slot for each lane, taken only where one is free now: what the run was dealt holds only when
   // every lane starts at once. Held by memory, only the lanes memory has room for take one now.
-  // The rest take theirs in the slots' queue, then wait for memory holding them.
+  // The rest take theirs in the slots' queue, and give a slot back while they wait for memory.
   const startable = memoryHeld ? Math.min(byMemory.engines, lanes.length) : lanes.length;
   const granted =
     slotCommandOf() !== undefined && !run.ordered && lanes.length > 1
@@ -1558,6 +1558,10 @@ export class MemoryGate {
   private readonly turn = new Turns();
   /** Whether the run's first engine is yet to start, which is the only one a reservation holds. */
   private firstPending: boolean;
+  /** Whether the caller whose turn it is has found no room and waits for some. */
+  private stalled = false;
+  /** What callers waiting for their turn were asked to do once the caller ahead of them stalls. */
+  private readonly queuedWaits = new Set<() => void>();
   /** When the first engine began waiting for a reservation, and whether the run has said so. */
   private readonly wait: { since?: number; said?: true } = {};
 
@@ -1596,13 +1600,45 @@ export class MemoryGate {
   /**
    * Waits until an engine needing [param need] has room, one caller at a time, and answers its
    * admission. [param need] is asked at each look, since the share a caller would draw changes as
-   * others draw theirs.
+   * others draw theirs. [param waiting] is called once, before the caller waits for room, which
+   * includes waiting behind a caller that is itself waiting for room, so a lane can give back the
+   * slot it holds while it waits. A caller told so is not admitted: once there is room it is
+   * answered null, so it takes a slot again and asks again holding it.
    */
-  admit(signal: AbortSignal, need: () => number): Promise<Admitted> {
-    return this.turn.run(() => this.room(signal, need));
+  admit(signal: AbortSignal, need: () => number): Promise<Admitted>;
+  admit(signal: AbortSignal, need: () => number, waiting: () => void): Promise<Admitted | null>;
+  admit(signal: AbortSignal, need: () => number, waiting?: () => void): Promise<Admitted | null> {
+    const told = { done: false };
+    const wait =
+      waiting === undefined
+        ? undefined
+        : (): void => {
+            if (!told.done) {
+              told.done = true;
+              waiting();
+            }
+          };
+    if (wait !== undefined) {
+      if (this.stalled) {
+        wait();
+      } else {
+        this.queuedWaits.add(wait);
+      }
+    }
+    return this.turn
+      .run(() => this.room(signal, need, told))
+      .finally(() => {
+        if (wait !== undefined) {
+          this.queuedWaits.delete(wait);
+        }
+      });
   }
 
-  private async room(signal: AbortSignal, need: () => number): Promise<Admitted> {
+  private async room(
+    signal: AbortSignal,
+    need: () => number,
+    told: { readonly done: boolean },
+  ): Promise<Admitted | null> {
     let unmark: (() => void) | undefined;
     let needed = 0;
     try {
@@ -1620,10 +1656,18 @@ export class MemoryGate {
           break;
         }
         unmark ??= this.slots.markWaiting();
+        this.stalled = true;
+        for (const queued of this.queuedWaits) {
+          queued();
+        }
         await delay(this.lookMs, undefined, { signal });
       }
     } finally {
+      this.stalled = false;
       unmark?.();
+    }
+    if (told.done) {
+      return null;
     }
     this.firstPending = false;
     const engine: Admitted = {
@@ -2260,8 +2304,8 @@ async function runLane(
  * when the run is held by memory. A lane still
  * waiting once every share is handed out stops waiting: a slot somebody else holds is not to keep a
  * run open that has nothing left to give it. A lane takes its slot, lends it to a compile check that
- * wants one, and only then waits for memory, so an engine memory admits never waits for a slot or a
- * check. With [param raised] it starts one lane more for each
+ * wants one, and then asks for memory. Short of memory, it gives the slot back while it waits, takes
+ * one again once there is room, and memory is judged again before its engine starts. With [param raised] it starts one lane more for each
  * the run is raised to, up to its ceiling, asking again until every share is handed out. A lane the
  * lanes file tells to stop reads the file again after each of its waits and before it draws, and gives
  * its slot back to the machine.
@@ -2350,10 +2394,44 @@ export async function runShares<
     await handed?.lend(lock);
     return (await fallenPast(at)) ? 'again' : { lock };
   };
+  /** Gives the lane's slot back to the machine while it waits for memory. */
+  const slotGivenBack = (held: { lock: string | null }): void => {
+    if (held.lock !== null) {
+      slots.release(held.lock);
+      held.lock = null;
+    }
+  };
   /**
-   * Takes the lane's slot and waits for the memory its share needs, or answers null once the run is
-   * over. The lanes file is read again after the slot and the check, and after memory, since a wait
-   * can outlast a fall. A lane told fewer lanes goes back to waiting for the lanes to rise instead of
+   * Judges the memory the lane's share needs while it holds its slot, and answers the admission.
+   * Answers 'again' when the lane waited for memory, which gives its slot back meanwhile and admits
+   * nothing, when the lanes file fell past the lane, or when a heavier share is left than the one
+   * admitted for, which is admitted again.
+   */
+  const memoryHeld = async (
+    at: number,
+    held: { lock: string | null },
+  ): Promise<{ readonly admitted: Admitted | undefined } | 'again'> => {
+    const admitted = await memory?.admit(handedOut.signal, needed, () => {
+      slotGivenBack(held);
+    });
+    if (admitted === null) {
+      return 'again';
+    }
+    // With no lanes file nothing is awaited here, so the share admitted for is the one drawn. With
+    // one, a share another lane draws meanwhile may leave a heavier one.
+    const fallen = raised !== undefined && (await fallenPast(at));
+    if (!fallen && (admitted === undefined || needed() <= admitted.need)) {
+      return { admitted };
+    }
+    admitted?.ended();
+    return 'again';
+  };
+  /**
+   * Takes the lane's slot and the memory its share needs, or answers null once the run is over. A
+   * lane short of memory gives its slot back while it waits, then takes a slot again and asks memory
+   * again, so it never holds a slot while it waits for memory nor memory while it waits for a slot.
+   * The lanes file is read again after the slot and the check, and after memory, since a wait can
+   * outlast a fall. A lane told fewer lanes goes back to waiting for the lanes to rise instead of
    * waiting for memory or drawing a share.
    */
   const waitedFor = async (
@@ -2368,14 +2446,10 @@ export async function runShares<
       if (got === 'again') {
         continue;
       }
-      const admitted = await memory?.admit(handedOut.signal, needed);
-      // With no lanes file nothing is awaited here, so the share admitted for is the one drawn. With
-      // one, a share another lane draws meanwhile may leave a heavier one, which is admitted again.
-      const fallen = raised !== undefined && (await fallenPast(at));
-      if (!fallen && (admitted === undefined || needed() <= admitted.need)) {
-        return { lock: got.lock, admitted };
+      const room = await memoryHeld(at, held);
+      if (room !== 'again') {
+        return { lock: got.lock, admitted: room.admitted };
       }
-      admitted?.ended();
     }
   };
   /**

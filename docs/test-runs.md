@@ -357,7 +357,8 @@ most its share's suites were seen to hold. Each engine going counts at what its 
 hold, less what it holds now. The run's first engine always starts.
 
 A share waiting for memory keeps a mark in the slots' `waiting` folder, as a wait for a slot does.
-It takes its slot first and keeps it while it waits, so an engine memory admits never waits for a slot.
+It takes its slot first and gives it back while it waits. Once memory has room it takes a slot
+again, and memory is judged again before its engine starts.
 
 ### The memory ceiling and the kept peak
 
@@ -932,7 +933,8 @@ the wait.
 - A wait for memory rather than a slot names `taker` `memory`. gdharness keeps its place in line
   with such a mark when a slot is free and the budget below leaves no room for the engine. It adds
   `kind`, the taker it would be in line, and `memory`, the bytes its engine will hold. A `memory`
-  mark that names no `since` is a run waiting for memory while it holds its slot, and takes no place.
+  mark that names no `since` is a run waiting for memory, and takes no place. A share gives its slot
+  back while it waits. A run's compile check keeps its slot.
 
 ### Step 5: take in order
 
