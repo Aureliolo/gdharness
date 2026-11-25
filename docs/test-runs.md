@@ -1107,6 +1107,23 @@ name the slots from that one read. By the state of the queue:
 - A gate mark is live and the file is not fresh, seated gate or not: take none of the gates' slots.
   Its ticker writes a fresh file within five seconds.
 
+Each seated gate owns an even share of the gates' slots. Its free part is that share less the
+engines it runs, found as the machine's queue finds them: the engines whose slot holder is the gate's
+process or runs below it. A gate is quiet once ten seconds have passed since the later of its seat
+and the newest lock of any gate's engine. Every gate engine, of any gate, counts against the quiet
+gates' free parts. Side work may take gate slots up to the sum of those parts, less the gate slots
+it holds already, where that is more than the count gives.
+
+Every give-back of slot n first writes `freed/n` in the slots folder, `{"freed": <ms since the
+epoch>}`, through a staged file renamed over it, and a take of the slot removes it. A lock found
+stale and removed is marked the same way. A slot is lent only once its mark is ten seconds old. A
+slot with no mark counts as freed at the first seat, one whose mark cannot be read counts as freed
+now, and one whose lock still stands, its holder gone, is never lent. Where the mark cannot be
+written the lock goes all the same, so the slot reads as one with no mark. Every process reads all
+this from the slot folder alone, so all takers get one answer. A lent slot a side engine holds is
+never taken back: the gate waits for the next free one. A stale count, a held quiet window, a gate
+not yet seated and an unreadable process table lend nothing.
+
 After taking a gate slot, count again from the folder. When side work holds more gate slots written
 since the count than it allows, the newest of them gives its slot back and waits, so two takers that
 read one spare slot do not both keep a slot. A game never takes a spare slot, since it holds one as

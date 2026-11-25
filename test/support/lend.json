@@ -1,0 +1,283 @@
+{
+  "about": "Lending of gate slots to side work, shared with the machine's queue, which reads the same tables. Times are milliseconds since the epoch. A slot's give-back writes freed/<n> in the slots folder holding {\"freed\": <ms>}, and a take removes it. A free slot with no mark counts as freed at the first seat. One whose lock still stands, its holder gone, is never lent. Each seated gate owns gated / seats of the gate slots. The gates quiet lend_after_ms, timed from the later of their seat and newest_engine, lend their parts less every gate engine running. lent is min(owed, lendable, that spare).",
+  "lend_after_ms": 10000,
+  "cases": [
+    {
+      "name": "a slot freed 50 ms ago stands while two freed long ago are lent",
+      "now": 1000000,
+      "gated": 6,
+      "owed": 3,
+      "running": 3,
+      "seats": [940000],
+      "newest_engine": 905000,
+      "free": [
+        {
+          "slot": 5,
+          "freed": 999950,
+          "lock": false
+        },
+        {
+          "slot": 4,
+          "freed": 980000,
+          "lock": false
+        },
+        {
+          "slot": 3,
+          "freed": 980000,
+          "lock": false
+        }
+      ],
+      "lent": 2,
+      "lendable": [4, 3]
+    },
+    {
+      "name": "a gate seated 10 s with no engine ever lends its whole free part",
+      "now": 1000000,
+      "gated": 12,
+      "owed": 6,
+      "running": 0,
+      "seats": [990000],
+      "newest_engine": null,
+      "free": [
+        {
+          "slot": 11,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 10,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 9,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 8,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 7,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 6,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 5,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 4,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 3,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 2,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 1,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 0,
+          "freed": null,
+          "lock": false
+        }
+      ],
+      "lent": 6,
+      "lendable": [11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+    },
+    {
+      "name": "a gate seated just under 10 s lends nothing",
+      "now": 1000000,
+      "gated": 12,
+      "owed": 6,
+      "running": 0,
+      "seats": [990001],
+      "newest_engine": null,
+      "free": [
+        {
+          "slot": 11,
+          "freed": null,
+          "lock": false
+        }
+      ],
+      "lent": 0,
+      "lendable": []
+    },
+    {
+      "name": "a gate whose newest engine started 4 s ago lends nothing",
+      "now": 1000000,
+      "gated": 12,
+      "owed": 6,
+      "running": 2,
+      "seats": [900000],
+      "newest_engine": 996000,
+      "free": [
+        {
+          "slot": 11,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 10,
+          "freed": 900000,
+          "lock": false
+        }
+      ],
+      "lent": 0,
+      "lendable": [11, 10]
+    },
+    {
+      "name": "a slot an older pin freed, with no mark, is lent once the gate's seat is 10 s old",
+      "now": 1000000,
+      "gated": 12,
+      "owed": 1,
+      "running": 0,
+      "seats": [990000],
+      "newest_engine": null,
+      "free": [
+        {
+          "slot": 0,
+          "freed": null,
+          "lock": false
+        }
+      ],
+      "lent": 1,
+      "lendable": [0]
+    },
+    {
+      "name": "a slot whose lock still stands is never lent",
+      "now": 1000000,
+      "gated": 12,
+      "owed": 2,
+      "running": 0,
+      "seats": [900000],
+      "newest_engine": null,
+      "free": [
+        {
+          "slot": 1,
+          "freed": null,
+          "lock": true
+        },
+        {
+          "slot": 0,
+          "freed": 900000,
+          "lock": true
+        }
+      ],
+      "lent": 0,
+      "lendable": []
+    },
+    {
+      "name": "a mark just under 10 s old stands",
+      "now": 1000000,
+      "gated": 12,
+      "owed": 1,
+      "running": 0,
+      "seats": [900000],
+      "newest_engine": null,
+      "free": [
+        {
+          "slot": 0,
+          "freed": 990001,
+          "lock": false
+        }
+      ],
+      "lent": 0,
+      "lendable": []
+    },
+    {
+      "name": "beside a gate seated 5 s, an aged gate lends its share less every gate engine",
+      "now": 1000000,
+      "gated": 12,
+      "owed": 9,
+      "running": 3,
+      "seats": [900000, 995000],
+      "newest_engine": 950000,
+      "free": [
+        {
+          "slot": 11,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 10,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 9,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 8,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 7,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 6,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 5,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 4,
+          "freed": null,
+          "lock": false
+        },
+        {
+          "slot": 3,
+          "freed": null,
+          "lock": false
+        }
+      ],
+      "lent": 3,
+      "lendable": [11, 10, 9, 8, 7, 6, 5, 4, 3]
+    },
+    {
+      "name": "nothing owed lends nothing",
+      "now": 1000000,
+      "gated": 12,
+      "owed": 0,
+      "running": 0,
+      "seats": [900000],
+      "newest_engine": null,
+      "free": [
+        {
+          "slot": 11,
+          "freed": null,
+          "lock": false
+        }
+      ],
+      "lent": 0,
+      "lendable": [11]
+    }
+  ]
+}
