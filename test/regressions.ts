@@ -98576,6 +98576,116 @@ async function testScriptCreateHoldsNoSlotWhileItAsksTheEditor(): Promise<void> 
 }
 
 /**
+ * script_diagnostics holds no slot while it waits for an editor that connected mid-call to finish
+ * scanning: another taker queued behind its engine gets the slot before the call's next engine.
+ */
+async function testScriptDiagnosticsHoldsNoSlotWhileTheEditorScans(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-scan-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-scan-slots-'));
+  const logFile = join(project, 'stand-in.log');
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    for (const name of ['a', 'broken', 'c']) {
+      writeFileSync(join(project, `${name}.gd`), 'extends Node\n');
+    }
+    writeFileSync(logFile, '');
+    const port = await reservePort();
+    const server = new ServerProcess({
+      env: {
+        [SLOTS_VARIABLE]: slots,
+        [SLOT_COUNT_VARIABLE]: '1',
+        GODOT_PATH: operationStandIn(),
+        GDH_STAND_IN_LOG: logFile,
+        GDH_STAND_IN_PAUSE_MS: '1500',
+        GDH_STAND_IN_PROJECT: project,
+        GDHARNESS_BRIDGE_PORT: String(port),
+        GDHARNESS_LSP_PORT: String(await reservePort()),
+      },
+    });
+    let editor: WebSocket | null = null;
+    try {
+      await server.initialize('regression-test');
+      const call = server.request(
+        'tools/call',
+        {
+          name: 'script_diagnostics',
+          arguments: { projectPath: project, scriptPath: ['a.gd', 'broken.gd', 'c.gd'] },
+        },
+        90_000,
+      );
+      assert.ok(
+        await cameTrue(() => standInEntries(logFile).some((entry) => entry.event === 'start'), 30_000),
+        'the call starts its engine',
+      );
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+      editor = socket;
+      await new Promise<void>((settle, reject) => {
+        socket.once('open', () => {
+          settle();
+        });
+        socket.once('error', reject);
+      });
+      let firstScanAsk: number | null = null;
+      let scanUntil = 0;
+      socket.on('message', (data: Buffer) => {
+        const message: unknown = JSON.parse(data.toString('utf8'));
+        if (get(message, 'type') !== 'tool_invoke') {
+          return;
+        }
+        const now = Date.now();
+        const tool = get(message, 'tool');
+        if (tool === 'scan_status' && scanUntil === 0) {
+          firstScanAsk = now;
+          scanUntil = now + 4000;
+        }
+        const scanning = now < scanUntil;
+        const result =
+          tool === 'scan_status'
+            ? {
+                ok: true,
+                scanning,
+                importing: false,
+                sinceScanFinishedMs: scanning ? 0 : now - Math.min(scanUntil, now),
+                scansCompleted: scanning ? 0 : 1,
+                openScenes: [],
+                unsavedScenes: [],
+              }
+            : { ok: true };
+        socket.send(JSON.stringify({ type: 'tool_result', id: get(message, 'id'), success: true, result }));
+      });
+      socket.send(JSON.stringify(greeting(project)));
+      const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
+      const taker = new EngineSlots(slots, 1, holder, undefined, () => 'other');
+      const competitorTook: { at: number | null } = { at: null };
+      const competitor = taker.take().then(async (lock) => {
+        competitorTook.at = Date.now();
+        await delay(1000);
+        taker.release(lock);
+      });
+      const said = textOf(await call) ?? '';
+      await Promise.race([competitor, delay(30_000)]);
+      assert.notEqual(firstScanAsk, null, `the call waits for the editor's scan: ${said}`);
+      assert.notEqual(competitorTook.at, null, 'the slot is given back');
+      const nextEngine = Math.min(
+        ...standInEntries(logFile)
+          .filter((entry) => entry.event === 'start' && entry.at > (firstScanAsk ?? 0))
+          .map((entry) => entry.at),
+      );
+      assert.ok(
+        (competitorTook.at ?? Number.POSITIVE_INFINITY) < nextEngine,
+        `the slot is free during the scan wait, before the next engine: ${(competitorTook.at ?? 0) - nextEngine}`,
+      );
+    } finally {
+      editor?.close();
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+    sweep(slots);
+  }
+}
+
+/**
  * The engine skips every entry of a list written before 4.4, which lacks is_abstract and is_tool,
  * so it knows none of the classes such a list names. A call on it rebuilds the list and says so.
  */
@@ -132959,6 +133069,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDiagnosticsJoiningAClassRebuildOnOneSlotBothAnswer,
   testDiagnosticsJoiningAClassRebuildHoldNoIdleSlot,
   testScriptCreateHoldsNoSlotWhileItAsksTheEditor,
+  testScriptDiagnosticsHoldsNoSlotWhileTheEditorScans,
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
   testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed,
   testWhatAStaleTypeDependsOnIsNamed,
