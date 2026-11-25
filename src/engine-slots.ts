@@ -481,8 +481,15 @@ function slotFreed(lock: string): void {
 /** Removes the freed mark of the slot whose lock [param lock] this process has just taken. */
 function slotTaken(lock: string): void {
   const mark = freedMarkOf(lock);
-  if (mark !== undefined) {
+  if (mark === undefined) {
+    return;
+  }
+  // A held slot is never lent, and its next give-back writes the mark afresh, so a mark that cannot
+  // go now (a folder in its place, or another process renaming over it) must not fail the take.
+  try {
     rmSync(mark, { force: true });
+  } catch {
+    // Left for the next give-back to replace.
   }
 }
 
