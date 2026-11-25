@@ -67,6 +67,7 @@ import { cacheHome } from './cache-home.js';
 import { callNotes, callProgress, callSignal, callSlotWaits, waitedUnlessAborted } from './call-signal.js';
 import { helperPid } from './desktop.js';
 import { ceilingFor, engineNeed, gigabytes, MEMORY_PER_ENGINE } from './engine-memory.js';
+import { errorCode } from './errors.js';
 import { wholeFlag } from './launch.js';
 import {
   ancestorsIn,
@@ -378,10 +379,64 @@ interface SeatedGate {
 }
 
 /**
- * How long a seated gate's owed slot stands free, and the gate has been seated, before side work may
- * take it. The gate's engine takes it within that time or the slot is lent ({@link EngineSlots.sideShare}).
+ * How long a seated gate stays quiet, past its seat and its newest engine's lock, before side work
+ * may be lent its free part ({@link EngineSlots.lentRoom}).
  */
 export const GATE_LEND_MS = 10_000;
+
+/**
+ * The folder, inside the slots', where every give-back of slot n writes the file n:
+ * `{"freed": <ms since the epoch>}`. Side work is lent a gate slot only once it has stood free
+ * {@link GATE_LEND_MS} by it ({@link EngineSlots.sideShare}).
+ */
+export const FREED_FOLDER = 'freed';
+
+/** When [param content], a mark in {@link FREED_FOLDER}, says its slot was given back, or undefined. */
+function freedTimeOf(content: string): number | undefined {
+  let said: unknown;
+  try {
+    said = JSON.parse(content);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(said)) {
+    return undefined;
+  }
+  const { freed } = said;
+  return typeof freed === 'number' && Number.isFinite(freed) ? freed : undefined;
+}
+
+/** The freed mark of the slot whose lock is [param lock], or undefined for a lock of no numbered slot. */
+function freedMarkOf(lock: string): string | undefined {
+  const slot = /^(\d+)\.lock$/.exec(basename(lock))?.[1];
+  return slot === undefined ? undefined : join(dirname(lock), FREED_FOLDER, slot);
+}
+
+/**
+ * Marks the slot whose lock is [param lock] as given back now, in {@link FREED_FOLDER} beside it,
+ * before the lock goes. The lock goes whether or not the mark could be written, so a long-lived
+ * server never loses the slot: the slot then reads as one with no mark.
+ */
+function slotFreed(lock: string): void {
+  const mark = freedMarkOf(lock);
+  if (mark === undefined) {
+    return;
+  }
+  try {
+    mkdirSync(dirname(mark), { recursive: true });
+  } catch {
+    return;
+  }
+  writeWhole(mark, JSON.stringify({ freed: Date.now() }));
+}
+
+/** Removes the freed mark of the slot whose lock [param lock] this process has just taken. */
+function slotTaken(lock: string): void {
+  const mark = freedMarkOf(lock);
+  if (mark !== undefined) {
+    rmSync(mark, { force: true });
+  }
+}
 
 /**
  * The file in the slot folder that lists the repositories whose side work has high priority:
@@ -1525,8 +1580,6 @@ export class EngineSlots {
    * one such wait kept every short call of a server waiting 5 s for a slot that stood free.
    */
   private readonly passedOver = new Map<string, number>();
-  /** Each free slot of the gates, with when this process first found it free at every look since. */
-  private readonly standingFree = new Map<number, number>();
   /** The slot of the engine that started this process while one of its engines runs on it. */
   private inherited: string | null = null;
   /**
@@ -2062,6 +2115,7 @@ export class EngineSlots {
       const lock = join(this.directory, `${String(slot)}.lock`);
       if (madeInPlace(lock, JSON.stringify(holder)) || (await this.takenOver(lock, holder, true))) {
         this.held.add(lock);
+        slotTaken(lock);
         return lock;
       }
     }
@@ -2410,7 +2464,6 @@ export class EngineSlots {
   private async gateLook(): Promise<GateLook> {
     const marks = await this.gateMarks();
     if (marks.live === 0) {
-      this.standingFree.clear();
       return { queue: 'none', free: [], limit: Number.POSITIVE_INFINITY, since: [] };
     }
     const share = await this.sideShare(marks.newestSeat, marks.gates);
@@ -2466,12 +2519,10 @@ export class EngineSlots {
    * not be in the count, so a tie reads as stale. The slots taken at or after that moment come off
    * it, since each is one the count could not have given to anything else. A tie there reads as taken.
    *
-   * A free slot the count leaves to the seated gates is owed. One that has stood free for
-   * {@link GATE_LEND_MS} at every look of this process is lent to side work, up to the free parts of
-   * the gates seated that long ({@link EngineSlots.freePartOf}), so a gate in its build step holds none
-   * idle. A lent slot is never taken back from a running engine. Each slot freed by its taker stands
-   * the time again, which leaves it to the gate first. A stale count, a held window and a gate not
-   * yet seated lend nothing.
+   * The free parts of the quiet gates are lent beside the count ({@link EngineSlots.lentRoom}), so a
+   * gate in its build step holds none idle. Side work may hold the larger of the two, the lent slots
+   * only among those given back {@link GATE_LEND_MS} ago ({@link EngineSlots.standingFreed}). A lent slot is
+   * never taken back from a running engine. A stale count and a held window lend nothing.
    */
   private async sideShare(
     newestSeat: number,
@@ -2480,9 +2531,7 @@ export class EngineSlots {
     const gated = Math.max(1, this.count - keptSlotsOf(this.count));
     const free = (await this.openSlots()).filter((slot) => slot < gated);
     const none = { side: 0, look: { free, limit: 0, since: [] } };
-    const standing = this.standingFreeFor(free);
     if (await this.windowHeld()) {
-      this.standingFree.clear();
       return none;
     }
     const path = join(this.directory, SPARE_FILE);
@@ -2498,84 +2547,104 @@ export class EngineSlots {
       said.written <= newestSeat ||
       (await this.freeAsRead(content, writtenAt))
     ) {
-      this.standingFree.clear();
       return none;
     }
-    const since = Array.from({ length: gated }, (_, slot) => slot)
+    const locks = Array.from({ length: gated }, (_, slot) => slot)
       .filter((slot) => !free.includes(slot))
-      .flatMap((slot) => {
-        const at = this.writtenAt(join(this.directory, `${String(slot)}.lock`));
-        return at !== undefined && at >= said.written ? [{ slot, at }] : [];
-      })
+      .map((slot) => {
+        const lock = join(this.directory, `${String(slot)}.lock`);
+        return { slot, lock, at: this.writtenAt(lock) };
+      });
+    const since = locks
+      .flatMap(({ slot, at }) => (at !== undefined && at >= said.written ? [{ slot, at }] : []))
       .toSorted((a, b) => a.at - b.at || a.slot - b.slot)
       .map((one) => one.slot);
-    const counted = Math.max(0, Math.min(said.count - since.length, free.length));
-    const owedFree = free.toSorted((a, b) => b - a).slice(counted);
-    const ready = owedFree.filter((slot) => standing.has(slot));
-    const lent = ready.length === 0 ? 0 : Math.min(ready.length, await this.freePartOf(gates, gated));
-    if (lent === 0) {
-      return { side: counted, look: { free, limit: said.count, since } };
-    }
-    const lentSlots = new Set(ready.slice(0, lent));
-    const open = free.filter((slot) => !owedFree.includes(slot) || lentSlots.has(slot));
-    return { side: counted + lent, look: { free: open, limit: since.length + counted + lent, since } };
+    const top = free.toSorted((a, b) => b - a);
+    const counted = top.slice(0, Math.max(0, Math.min(said.count - since.length, free.length)));
+    const lent = await this.lentRoom(gates, gated, locks, said.written, said.count);
+    const ripe =
+      lent - since.length > counted.length
+        ? await this.standingFreed(top.slice(counted.length), Math.min(...gates.map((gate) => gate.seat)))
+        : [];
+    const offered = [...counted, ...ripe.slice(0, Math.max(0, lent - since.length - counted.length))];
+    return { side: offered.length, look: { free: offered, limit: Math.max(said.count, lent), since } };
   }
 
   /**
-   * How many more slots side work may hold among the gates' slots: the free parts of the gates seated
-   * {@link GATE_LEND_MS}, less the slots side work holds there already. The [param gated] slots divide
-   * evenly between all of [param gates], and a gate's free part is its share less the engines it
-   * runs. An engine is a gate's when the process holding its lock is the gate's process or runs below
-   * it, as the machine's queue tells it, and a slot held by any other process is side work's. Where
-   * the process table cannot be read, no engine can be placed and none is lent.
+   * Those of the free gate slots [param free] given back {@link GATE_LEND_MS} ago or more, by their
+   * marks in {@link FREED_FOLDER}. A slot with no mark counts as freed at the [param firstSeat], the
+   * earliest seat of the gates. One whose mark cannot be read counts as freed now, and one whose lock
+   * still stands, its holder gone, is never lent.
    */
-  private async freePartOf(gates: readonly SeatedGate[], gated: number): Promise<number> {
+  private async standingFreed(free: readonly number[], firstSeat: number): Promise<number[]> {
     const now = Date.now();
-    const ripe = gates.filter((gate) => now - gate.seat >= GATE_LEND_MS);
-    if (ripe.length === 0) {
+    const standing: number[] = [];
+    for (const slot of free) {
+      const lock = join(this.directory, `${String(slot)}.lock`);
+      const mark = freedMarkOf(lock);
+      if (mark === undefined || existsSync(lock)) {
+        continue;
+      }
+      let content: string | null;
+      try {
+        content = await readWholeAsync(mark);
+      } catch (error) {
+        // A freed folder that is not a folder holds no mark.
+        content = errorCode(error) === 'ENOTDIR' ? null : '';
+      }
+      const freed = content === null ? firstSeat : (freedTimeOf(content) ?? now);
+      if (now - freed >= GATE_LEND_MS) {
+        standing.push(slot);
+      }
+    }
+    return standing;
+  }
+
+  /**
+   * How many gate slots side work may take after the moment [param written], lent from the quiet
+   * gates, or 0 where that cannot pass [param counted]. The [param gated] slots divide evenly between
+   * the seated [param gates], and a gate is quiet once {@link GATE_LEND_MS} has passed since the later
+   * of its seat and the newest lock of any gate's engine, as the machine's queue counts it, since that
+   * does not tell the gates' engines apart. Every slot [param held] before that moment comes
+   * off the quiet gates' shares, whether a gate engine of any gate or side work holds it, and every
+   * one taken since comes off what is answered here, as a count's do.
+   *
+   * An engine is a gate's when the process holding its lock is the gate's process or runs below it,
+   * as the machine's queue tells it. Where the process table cannot be read, no engine can be placed,
+   * no gate is known to be quiet and none is lent.
+   */
+  private async lentRoom(
+    gates: readonly SeatedGate[],
+    gated: number,
+    held: readonly { slot: number; lock: string; at: number | undefined }[],
+    written: number,
+    counted: number,
+  ): Promise<number> {
+    const now = Date.now();
+    const before = held.filter(({ at }) => at === undefined || at < written).length;
+    const seated = gates.filter((gate) => now - gate.seat >= GATE_LEND_MS);
+    const roomOf = (quiet: number): number => Math.floor((gated * quiet) / gates.length) - before;
+    if (seated.length === 0 || roomOf(seated.length) <= counted) {
       return 0;
     }
-    const held = (await this.heldLocks()).filter((one) => one.slot < gated);
     const tree = held.length === 0 ? new Map() : await this.processes();
     if (tree === undefined) {
       return 0;
     }
-    const running = new Map<SeatedGate, number>();
-    let side = 0;
+    let newest = Number.NEGATIVE_INFINITY;
     for (const one of held) {
-      const holder = one.content === null ? null : holderOf(one.content);
+      const content = await readWholeAsync(one.lock).catch(() => null);
+      const holder = content === null ? null : holderOf(content);
       const pids = [holder?.pid, holder?.engine?.pid].filter((pid) => pid !== undefined);
       const owner = gates.find((gate) =>
         pids.some((pid) => pid === gate.pid || ancestorsIn(tree, pid, gate.pid).includes(gate.pid)),
       );
-      if (owner === undefined) {
-        side += 1;
-      } else {
-        running.set(owner, (running.get(owner) ?? 0) + 1);
+      if (owner !== undefined) {
+        newest = Math.max(newest, one.at ?? now);
       }
     }
-    const share = gated / gates.length;
-    const owed = ripe.reduce((sum, gate) => sum + Math.max(0, share - (running.get(gate) ?? 0)), 0);
-    return Math.max(0, Math.floor(owed) - side);
-  }
-
-  /**
-   * Those of [param free] that have stood free at every look of this process for {@link GATE_LEND_MS}.
-   * A slot not free now starts its time again.
-   */
-  private standingFreeFor(free: readonly number[]): Set<number> {
-    const now = Date.now();
-    for (const slot of this.standingFree.keys()) {
-      if (!free.includes(slot)) {
-        this.standingFree.delete(slot);
-      }
-    }
-    for (const slot of free) {
-      this.standingFree.set(slot, this.standingFree.get(slot) ?? now);
-    }
-    return new Set(
-      [...this.standingFree].filter(([, since]) => now - since >= GATE_LEND_MS).map(([slot]) => slot),
-    );
+    const quiet = seated.filter((gate) => now - Math.max(gate.seat, newest) >= GATE_LEND_MS);
+    return Math.max(0, roomOf(quiet.length));
   }
 
   /** When the file at [param path] was last written, in milliseconds, or undefined where it is not there. */
@@ -2806,6 +2875,9 @@ export class EngineSlots {
       (path) => this.made(path, holder),
       retake,
       inPlace ? (path) => madeInPlace(path, JSON.stringify(holder)) : undefined,
+      () => {
+        slotFreed(lock);
+      },
     );
   }
 
@@ -2846,7 +2918,7 @@ export class EngineSlots {
  * Removes [param lock] once [param gone] says its holder has gone, under its steal file, so that a
  * lock another taker has just made in its place is never removed. [param make] makes a file for this
  * process, the steal file and with [param retake] the lock again, unless [param makeLock] makes the
- * lock. Answers whether that was done.
+ * lock. [param removing] runs just before the lock is removed. Answers whether that was done.
  * It tries the removal once and never waits, because a server calls it from its protocol and its
  * caller looks again.
  */
@@ -2856,6 +2928,7 @@ export async function takenOverUnderSteal(
   make: (path: string) => boolean,
   retake = true,
   makeLock = make,
+  removing?: () => void,
 ): Promise<boolean> {
   if (!(await gone())) {
     return false;
@@ -2875,6 +2948,7 @@ export async function takenOverUnderSteal(
     if (!(await gone())) {
       return false;
     }
+    removing?.();
     try {
       rmSync(lock, { force: true });
     } catch {
@@ -3019,6 +3093,7 @@ const ENGINE_PID_LOOK_MS = 100;
 export function giveBackSlot(lock: string, pid: number): void {
   try {
     if (holderOf(readFileSync(lock, 'utf8'))?.pid === pid) {
+      slotFreed(lock);
       removeWhole(lock);
     }
   } catch {
@@ -3030,6 +3105,7 @@ export function giveBackSlot(lock: string, pid: number): void {
 export async function giveBackSlotAsync(lock: string, pid: number): Promise<void> {
   try {
     if (holderOf(readFileSync(lock, 'utf8'))?.pid === pid) {
+      slotFreed(lock);
       await removeWholeAsync(lock);
     }
   } catch {

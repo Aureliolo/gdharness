@@ -13,6 +13,7 @@ import process from 'node:process';
 import { MOST_ENGINES } from '../../src/engine-launch.js';
 import {
   ENDED_SUFFIX,
+  FREED_FOLDER,
   SLOT_COUNT_VARIABLE,
   SLOTS_VARIABLE,
   slotsDrawnOn,
@@ -102,12 +103,18 @@ export function slotCountForEngines(engines: number, suiteCount = process.env[SL
  */
 export function leftInSlots(slots: string): string[] {
   const marks = join(slots, WAITING_FOLDER);
+  const freed = join(slots, FREED_FOLDER);
   return [
-    ...readdirSync(slots).filter((name) => name !== WAITING_FOLDER),
+    ...readdirSync(slots).filter((name) => name !== WAITING_FOLDER && name !== FREED_FOLDER),
     ...(existsSync(marks)
       ? readdirSync(marks)
           .filter((name) => !name.endsWith(ENDED_SUFFIX))
           .map((name) => `${WAITING_FOLDER}/${name}`)
+      : []),
+    ...(existsSync(freed)
+      ? readdirSync(freed)
+          .filter((name) => !/^\d+$/.test(name))
+          .map((name) => `${FREED_FOLDER}/${name}`)
       : []),
   ].toSorted();
 }
