@@ -88,7 +88,7 @@ const FRAME_SLEEP_USEC: int = 1000
 ## sleeping: one engine used 73 to 97 percent of a core at 1000 and 2000, and 133 to 226 ms a second
 ## at 4000 and 5000.
 ## Measured at 6000: 71 ms a second waiting on a thread, 22 idle, and 300 frames in 1.8 s.
-const WINDOWS_FRAME_SLEEP_USEC: int = 1000
+const WINDOWS_FRAME_SLEEP_USEC: int = 6000
 ## What the engine's shutdown prints as it clears the newest script and the oldest, on an engine
 ## whose walk [GdhShutdownWalk] guards. Kept in step with the server's engine-leaks.ts, which reads
 ## a run printing the first and not the second as a walk that stopped part way.
