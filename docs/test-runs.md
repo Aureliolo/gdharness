@@ -151,9 +151,9 @@ output can still read it there. It holds:
   printed it, `seconds`, the `engine` index, its `slot`, its `priority` and its `log`. `slot` is
   the engine slot's number, or null. `priority` is read from the engine's process while it ran: a
   Windows priority class such as `normal`, or the nice value such as `nice 0` on Linux and
-  macOS. It is null when the engine ended before it was read. `log` names the kept file itself,
-  which is under `engine-<n>-again/` after an out-of-memory rerun. Take the path from the field and
-  never build it. `seconds` is exact, and the report prints it to the millisecond.
+  macOS. It is null when the engine ended before it was read. `log` names the kept file itself.
+  Take the path from the field and never build it. `seconds` is exact, and the report prints it to
+  the millisecond.
 - `enginesAsked`.
 - `slotsFree`: how many of the slots its lanes take were free as it began. Fewer than the lanes
   means the engines were handed the suites a share at a time.
@@ -321,9 +321,8 @@ share in an engine started for it. An engine is reused only when memory does not
 run held by memory each share gets an engine of its own, admitted for that share.
 
 Each share is judged on the lines the engine printed for it, with its own cases, failures,
-timeouts, deadline and peak memory. A share in an engine that ran out of memory before it began a
-case runs again alone, and only that share does. What the engine reports as leaked at exit is
-attributed to the share it ran last.
+timeouts, deadline and peak memory. A share in an engine that ran out of memory fails and is not run
+again. What the engine reports as leaked at exit is attributed to the share it ran last.
 
 The run and the engine pass shares through the folder named by `--shares-in` (see
 [Starting the runner yourself](#starting-the-runner-yourself)). A share in an engine already
@@ -658,14 +657,11 @@ however busy the machine is. Its ending says how it was counted.
 
 ### Running out of memory
 
-When an engine runs out of memory before it begins a case, it runs again alone, one at a time with
-any other that did, and those runs are the ones judged. An engine that began a case before it ran
-out, and one that failed without running out, keeps its first verdict and does not run again.
+An engine that runs out of memory fails, and the run fails with it. No engine is run again. The run
+says an engine ran out of memory and gives the most each engine held in this run, or unread.
 
 Running out shows as the allocator's null, an image decode failing, godot-sandbox failing to
-allocate a sandbox, or Windows' `STATUS_NO_MEMORY` or `STATUS_COMMITMENT_LIMIT`. One that fails
-again is headed as run again alone. The line gives the most each engine held in this run, or
-unread.
+allocate a sandbox, or Windows' `STATUS_NO_MEMORY` or `STATUS_COMMITMENT_LIMIT`.
 
 ## Leaving out what passed
 
