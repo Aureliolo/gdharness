@@ -3679,7 +3679,7 @@ async function inTheProjectsTurn<T>(body: () => Promise<T>, project: string | un
     const now = Date.now();
     if (progress !== undefined && now - said >= WAIT_SAID_MS) {
       said = now;
-      progress((now - began) / 1000, projectWaitSaid(now - began, project, blockedBy));
+      progress((now - began) / 1000, projectWaitSaid(now - began, project, projectHolderOf(lock)));
     } else if (
       progress === undefined &&
       saidTo !== undefined &&
@@ -3687,7 +3687,7 @@ async function inTheProjectsTurn<T>(body: () => Promise<T>, project: string | un
       now - said >= WAIT_SAID_MS
     ) {
       said = now;
-      saidTo(projectWaitSaid(now - began, project, blockedBy));
+      saidTo(projectWaitSaid(now - began, project, projectHolderOf(lock)));
     }
     await delay(PROJECT_LOOK_MS);
   }
