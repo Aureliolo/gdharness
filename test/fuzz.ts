@@ -2980,6 +2980,8 @@ async function lateAnswerIsKept(game: FakeGame, how: 'keep' | 'function', end: E
   }
   assert.equal(reply.reason, 'busy');
   assert.equal(reply.stillWithTheGame === true, how === 'function');
+  // The wait runs out on the client's own timer, which can fire before the game has read the request.
+  await eventually(() => game.held.length > 0);
   const held = game.held[0];
   assert.ok(held !== undefined, 'the game has the request');
   const id = held.id;
