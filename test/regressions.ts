@@ -75417,8 +75417,7 @@ async function secondLaneHeldInAWhileTheFileFalls(
     },
   };
   let told = 2;
-  // A lane reaches its slot only once memory has room, so a wait for the slot needs room for it.
-  let free = wait === 'slot' ? 2 ** 40 : 0;
+  let free = 0;
   let started = 0;
   let finishing = false;
   const ends: Array<() => void> = [];
@@ -75592,49 +75591,207 @@ async function testALaneWaitingForMemoryHoldsNoSlot(): Promise<void> {
   assert.ok(over !== null, 'the run ends');
 }
 
-/** The memory the lane is admitted for is judged again by the take, which a lane waits in holding the admission. */
-async function testALaneTakesItsSlotAfterMemoryAndTheTakeJudgesMemoryAgain(): Promise<void> {
-  const events: string[] = [];
-  class RecordingGate extends MemoryGate {
-    override admit(signal: AbortSignal, need: () => number, waiting?: () => void): Promise<Admitted> {
-      events.push('admit');
-      return super.admit(signal, need, waiting);
+/** The smallest memory reading the machine has room in, past what it keeps for everything else. */
+function memoryKept(): number {
+  let low = 0;
+  let high = 2 ** 40;
+  while (high - low > 1) {
+    const middle = Math.floor((low + high) / 2);
+    if (roomForAnother(middle, 0, 0)) {
+      high = middle;
+    } else {
+      low = middle;
     }
   }
-  const gate = new RecordingGate({ markWaiting: () => () => undefined }, () => Promise.resolve(2 ** 40), 10);
-  let memoryFrees: () => void = () => undefined;
-  const shortAtTheTake = new Promise<void>((resume) => {
-    memoryFrees = resume;
-  });
-  const slots = {
-    take: async (): Promise<string> => {
-      events.push('take');
-      await shortAtTheTake;
-      events.push('taken');
-      return 'N';
-    },
-    release: (lock: string): void => {
-      events.push(`release ${lock}`);
-    },
-  };
-  const run = (_plan: EnginePlan, index: number): Promise<{ index: number }> => {
-    events.push('run');
-    return Promise.resolve({ index });
-  };
-  const units = [SHARE_UNIT('s0', 30)];
+  return high;
+}
+
+/**
+ * A lane told to stop while it waits for a slot holds no memory admission, so once memory has room
+ * for one engine the lane still running starts its next one.
+ */
+async function testALaneStoppedInItsSlotWaitHoldsNoMemory(): Promise<void> {
+  const pool = fakeSlotPool();
+  let told = 2;
+  let free = 2 ** 40;
+  let started = 0;
+  let finishing = false;
+  const ends: Array<() => void> = [];
+  const run = (_plan: EnginePlan, index: number): Promise<{ index: number }> =>
+    new Promise((done) => {
+      started += 1;
+      if (finishing) {
+        done({ index });
+      } else {
+        ends.push(() => {
+          done({ index });
+        });
+      }
+    });
+  const gate = new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(free), 10);
+  const units = Array.from({ length: 8 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
   const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  const pending = runShares(slots, units, declared, 1, [], {}, run, undefined, gate);
-  assert.ok(await cameTrue(() => events.includes('take'), 5000), 'a take for the slot is made');
-  await delay(100);
-  assert.ok(!events.includes('run'), 'no engine starts while the take is short of memory');
-  memoryFrees();
+  const pending = runShares(
+    pool,
+    units,
+    declared,
+    2,
+    ['T0'],
+    {},
+    run,
+    undefined,
+    gate,
+    toldLanes(2, () => told),
+  );
+  try {
+    assert.ok(await cameTrue(() => pool.waiters.length === 1, 5000), 'the second lane waits for a slot');
+    assert.equal(started, 1, 'the first lane runs its share');
+    told = 1;
+    pool.release('N1');
+    assert.ok(
+      await cameTrue(() => pool.free.includes('N1'), 5000),
+      'the stopped lane gives the slot it was handed back',
+    );
+    free = memoryKept() + 1.2 * MEMORY_PER_ENGINE;
+    ends.shift()?.();
+    assert.ok(
+      await cameTrue(() => started === 2, 5000),
+      'with room for one engine, the running lane starts its next engine',
+    );
+  } finally {
+    free = 2 ** 40;
+    finishing = true;
+    for (const end of ends.splice(0)) {
+      end();
+    }
+  }
   const over = await Promise.race([pending, delay(10_000).then(() => null)]);
   assert.ok(over !== null, 'the run ends');
-  assert.deepEqual(
-    events.slice(0, 4),
-    ['admit', 'take', 'taken', 'run'],
-    'the lane is admitted for memory first, then takes its slot, which judges memory itself',
-  );
+}
+
+/**
+ * Memory gone while a lane waited for its slot: the lane judges memory again once it holds the slot,
+ * gives the slot back while memory is short, and starts once memory has room again.
+ */
+async function testALaneJudgesMemoryAgainOnceItHoldsItsSlot(): Promise<void> {
+  const pool = fakeSlotPool();
+  let free = 2 ** 40;
+  const startedAt: number[] = [];
+  let finishing = false;
+  const ends: Array<() => void> = [];
+  const run = (_plan: EnginePlan, index: number): Promise<{ index: number }> =>
+    new Promise((done) => {
+      startedAt.push(free);
+      if (finishing) {
+        done({ index });
+      } else {
+        ends.push(() => {
+          done({ index });
+        });
+      }
+    });
+  const gate = new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(free), 10);
+  const units = Array.from({ length: 4 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
+  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
+  const pending = runShares(pool, units, declared, 2, ['T0'], {}, run, undefined, gate);
+  try {
+    assert.ok(
+      await cameTrue(() => startedAt.length === 1 && pool.waiters.length === 1, 5000),
+      'the first lane runs and the second waits for a slot',
+    );
+    free = memoryKept();
+    pool.release('X1');
+    assert.ok(
+      await cameTrue(() => pool.free.includes('X1'), 5000),
+      'the lane short of memory gives the slot it was handed back',
+    );
+    await delay(100);
+    assert.equal(startedAt.length, 1, 'no engine starts while memory has no room');
+    assert.deepEqual(pool.free, ['X1'], 'the waiting lane holds no slot meanwhile');
+    free = 2 ** 40;
+    assert.ok(await cameTrue(() => startedAt.length === 2, 5000), 'the lane starts once memory has room');
+    assert.deepEqual(pool.free, [], 'in the slot it took again');
+  } finally {
+    free = 2 ** 40;
+    finishing = true;
+    for (const end of ends.splice(0)) {
+      end();
+    }
+  }
+  const over = await Promise.race([pending, delay(10_000).then(() => null)]);
+  assert.ok(over !== null, 'the run ends');
+}
+
+/**
+ * Two runs of three lanes sharing three slots, on a machine with room for two engines, with engine
+ * lengths drawn from a seed. Every engine started past the machine's room is one its run started
+ * with nothing else going, which the gate lets start at once, and both runs end holding nothing.
+ */
+async function testTwoRunsSharingSlotsStartPastTheRoomOnlyWithNothingGoing(): Promise<void> {
+  const kept = memoryKept();
+  for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+    const pool = fakeSlotPool();
+    pool.free.push('S1', 'S2', 'S3');
+    let state = seed;
+    const random = (): number => {
+      state = (state * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return state / 2_147_483_648;
+    };
+    let running = 0;
+    const own = { a: 0, b: 0 };
+    const past: string[] = [];
+    const read = (): Promise<number> => Promise.resolve(kept + (2.5 - running) * MEMORY_PER_ENGINE);
+    const runOf =
+      (name: 'a' | 'b') =>
+      async (_plan: EnginePlan, index: number): Promise<{ index: number }> => {
+        if (running >= 2 && own[name] > 0) {
+          past.push(`${name} with ${String(own[name])} of its own going`);
+        }
+        running += 1;
+        own[name] += 1;
+        await delay(30 + Math.floor(random() * 120));
+        running -= 1;
+        own[name] -= 1;
+        return { index };
+      };
+    const marks = { open: 0 };
+    const gateOf = (): MemoryGate =>
+      new MemoryGate(
+        {
+          markWaiting: () => {
+            marks.open += 1;
+            return () => {
+              marks.open -= 1;
+            };
+          },
+        },
+        read,
+        10,
+      );
+    const sharesOf = (prefix: string): Unit[] =>
+      Array.from({ length: 8 }, (_, at) => SHARE_UNIT(`${prefix}${String(at)}`, 30));
+    const a = sharesOf('a');
+    const b = sharesOf('b');
+    const declaredOf = (units: Unit[]): Map<string, string[]> =>
+      new Map(units.map((unit) => [unit.suite, ['test_one']]));
+    const runs = Promise.all([
+      runShares(pool, a, declaredOf(a), 3, [], {}, runOf('a'), undefined, gateOf()),
+      runShares(pool, b, declaredOf(b), 3, [], {}, runOf('b'), undefined, gateOf()),
+    ]);
+    const over = await Promise.race([runs, delay(30_000).then(() => null)]);
+    assert.ok(over !== null, `both runs end (seed ${String(seed)})`);
+    assert.deepEqual(
+      past,
+      [],
+      `no run starts past the room beside an engine of its own (seed ${String(seed)})`,
+    );
+    assert.equal(marks.open, 0, `no memory wait is left marked (seed ${String(seed)})`);
+    assert.deepEqual(
+      pool.free.toSorted(),
+      ['S1', 'S2', 'S3'],
+      `every slot is given back (seed ${String(seed)})`,
+    );
+  }
 }
 
 /** A lane told to stop gives its slot to the machine, and a compile check still waiting takes its own. */
@@ -89014,6 +89171,7 @@ function checkRig(): CheckRig {
   const counted = { live: 0, most: 0 };
   const going: CheckRig['going'] = [];
   const ran: string[] = [];
+  const given: string[] = [];
   const run = (plan: EnginePlan, index: number, lock: string): Promise<{ index: number }> =>
     new Promise((finished) => {
       counted.live += 1;
@@ -89032,9 +89190,16 @@ function checkRig(): CheckRig {
   const lanes = (handed: HandedSlot, memory?: MemoryGate): Promise<Array<{ index: number }>> => {
     const pending = runShares(
       {
-        take: () => Promise.reject(new Error('every lane holds a slot')),
+        // A lane short of memory gives its slot back while it waits, and takes one once it has room.
+        take: () => {
+          const lock = given.shift();
+          return lock === undefined
+            ? Promise.reject(new Error('a lane takes only a slot it gave back'))
+            : Promise.resolve(lock);
+        },
         release: (lock) => {
           released.push(lock);
+          given.push(lock);
         },
       },
       four.units,
@@ -132975,7 +133140,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunNotDealtInSharesStartsEveryEngineForItsOwnPart,
   testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited,
   testALaneWaitingForMemoryHoldsNoSlot,
-  testALaneTakesItsSlotAfterMemoryAndTheTakeJudgesMemoryAgain,
+  testALaneStoppedInItsSlotWaitHoldsNoMemory,
+  testALaneJudgesMemoryAgainOnceItHoldsItsSlot,
+  testTwoRunsSharingSlotsStartPastTheRoomOnlyWithNothingGoing,
   testAParkedLanesSlotGoesToTheMachineNotTheCheck,
   testARunBegunAtItsCeilingStillFollowsTheLanesFile,
   testAWaitForSeveralSlotsKeepsThemWhileItKeepsLooking,

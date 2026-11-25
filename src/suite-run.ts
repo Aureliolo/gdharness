@@ -1602,18 +1602,23 @@ export class MemoryGate {
    * admission. [param need] is asked at each look, since the share a caller would draw changes as
    * others draw theirs. [param waiting] is called once, before the caller waits for room, which
    * includes waiting behind a caller that is itself waiting for room, so a lane can give back the
-   * slot it holds while it waits. It is not called for a caller that finds room at once.
+   * slot it holds while it waits. A caller told so is not admitted: once there is room it is
+   * answered null, so it takes a slot again and asks again holding it.
    */
-  admit(signal: AbortSignal, need: () => number, waiting?: () => void): Promise<Admitted> {
-    let wait: (() => void) | undefined;
-    if (waiting !== undefined) {
-      let told = false;
-      wait = () => {
-        if (!told) {
-          told = true;
-          waiting();
-        }
-      };
+  admit(signal: AbortSignal, need: () => number): Promise<Admitted>;
+  admit(signal: AbortSignal, need: () => number, waiting: () => void): Promise<Admitted | null>;
+  admit(signal: AbortSignal, need: () => number, waiting?: () => void): Promise<Admitted | null> {
+    const told = { done: false };
+    const wait =
+      waiting === undefined
+        ? undefined
+        : (): void => {
+            if (!told.done) {
+              told.done = true;
+              waiting();
+            }
+          };
+    if (wait !== undefined) {
       if (this.stalled) {
         wait();
       } else {
@@ -1621,7 +1626,7 @@ export class MemoryGate {
       }
     }
     return this.turn
-      .run(() => this.room(signal, need, wait))
+      .run(() => this.room(signal, need, told))
       .finally(() => {
         if (wait !== undefined) {
           this.queuedWaits.delete(wait);
@@ -1632,8 +1637,8 @@ export class MemoryGate {
   private async room(
     signal: AbortSignal,
     need: () => number,
-    waiting: (() => void) | undefined,
-  ): Promise<Admitted> {
+    told: { readonly done: boolean },
+  ): Promise<Admitted | null> {
     let unmark: (() => void) | undefined;
     let needed = 0;
     try {
@@ -1652,7 +1657,6 @@ export class MemoryGate {
         }
         unmark ??= this.slots.markWaiting();
         this.stalled = true;
-        waiting?.();
         for (const queued of this.queuedWaits) {
           queued();
         }
@@ -1661,6 +1665,9 @@ export class MemoryGate {
     } finally {
       this.stalled = false;
       unmark?.();
+    }
+    if (told.done) {
+      return null;
     }
     this.firstPending = false;
     const engine: Admitted = {
@@ -1901,11 +1908,6 @@ export class HandedSlot {
   /** Whether a lend handed its lock over, so the lane that lent it takes it back. */
   get lent(): boolean {
     return this.handedInALend;
-  }
-
-  /** Whether the next {@link lend} hands its lock to the check, which then holds the lane until it ends. */
-  get lends(): boolean {
-    return this.inALane && this.wanted;
   }
 
   /**
@@ -2376,28 +2378,20 @@ export async function runShares<
     return true;
   };
   /**
-   * Takes the lane's slot, once [param admitted] holds the memory its share needs, and answers the
-   * slot. A slot lent to a check that wants one ends the admission first, since the check asks the
-   * gate for memory too, and once the check has ended a new pass begins. Answers 'again' for that,
-   * and when the lanes file tells the lane to stop, which gives its slot back first, and 'over'
+   * Takes the lane's slot and lends it to a check that wants one, and answers the slot. Answers
+   * 'again' when the lanes file tells the lane to stop, which gives its slot back first, and 'over'
    * once every share is handed out.
    */
   const slotHeld = async (
     at: number,
     held: { lock: string | null },
-    admitted: Admitted | undefined,
   ): Promise<{ readonly lock: string } | 'again' | 'over'> => {
     if (await parkedPastTheLanesTold(at, held)) {
-      admitted?.ended();
       return empty() ? 'over' : 'again';
     }
     held.lock ??= await slots.take(handedOut.signal);
     const lock = held.lock;
-    if (handed?.lends === true) {
-      admitted?.ended();
-      await handed.lend(lock);
-      return 'again';
-    }
+    await handed?.lend(lock);
     return (await fallenPast(at)) ? 'again' : { lock };
   };
   /** Gives the lane's slot back to the machine while it waits for memory. */
@@ -2408,67 +2402,53 @@ export async function runShares<
     }
   };
   /**
-   * Waits for the memory the lane's share needs, holding no slot while it waits. A lane told fewer
-   * lanes parks instead, as {@link slotHeld} answers.
+   * Judges the memory the lane's share needs while it holds its slot, and answers the admission.
+   * Answers 'again' when the lane waited for memory, which gives its slot back meanwhile and admits
+   * nothing, when the lanes file fell past the lane, or when a heavier share is left than the one
+   * admitted for, which is admitted again.
    */
-  const memoryWaited = async (
+  const memoryHeld = async (
     at: number,
     held: { lock: string | null },
-  ): Promise<{ readonly admitted: Admitted | undefined } | 'again' | 'over'> => {
-    if (await parkedPastTheLanesTold(at, held)) {
-      return empty() ? 'over' : 'again';
-    }
-    return {
-      admitted: await memory?.admit(handedOut.signal, needed, () => {
-        slotGivenBack(held);
-      }),
-    };
-  };
-  /**
-   * One pass of {@link waitedFor}: memory first, then the slot. Answers the slot and admission, or
-   * 'again' when the lanes file or a heavier share than admitted asks for another pass, and 'over'
-   * once every share is handed out.
-   */
-  const memoryThenSlot = async (
-    at: number,
-    held: { lock: string | null },
-  ): Promise<{ readonly lock: string; readonly admitted: Admitted | undefined } | 'again' | 'over'> => {
-    const room = await memoryWaited(at, held);
-    if (typeof room === 'string') {
-      return room;
-    }
-    const { admitted } = room;
-    const got = await slotHeld(at, held, admitted);
-    if (typeof got === 'string') {
-      return got;
+  ): Promise<{ readonly admitted: Admitted | undefined } | 'again'> => {
+    const admitted = await memory?.admit(handedOut.signal, needed, () => {
+      slotGivenBack(held);
+    });
+    if (admitted === null) {
+      return 'again';
     }
     // With no lanes file nothing is awaited here, so the share admitted for is the one drawn. With
-    // one, a share another lane draws meanwhile may leave a heavier one, which is admitted again.
+    // one, a share another lane draws meanwhile may leave a heavier one.
     const fallen = raised !== undefined && (await fallenPast(at));
     if (!fallen && (admitted === undefined || needed() <= admitted.need)) {
-      return { lock: got.lock, admitted };
+      return { admitted };
     }
     admitted?.ended();
     return 'again';
   };
   /**
-   * Waits for the memory the lane's share needs, holding no slot while it waits, then takes the
-   * lane's slot, or answers null once the run is over. The slot's own take judges memory again. The
-   * lanes file is read again after memory, the slot and the check, since a wait can outlast a fall.
-   * A lane told fewer lanes goes back to waiting for the lanes to rise instead of waiting for memory
-   * or drawing a share.
+   * Takes the lane's slot and the memory its share needs, or answers null once the run is over. A
+   * lane short of memory gives its slot back while it waits, then takes a slot again and asks memory
+   * again, so it never holds a slot while it waits for memory nor memory while it waits for a slot.
+   * The lanes file is read again after the slot and the check, and after memory, since a wait can
+   * outlast a fall. A lane told fewer lanes goes back to waiting for the lanes to rise instead of
+   * waiting for memory or drawing a share.
    */
   const waitedFor = async (
     at: number,
     held: { lock: string | null },
   ): Promise<{ readonly lock: string; readonly admitted: Admitted | undefined } | null> => {
     for (;;) {
-      const got = await memoryThenSlot(at, held);
+      const got = await slotHeld(at, held);
       if (got === 'over') {
         return null;
       }
-      if (got !== 'again') {
-        return got;
+      if (got === 'again') {
+        continue;
+      }
+      const room = await memoryHeld(at, held);
+      if (room !== 'again') {
+        return { lock: got.lock, admitted: room.admitted };
       }
     }
   };
