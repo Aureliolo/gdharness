@@ -1107,6 +1107,14 @@ name the slots from that one read. By the state of the queue:
 - A gate mark is live and the file is not fresh, seated gate or not: take none of the gates' slots.
   Its ticker writes a fresh file within five seconds.
 
+A slot the count leaves to the seated gates is lent to side work once it has stood free for ten
+seconds at every look of the taker, and the gate owning it has been seated as long. The gates' slots
+divide evenly between the seated gates from the top, the earliest seated owning the highest, and each
+gate's slots are timed on its own seat. A gate engine that takes its slot within the ten seconds
+lends nothing. A slot freed after it was lent stands the ten seconds again, which leaves it to the
+gate first, and a lent slot a side engine holds is never taken back: the gate waits for the next
+free one. A stale count, a held quiet window and a gate not yet seated lend nothing.
+
 After taking a gate slot, count again from the folder. When side work holds more gate slots written
 since the count than it allows, the newest of them gives its slot back and waits, so two takers that
 read one spare slot do not both keep a slot. A game never takes a spare slot, since it holds one as

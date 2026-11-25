@@ -372,6 +372,12 @@ const ONE_OFF_HELD_MS = 600_000;
 export const SLOT_YIELD_MS = 5000;
 
 /**
+ * How long a seated gate's owed slot stands free, and the gate has been seated, before side work may
+ * take it. The gate's engine takes it within that time or the slot is lent ({@link EngineSlots.sideShare}).
+ */
+export const GATE_LEND_MS = 10_000;
+
+/**
  * The file in the slot folder that lists the repositories whose side work has high priority:
  * `{"high": ["<repository>", ...]}`. A repository is the name of a project's git top-level folder.
  */
@@ -991,6 +997,27 @@ function drawnOn(count: number, taker: SlotTaker, queue: GateQueue, free?: reado
 }
 
 /**
+ * How many of the free slots [param owed], which the seated gates are owed, may be lent to side work
+ * at [param now]. The [param gated] slots divide evenly between the gates seated at [param seats], from
+ * the top, the earliest seated owning the highest. A slot is lent once it is among [param seasoned], the
+ * slots that have stood free for {@link GATE_LEND_MS}, and the gate owning it has been seated that long.
+ */
+function lentSlotsOf(
+  owed: readonly number[],
+  seasoned: ReadonlySet<number>,
+  seats: readonly number[],
+  gated: number,
+  now: number,
+): number {
+  const ordered = seats.toSorted((a, b) => a - b);
+  return owed.filter((slot) => {
+    const owner =
+      ordered[Math.min(ordered.length - 1, Math.floor(((gated - 1 - slot) * ordered.length) / gated))];
+    return seasoned.has(slot) && owner !== undefined && now - owner >= GATE_LEND_MS;
+  }).length;
+}
+
+/**
  * The file in the slots folder where the gates' queue writes how many of the gates' free slots no
  * queued gate can take now, as `{"spare", "pid", "started", "written"}`. `written` is the moment the
  * count began, in milliseconds by the folder's clock, with or without a fraction.
@@ -1513,6 +1540,8 @@ export class EngineSlots {
    * one such wait kept every short call of a server waiting 5 s for a slot that stood free.
    */
   private readonly passedOver = new Map<string, number>();
+  /** Each free slot of the gates, with when this process first found it free at every look since. */
+  private readonly standingFree = new Map<number, number>();
   /** The slot of the engine that started this process while one of its engines runs on it. */
   private inherited: string | null = null;
   /**
@@ -2388,23 +2417,25 @@ export class EngineSlots {
   private async gateLook(): Promise<GateLook> {
     const marks = await this.gateMarks();
     if (marks.live === 0) {
+      this.standingFree.clear();
       return { queue: 'none', free: [], limit: Number.POSITIVE_INFINITY, since: [] };
     }
-    const share = await this.sideShare(marks.newestSeat);
+    const share = await this.sideShare(marks.newestSeat, marks.seats);
     return { ...share.look, queue: share.side > 0 ? share.side : 'queued' };
   }
 
   /** The live gates' marks in the queue folder, and when the newest of them was seated. */
-  private async gateMarks(): Promise<{ live: number; newestSeat: number }> {
+  private async gateMarks(): Promise<{ live: number; newestSeat: number; seats: number[] }> {
     const folder = join(this.directory, QUEUED_FOLDER);
     let names: string[];
     try {
       names = readdirSync(folder).filter((name) => name.endsWith('.json'));
     } catch {
-      return { live: 0, newestSeat: 0 };
+      return { live: 0, newestSeat: 0, seats: [] };
     }
     let live = 0;
     let newestSeat = 0;
+    const seats: number[] = [];
     for (const name of names) {
       const mark = join(folder, name);
       const content = await readWholeAsync(mark);
@@ -2416,10 +2447,14 @@ export class EngineSlots {
         await removeWholeAsync(`${mark}${SEATED_SUFFIX}`);
       } else {
         live += 1;
-        newestSeat = Math.max(newestSeat, this.writtenAt(`${mark}${SEATED_SUFFIX}`) ?? 0);
+        const seatedAt = this.writtenAt(`${mark}${SEATED_SUFFIX}`);
+        newestSeat = Math.max(newestSeat, seatedAt ?? 0);
+        if (seatedAt !== undefined) {
+          seats.push(seatedAt);
+        }
       }
     }
-    return { live, newestSeat };
+    return { live, newestSeat, seats };
   }
 
   /**
@@ -2436,12 +2471,25 @@ export class EngineSlots {
    * (`written`), since it could not have counted that seat. A seat in the same clock tick may or may
    * not be in the count, so a tie reads as stale. The slots taken at or after that moment come off
    * it, since each is one the count could not have given to anything else. A tie there reads as taken.
+   *
+   * A free slot the count leaves to the seated gates is owed. One that has stood free for
+   * {@link GATE_LEND_MS} at every look of this process, while the gates owed it have been seated as
+   * long, is lent to side work, so a gate in its build step holds none idle. The gates' slots divide
+   * evenly between the seated gates, the earliest seated owning the highest, and each gate's slots are
+   * lent on its own seat. A lent slot is never taken back from a running engine. Each slot freed by
+   * its taker stands the time again, which leaves it to the gate first. A stale count, a held window
+   * and a gate not yet seated lend nothing.
    */
-  private async sideShare(newestSeat: number): Promise<{ side: number; look: Omit<GateLook, 'queue'> }> {
+  private async sideShare(
+    newestSeat: number,
+    seats: readonly number[],
+  ): Promise<{ side: number; look: Omit<GateLook, 'queue'> }> {
     const gated = Math.max(1, this.count - keptSlotsOf(this.count));
     const free = (await this.openSlots()).filter((slot) => slot < gated);
     const none = { side: 0, look: { free, limit: 0, since: [] } };
+    const standing = this.standingFreeFor(free);
     if (await this.windowHeld()) {
+      this.standingFree.clear();
       return none;
     }
     const path = join(this.directory, SPARE_FILE);
@@ -2457,6 +2505,7 @@ export class EngineSlots {
       said.written <= newestSeat ||
       (await this.freeAsRead(content, writtenAt))
     ) {
+      this.standingFree.clear();
       return none;
     }
     const since = Array.from({ length: gated }, (_, slot) => slot)
@@ -2467,8 +2516,32 @@ export class EngineSlots {
       })
       .toSorted((a, b) => a.at - b.at || a.slot - b.slot)
       .map((one) => one.slot);
-    const side = Math.max(0, Math.min(said.count - since.length, free.length));
-    return { side, look: { free, limit: said.count, since } };
+    const counted = Math.max(0, Math.min(said.count - since.length, free.length));
+    const owedFree = free.toSorted((a, b) => b - a).slice(counted);
+    const lent = lentSlotsOf(owedFree, standing, seats, gated, Date.now());
+    return {
+      side: counted + lent,
+      look: { free, limit: lent > 0 ? since.length + counted + lent : said.count, since },
+    };
+  }
+
+  /**
+   * Those of [param free] that have stood free at every look of this process for {@link GATE_LEND_MS}.
+   * A slot not free now starts its time again.
+   */
+  private standingFreeFor(free: readonly number[]): Set<number> {
+    const now = Date.now();
+    for (const slot of this.standingFree.keys()) {
+      if (!free.includes(slot)) {
+        this.standingFree.delete(slot);
+      }
+    }
+    for (const slot of free) {
+      this.standingFree.set(slot, this.standingFree.get(slot) ?? now);
+    }
+    return new Set(
+      [...this.standingFree].filter(([, since]) => now - since >= GATE_LEND_MS).map(([slot]) => slot),
+    );
   }
 
   /** When the file at [param path] was last written, in milliseconds, or undefined where it is not there. */

@@ -233,6 +233,7 @@ import {
   FolderChanges,
   FollowedLanes,
   fileTimeMs,
+  GATE_LEND_MS,
   gamesKeptOf,
   giveBackSlot,
   handedRunSlot,
@@ -76912,6 +76913,183 @@ function eightSlotsWithTheKeptOnesHeld(
   return directory;
 }
 
+/** Slots 0 and 1 held by the gates' engines, 2 to 5 free, the kept 6 and 7 held, and a clock the checks move. */
+interface LendRig {
+  directory: string;
+  side: EngineSlots;
+  gate: EngineSlots;
+  /** The clock at the start. */
+  start: number;
+  /** Moves the clock to [param at] and writes a count of [param spare] as of then. */
+  at: (at: number, spare?: number) => void;
+  /** Seats the gate [param name] at [param when], or leaves its mark waiting. */
+  seat: (name: string, when: number, seated?: boolean) => void;
+}
+
+async function withALendRig(run: (rig: LendRig) => Promise<void>): Promise<void> {
+  const started = await ownStart();
+  const directory = eightSlotsWithTheKeptOnesHeld(started, false, [0, 1]);
+  const realNow = Date.now;
+  let now = realNow() + 3_600_000;
+  const start = now;
+  const holder = { pid: process.pid, started };
+  const rig: LendRig = {
+    directory,
+    start,
+    side: new EngineSlots(directory, 8, holder, undefined, () => 'other'),
+    gate: new EngineSlots(directory, 8, holder, undefined, () => 'gate'),
+    at: (at, spare = 0) => {
+      now = at;
+      writeFileSync(
+        join(directory, SPARE_FILE),
+        JSON.stringify({ spare, pid: process.pid, started, written: at }),
+      );
+    },
+    seat: (name, when, seated = true) => {
+      writeFileSync(join(directory, QUEUED_FOLDER, `${name}.json`), JSON.stringify(holder));
+      if (seated) {
+        const file = join(directory, QUEUED_FOLDER, `${name}.json.seated`);
+        writeFileSync(file, '');
+        utimesSync(file, new Date(when), new Date(when));
+      }
+    },
+  };
+  try {
+    Date.now = () => now;
+    await run(rig);
+  } finally {
+    Date.now = realNow;
+    rig.side.releaseAll();
+    rig.gate.releaseAll();
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** The numbers of the slots [param slots] takes until it takes none, kept held. */
+async function takesWhatItCan(slots: EngineSlots): Promise<string[]> {
+  const taken: string[] = [];
+  for (let lock = await slots.takeFree(); lock !== null; lock = await slots.takeFree()) {
+    taken.push(basename(lock));
+  }
+  return taken;
+}
+
+/**
+ * A seated gate's owed slots, which no engine of the gate takes for ten seconds, are lent to side
+ * work, and not before. Once lent, a slot any taker frees goes to the gate before side work, and a
+ * slot a side engine holds is never taken back.
+ */
+async function testAGateSlotNoEngineTakesForTenSecondsIsLentToSideWork(): Promise<void> {
+  await withALendRig(async ({ start, at, seat, side, gate, directory }) => {
+    seat('gate-1', start - 60_000);
+    at(start);
+    assert.equal(await side.takeFree(), null, 'a seated gate keeps its four free slots at first');
+    at(start + GATE_LEND_MS - 1);
+    assert.equal(await side.takeFree(), null, 'and until ten seconds have passed');
+    at(start + GATE_LEND_MS);
+    assert.deepEqual(
+      await takesWhatItCan(side),
+      ['5.lock', '4.lock', '3.lock', '2.lock'],
+      'then side work takes all four',
+    );
+
+    at(start + GATE_LEND_MS + 1000);
+    side.release(join(directory, '5.lock'));
+    assert.equal(await side.takeFree(), null, 'a slot side work frees is not lent at once');
+    const back = await gate.takeFree();
+    assert.equal(back === null ? null : basename(back), '5.lock', 'it goes to the gate first');
+    at(start + GATE_LEND_MS + 60_000);
+    assert.equal(await gate.takeFree(), null, 'a slot a side engine still holds is not taken back');
+    assert.deepEqual(
+      ['4.lock', '3.lock', '2.lock'].map((name) => existsSync(join(directory, name))),
+      [true, true, true],
+      'and its lock stands',
+    );
+  });
+}
+
+/** A gate whose engines take the owed slots within ten seconds has nothing lent. */
+async function testAGateThatTakesItsSlotsInTimeLendsNothing(): Promise<void> {
+  await withALendRig(async ({ start, at, seat, side, gate, directory }) => {
+    seat('gate-1', start - 60_000);
+    at(start);
+    assert.equal(await side.takeFree(), null, 'nothing is lent at first');
+    at(start + 5000);
+    assert.deepEqual(await takesWhatItCan(gate), ['2.lock', '3.lock', '4.lock', '5.lock']);
+    for (const after of [GATE_LEND_MS, 3 * GATE_LEND_MS]) {
+      at(start + after);
+      assert.equal(await side.takeFree(), null, `the gate holds its share ${String(after)} ms in`);
+    }
+    for (const lock of ['2', '3', '4', '5']) {
+      gate.release(join(directory, `${lock}.lock`));
+    }
+    at(start + 100_000);
+    assert.equal(await side.takeFree(), null, 'slots the gate frees stand the time again');
+    const retaken = await gate.takeFree();
+    assert.equal(retaken === null ? null : basename(retaken), '2.lock', 'the gate retakes its lowest');
+    at(start + 100_000 + GATE_LEND_MS);
+    assert.deepEqual(
+      await takesWhatItCan(side),
+      ['5.lock', '4.lock', '3.lock'],
+      'and the ones it did not retake are lent',
+    );
+  });
+}
+
+/** Each seated gate's owed slots are timed from its own seat. */
+async function testTwoSeatedGatesHaveTheirOwedSlotsLentOnTheirOwnSeats(): Promise<void> {
+  await withALendRig(async ({ start, at, seat, side }) => {
+    seat('gate-1', start - 60_000);
+    at(start);
+    assert.equal(await side.takeFree(), null, 'the slots begin to stand free');
+    at(start + 6001);
+    seat('gate-2', start + 6000);
+    at(start + GATE_LEND_MS);
+    assert.deepEqual(
+      await takesWhatItCan(side),
+      ['5.lock', '4.lock', '3.lock'],
+      "only the older gate's three slots of six are lent",
+    );
+    at(start + 16_000);
+    assert.deepEqual(
+      await takesWhatItCan(side),
+      ['2.lock'],
+      "and the younger gate's free one ten seconds after",
+    );
+  });
+}
+
+/** The queue's count is read as before: none lent on a stale count, or while no gate is seated. */
+async function testNothingIsLentOnAStaleCountOrToAGateNotYetSeated(): Promise<void> {
+  await withALendRig(async ({ start, at, seat, side }) => {
+    seat('gate-1', start - 60_000);
+    at(start);
+    assert.equal(await side.takeFree(), null);
+    at(start + 60_000, 0);
+    writeFileSync(
+      join(side.directory, SPARE_FILE),
+      JSON.stringify({
+        spare: 0,
+        pid: process.pid,
+        started: await ownStart(),
+        written: start + 60_000 - SPARE_STALE_MS - 1000,
+      }),
+    );
+    assert.equal(await side.takeFree(), null, 'a stale count lends nothing, whatever the age of the slots');
+    at(start + 60_001);
+    assert.equal(await side.takeFree(), null, 'and the time begins again with the next fresh count');
+    at(start + 60_001 + GATE_LEND_MS);
+    const lent = await side.takeFree();
+    assert.equal(lent === null ? null : basename(lent), '5.lock', 'which lends again once it has run');
+    side.release(lent ?? '');
+    at(start + 70_000);
+    assert.equal(await side.takeFree(), null, 'and the slot it frees stands the time again');
+    rmSync(join(side.directory, QUEUED_FOLDER, 'gate-1.json.seated'));
+    at(start + 120_000);
+    assert.equal(await side.takeFree(), null, 'a gate not yet seated is lent nothing either');
+  });
+}
+
 /**
  * A gate whose process is alive keeps the free slots of the gates from side work unless a fresh
  * count from a live writer says how many are spare, seated or not: a queue process counting for a
@@ -132725,6 +132903,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testSideWorkTakesOnlyKeptAndSpareSlotsWhileAGateWaitsWhateverItsAge,
   testASeatedMarkWithNoSpareGivesAYoungAndAnAgedTakeNoGateSlot,
   testSideWorkTakesNoGateSlotWhileALiveGateHasNoFreshCount,
+  testAGateSlotNoEngineTakesForTenSecondsIsLentToSideWork,
+  testAGateThatTakesItsSlotsInTimeLendsNothing,
+  testTwoSeatedGatesHaveTheirOwedSlotsLentOnTheirOwnSeats,
+  testNothingIsLentOnAStaleCountOrToAGateNotYetSeated,
   testACountFromBeforeASeatIsStaleForSideWork,
   testTwoSideTakesInARowGetOneSpareGateSlotBetweenThem,
   testTwoConcurrentSideTakesUnderOneSpareSlotNeverHoldTwoGateSlots,
