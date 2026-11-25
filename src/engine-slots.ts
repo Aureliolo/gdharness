@@ -66,6 +66,7 @@ import { alive } from './alive.js';
 import { cacheHome } from './cache-home.js';
 import { callNotes, callProgress, callSignal, callSlotWaits, waitedUnlessAborted } from './call-signal.js';
 import { helperPid } from './desktop.js';
+import { memoryAvailable } from './engine-launch.js';
 import { ceilingFor, engineNeed, gigabytes, MEMORY_PER_ENGINE } from './engine-memory.js';
 import { wholeFlag } from './launch.js';
 import {
@@ -474,6 +475,11 @@ interface SlotWaiter {
   readonly seen: number;
   /** The bytes its engine will hold, where it waits for memory in line, else 0. */
   readonly memory?: number;
+  /**
+   * The bytes of memory its mark says a wait for several slots needs, else 0. A taker of several
+   * that memory refuses a start on fewer than it wants is passed, at the look that finds it so.
+   */
+  readonly need?: number;
 }
 
 /**
@@ -572,7 +578,7 @@ function waiterOfMark(
   if (Number.isNaN(madeAt) || content === null || holder === null || !alive(holder.pid)) {
     return null;
   }
-  const parsed: unknown = JSON.parse(content);
+  const { parsed, whole } = parsedWithWholes(content);
   const {
     taker: marked,
     since,
@@ -605,7 +611,54 @@ function waiterOfMark(
     game: holder.game === true,
     ...repositoryOfMark(repository, takerNamed(taker), highList),
     memory: marked === MEMORY_TAKER ? positiveOr0(memory) : 0,
+    need: marked === MEMORY_TAKER ? 0 : positiveOr0(whole.get(NEED_KEY)),
   };
+}
+
+/** Where a mark of several names the bytes of memory its start needs, and a lock the bytes its start was short. */
+const NEED_KEY = 'need';
+const SHORT_KEY = 'short';
+
+/** What a JSON reviver is given third where the runtime gives it: the text a number was read from. */
+interface ReadFrom {
+  readonly source?: string;
+}
+
+/**
+ * [param content] read as JSON, with each of its top-level keys whose number is written as a whole
+ * number. A figure written with a point or an exponent, such as 6.0, is not one, as the other takers
+ * of the line read it, though JSON.parse makes the same number of both.
+ */
+function parsedWithWholes(content: string): { parsed: unknown; whole: ReadonlyMap<string, number> } {
+  const wholes = new Map<unknown, Map<string, number>>();
+  const parsed: unknown = JSON.parse(
+    content,
+    function noteWhole(this: unknown, key: string, value: unknown, context?: ReadFrom): unknown {
+      if (typeof value === 'number' && /^-?\d+$/u.test(context?.source ?? '')) {
+        const keys = wholes.get(this) ?? new Map<string, number>();
+        keys.set(key, value);
+        wholes.set(this, keys);
+      }
+      return value;
+    },
+  );
+  return { parsed, whole: wholes.get(parsed) ?? new Map() };
+}
+
+/**
+ * The bytes the start a lock's [param content] records was short of memory, by the job it names, or
+ * undefined where it records none: what that job has yet to take of the memory free now.
+ */
+function shortStartOf(content: string): { job: string; short: number } | undefined {
+  let read: ReturnType<typeof parsedWithWholes>;
+  try {
+    read = parsedWithWholes(content);
+  } catch {
+    return undefined;
+  }
+  const short = read.whole.get(SHORT_KEY);
+  const job = isRecord(read.parsed) ? read.parsed['job'] : undefined;
+  return short === undefined || typeof job !== 'string' ? undefined : { job, short };
 }
 
 /**
@@ -1561,6 +1614,8 @@ export class EngineSlots {
   private readonly machineMemory: number;
   /** The tool whose kept peak counts an engine this process takes a slot for, where a take names none. */
   private readonly tool: PeakTool;
+  /** The memory free now, read afresh at every look that asks. */
+  private readonly available: () => Promise<number>;
 
   constructor(
     directory: string,
@@ -1569,7 +1624,11 @@ export class EngineSlots {
     say?: (line: string) => void,
     taker: () => SlotTaker = () => slotTaker(),
     project?: string,
-    machine: { readonly memory?: number; readonly tool?: PeakTool } = {},
+    machine: {
+      readonly memory?: number;
+      readonly tool?: PeakTool;
+      readonly available?: () => Promise<number>;
+    } = {},
   ) {
     this.directory = directory;
     this.count = count;
@@ -1579,6 +1638,7 @@ export class EngineSlots {
     this.project = project;
     this.machineMemory = machine.memory ?? totalmem();
     this.tool = machine.tool ?? 'project_test';
+    this.available = machine.available ?? (async () => (await memoryAvailable()).bytes);
     this.drawn = slotsDrawnOn(count, taker(), 'none');
   }
 
@@ -1944,6 +2004,23 @@ export class EngineSlots {
   }
 
   /**
+   * The memory a taker of several may start short by: the memory free now less
+   * {@link OUTSIDE_MEMORY_BYTES}, never past what the slots leave of physical memory, less what each
+   * job a held lock records as started short has yet to take, once a job.
+   */
+  private async shortRoom(): Promise<number> {
+    const starts = new Map<string, number>();
+    for (const { content } of await this.heldLocks()) {
+      const start = content === null ? undefined : shortStartOf(content);
+      if (start !== undefined) {
+        starts.set(start.job, start.short);
+      }
+    }
+    const free = Math.min(await this.available(), this.machineMemory - this.count * ENGINE_MEMORY_BYTES);
+    return [...starts.values()].reduce((left, short) => left - short, free - OUTSIDE_MEMORY_BYTES);
+  }
+
+  /**
    * Whether the engine of a take may not start now for want of memory, which it then records in the
    * draw and in [param line]. It is held back only where a slot of [param tried] is free, since
    * otherwise the wait is for a slot. The live locks' memory, with the [param ahead] bytes of
@@ -2250,7 +2327,11 @@ export class EngineSlots {
   /**
    * The free slots the takers [param ahead] take first, in their order, each with the mark of the one
    * taking it: see {@link slotsClaimed}. A game the games limit holds back draws only slots that are
-   * held, so it claims none. A taker never takes a slot [param passed] names for its mark.
+   * held, so it claims none. A taker never takes a slot [param passed] names for its mark. A taker of
+   * several, whose mark names the memory it needs, claims none at a look where its draw is fewer
+   * than it wants and its need, less what that draw's slots stand for, is past {@link shortRoom}, since
+   * it cannot start on that draw. It claims again at the first look where the memory allows. Its
+   * wants and need are read from its mark, and the memory free, at each look.
    */
   private async claimedAhead(
     ahead: readonly SlotWaiter[],
@@ -2266,12 +2347,27 @@ export class EngineSlots {
     }
     const now = Date.now();
     const drawn: (readonly number[])[] = [];
+    const draws = new Map<string, readonly number[]>();
+    let room: number | undefined;
+    const refused = async (one: SlotWaiter, draw: readonly number[]): Promise<boolean> => {
+      const most = Math.min(one.wants, draw.length);
+      const need = one.need ?? 0;
+      if (need === 0 || most === 0 || most >= one.wants) {
+        return false;
+      }
+      room ??= await this.shortRoom();
+      return need - most * ENGINE_MEMORY_BYTES > room;
+    };
+    for (const one of ahead) {
+      const draw = (await this.drawnFor(one.taker, one.game, queued)).numbers;
+      draws.set(one.mark, (await refused(one, draw)) ? [] : draw);
+    }
     // A taker waiting for several slots at once is ahead once for each, for its first drain.
     const places = ahead.flatMap((one) =>
       Array.from({ length: now - one.since < SLOTS_DRAIN_MS ? one.wants : 1 }, () => one),
     );
     for (const one of places) {
-      const numbers = (await this.drawnFor(one.taker, one.game, queued)).numbers;
+      const numbers = draws.get(one.mark) ?? [];
       drawn.push(numbers.filter((slot) => passed.get(one.mark)?.has(slot) !== true));
     }
     return new Map(
