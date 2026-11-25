@@ -237,6 +237,7 @@ import {
   GATE_LEND_MS,
   gamesKeptOf,
   giveBackSlot,
+  giveBackSlotAsync,
   handedRunSlot,
   handSlot,
   handSlotToGame,
@@ -93982,7 +93983,9 @@ async function testSlotlessEnginesOfOneProjectRunOneAtATime(): Promise<void> {
  * long it waited, as a slot wait is. A call that did not wait is told neither.
  */
 async function testAWaitForTheProjectsLockIsToldAsASlotWait(): Promise<void> {
-  await withServersOnAFullMachine(2, 4000, async (machine) => {
+  // The engine stays long enough that the second call, asked once the first has started on a busy
+  // machine, still has more than the second a wait must last to be counted.
+  await withServersOnAFullMachine(2, 9000, async (machine) => {
     const [first, second] = machine.servers;
     const [project] = machine.projects;
     assert.ok(first !== undefined && second !== undefined && project !== undefined);
@@ -94069,6 +94072,125 @@ async function testADeadHoldersProjectLockIsTakenOver(): Promise<void> {
     assert.ok(await untilTrue(named, 30_000), `the lock names the import's process: ${printed.text()}`);
     assert.ok(await untilTrue(() => /^imported true$/m.test(printed.text()), 40_000), printed.text());
     assert.ok(await untilTrue(() => !existsSync(lock), 10_000), 'the lock is given back');
+  });
+}
+
+/** A project lock whose key is all digits, given back, leaves nothing in the projects folder. */
+async function testAProjectLockWithADigitKeyLeavesNoFreedMark(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-digit-key-'));
+  try {
+    const folder = join(directory, PROJECTS_FOLDER);
+    mkdirSync(folder);
+    const lock = join(folder, '1234567890123456.lock');
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, started: await ownStart() }));
+    giveBackSlot(lock, process.pid);
+    assert.deepEqual(readdirSync(folder), [], 'the lock is gone and no freed mark was written');
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, started: await ownStart() }));
+    await giveBackSlotAsync(lock, process.pid);
+    assert.deepEqual(readdirSync(folder), [], 'the same holds for the give-back on the event loop');
+    const slot = join(directory, '7.lock');
+    writeFileSync(slot, JSON.stringify({ pid: process.pid, started: await ownStart() }));
+    giveBackSlot(slot, process.pid);
+    assert.deepEqual(
+      readdirSync(directory).toSorted(),
+      [FREED_FOLDER, PROJECTS_FOLDER],
+      'a slot lock still marks',
+    );
+    assert.deepEqual(readdirSync(join(directory, FREED_FOLDER)), ['7']);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** The classes command waiting for its project's lock says so on its output, naming the holder. */
+async function testTheClassesCommandSaysItWaitsForItsProjectsLock(): Promise<void> {
+  await onAFullMachine(async (machine) => {
+    machine.holder.releaseAll();
+    const classesIn = async (): Promise<{ code: number | null; said: string }> => {
+      const command = spawnHidden(process.execPath, ['build/cli.js', 'classes', machine.project], {
+        env: {
+          ...process.env,
+          GODOT_PATH: memoryEngine(),
+          [SLOTS_VARIABLE]: machine.directory,
+          [SLOT_COUNT_VARIABLE]: '1',
+          GDH_STAY_MS: '0',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const printed = sayingOf(command);
+      const code = await Promise.race([printed.exited, lateAfter(ENGINE_CALL_TIMEOUT_MS)]);
+      if (code === 'late') {
+        command.kill();
+        await printed.exited;
+      }
+      return { code: code === 'late' ? null : code, said: printed.text() };
+    };
+    const alone = await classesIn();
+    assert.equal(alone.code, 0, alone.said);
+    assert.doesNotMatch(alone.said, /Waiting/, 'a command that did not wait says no wait');
+    const lock = projectLockOf(machine.project, machine.directory);
+    const holding = machine.program('await headless.runImport(engine, project);', { GDH_STAY_MS: '12000' });
+    const holder = sayingOf(holding);
+    const held = (): boolean => {
+      try {
+        return holderOf(readFileSync(lock, 'utf8'))?.pid === holding.pid;
+      } catch {
+        return false;
+      }
+    };
+    assert.ok(
+      await untilTrue(held, 30_000),
+      `the stand-in engine holds the project's lock: ${holder.text()}`,
+    );
+    const waiting = await classesIn();
+    assert.equal(waiting.code, 0, waiting.said);
+    const told = waiting.said
+      .split('\n')
+      .filter((line) => line.startsWith('gdharness: Waiting'))
+      .map((line) => line.replace(/Waiting \d+ s so far/, 'Waiting N s so far'));
+    assert.deepEqual(
+      told,
+      [
+        `gdharness: Waiting N s so far for an engine: another engine of the project ${machine.project} is running by pid ${String(holding.pid)}, and this one starts when it ends.`,
+      ],
+      waiting.said,
+    );
+    await holder.exited;
+  });
+}
+
+/**
+ * Inside inOneSlot every engine step runs on the one slot, which stays held between the steps and
+ * is given back at the end, and withTheSlotFree gives it back for the length of its wait.
+ */
+async function testInOneSlotHoldsOneSlotAndAWaitGivesItBack(): Promise<void> {
+  await onAFullMachine(async (machine) => {
+    machine.holder.releaseAll();
+    const out = await ranToTheEnd(
+      machine,
+      [
+        "const fs = await import('node:fs');",
+        'const slot = directory + "/0.lock";',
+        'const locks = [];',
+        'await slots.inOneSlot(async () => {',
+        '  await slots.inASlot(async (lock) => { locks.push(lock); });',
+        "  console.log('between ' + fs.existsSync(slot));",
+        '  await slots.inASlot(async (lock) => { locks.push(lock); });',
+        '  await slots.withTheSlotFree(async () => {',
+        "    console.log('waiting ' + fs.existsSync(slot));",
+        '  });',
+        "  console.log('after ' + fs.existsSync(slot));",
+        '  await slots.inASlot(async (lock) => { locks.push(lock); });',
+        '});',
+        "console.log('end ' + fs.existsSync(slot) + ' ' + new Set(locks.map((lock) => String(lock).replaceAll('\\\\', '/'))).size);",
+      ].join('\n'),
+    );
+    assert.ok(out !== null, 'the program never ended');
+    assert.deepEqual(
+      out.split('\n').filter((line) => /^(between|waiting|after|end) /.test(line)),
+      ['between true', 'waiting false', 'after false', 'end false 1'],
+      out,
+    );
   });
 }
 
@@ -135618,6 +135740,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testSlotlessEnginesOfOneProjectRunOneAtATime,
   testAWaitForTheProjectsLockIsToldAsASlotWait,
   testADeadHoldersProjectLockIsTakenOver,
+  testAProjectLockWithADigitKeyLeavesNoFreedMark,
+  testTheClassesCommandSaysItWaitsForItsProjectsLock,
+  testInOneSlotHoldsOneSlotAndAWaitGivesItBack,
   testASlotCommandGrantsTheSlotAnEngineRunsOn,
   testASlotCommandRefusalFailsTheStartWithItsReason,
   testASlotCommandThatDoesNotAnswerFailsTheStartWithTheCause,

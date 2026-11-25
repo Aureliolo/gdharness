@@ -455,10 +455,16 @@ function freedTimeOf(content: string): number | undefined {
   return typeof freed === 'number' && Number.isFinite(freed) ? freed : undefined;
 }
 
-/** The freed mark of the slot whose lock is [param lock], or undefined for a lock of no numbered slot. */
+/**
+ * The freed mark of the slot whose lock is [param lock], or undefined for a lock of no numbered
+ * slot. A lock in {@link PROJECTS_FOLDER} is a project's, whatever its key looks like.
+ */
 function freedMarkOf(lock: string): string | undefined {
+  const folder = dirname(lock);
   const slot = /^(\d+)\.lock$/.exec(basename(lock))?.[1];
-  return slot === undefined ? undefined : join(dirname(lock), FREED_FOLDER, slot);
+  return slot === undefined || basename(folder) === PROJECTS_FOLDER
+    ? undefined
+    : join(folder, FREED_FOLDER, slot);
 }
 
 /**
@@ -3655,6 +3661,7 @@ function heldBySaid(holder: SlotHolder | null): string {
 /**
  * Runs [param body] holding [param project]'s lock, waiting while another engine of it holds it. A
  * call that waits is told so as a slot wait is, and its answer's engine_slot_wait counts the wait.
+ * A command with no call to report to says it on its own output ({@link sayWaitsTo}).
  */
 async function inTheProjectsTurn<T>(body: () => Promise<T>, project: string | undefined): Promise<T> {
   const lock = projectLockOf(project);
@@ -3673,6 +3680,14 @@ async function inTheProjectsTurn<T>(body: () => Promise<T>, project: string | un
     if (progress !== undefined && now - said >= WAIT_SAID_MS) {
       said = now;
       progress((now - began) / 1000, projectWaitSaid(now - began, project, blockedBy));
+    } else if (
+      progress === undefined &&
+      saidTo !== undefined &&
+      now - began >= COMMAND_WAIT_SAID_MS &&
+      now - said >= WAIT_SAID_MS
+    ) {
+      said = now;
+      saidTo(projectWaitSaid(now - began, project, blockedBy));
     }
     await delay(PROJECT_LOOK_MS);
   }
