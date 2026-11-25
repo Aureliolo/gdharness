@@ -88261,6 +88261,11 @@ async function testACaseAwaitingThreeHundredFramesEndsInSeconds(): Promise<void>
 async function testASuiteNamingItsOwnFrameCapKeepsIt(): Promise<void> {
   const body = (cap: number): string =>
     [
+      '\tvar runner: GDScript = load(OS.get_environment("RUNNER_GD")) as GDScript',
+      ...['Windows', 'Linux', 'macOS'].map(
+        (system) =>
+          `\tassert_int(runner.call("frame_sleep_usec", "${system}", ${String(cap)})).is_equal(${String(FRAME_SLEEP_USEC)})`,
+      ),
       `\tassert_int(Engine.max_fps).is_equal(${String(cap)})`,
       `\tassert_int(OS.low_processor_usage_mode_sleep_usec).is_equal(${String(FRAME_SLEEP_USEC)})`,
       '',
@@ -88274,6 +88279,19 @@ async function testASuiteNamingItsOwnFrameCapKeepsIt(): Promise<void> {
   if (bySetting) {
     assert.equal(bySetting.status, 0, bySetting.said);
     assert.ok(bySetting.end, `the case ran to its end: ${bySetting.said}`);
+  }
+}
+
+/** A project setting its own low-processor wait still gets the frame wait the runner chooses for the system. */
+async function testAProjectSettingItsOwnLowProcessorWaitGetsTheRunnersWait(): Promise<void> {
+  const wanted = process.platform === 'win32' ? WINDOWS_FRAME_SLEEP_USEC : FRAME_SLEEP_USEC;
+  const probe = await runSleepProbe(
+    `\tassert_int(OS.low_processor_usage_mode_sleep_usec).is_equal(${String(wanted)})\n`,
+    { settings: 'run/low_processor_mode=true\nrun/low_processor_mode_sleep_usec=20000\n' },
+  );
+  if (probe) {
+    assert.equal(probe.status, 0, probe.said);
+    assert.ok(probe.end, `the case ran to its end: ${probe.said}`);
   }
 }
 
@@ -133076,6 +133094,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACaseWaitingOnAThreadUsesUnderHalfACore,
   testACaseAwaitingThreeHundredFramesEndsInSeconds,
   testASuiteNamingItsOwnFrameCapKeepsIt,
+  testAProjectSettingItsOwnLowProcessorWaitGetsTheRunnersWait,
   testEachEnginesFolderNamesItsLaneAndPid,
   testEveryShareAnEngineIsHandedNamesItsLaneAndPid,
   testAHandedShareKeepsItsEnginesLane,
