@@ -177,6 +177,7 @@ import {
   settledRunSlot,
   slotEngineNamed,
   slotForCall,
+  withTheSlotFree,
 } from './engine-slots.js';
 import { processorSecondsOf } from './engine-spent.js';
 import { errorCode, errorMessage, Refusal } from './errors.js';
@@ -7148,7 +7149,7 @@ export class GodotServer {
       return await this.handleProjectSettingsWrite(op, settingsWrite, args);
     }
     if (tool === 'project_import' && op === 'set_options') {
-      return await this.inOneSlotUnlessEdited(args, () => this.handleSetImportOptions(args));
+      return await this.handleSetImportOptions(args);
     }
     if (tool === 'project_export' && op === 'add_preset') {
       return await this.handleAddExportPreset(args);
@@ -7214,7 +7215,7 @@ export class GodotServer {
     args: OperationParams,
   ): Promise<ToolResponse> {
     if (headless === 'create_script') {
-      return await inOneSlot(() => this.handleCreateScript(answerable));
+      return await this.handleCreateScript(answerable);
     }
     if (headless === 'modify_script') {
       return await this.handleModifyScript(answerable);
@@ -7378,7 +7379,7 @@ export class GodotServer {
         }
 
       case 'script_edit':
-        return await this.inOneSlotUnlessEdited(args, () => this.handleRenameSymbol(args));
+        return await this.handleRenameSymbol(args);
       case 'script_info':
         return await this.askScriptInfo(...(SCRIPT_INFO_CALLS[op] ?? ['lsp_get_hover', 'Hover']), args);
       case 'script_diagnostics':
@@ -7396,7 +7397,7 @@ export class GodotServer {
       case 'resource_edit':
         switch (op) {
           case 'move':
-            return await this.inOneSlotUnlessEdited(args, () => this.handleMoveFile(args));
+            return await this.handleMoveFile(args);
           case 'read': {
             const { file, inner } = keptInside(readString(args, 'resourcePath') ?? '');
             const kept: OperationParams =
@@ -8410,7 +8411,8 @@ export class GodotServer {
     // engine, waits for a slot of its own and writes the same cache file.
     const running = this.classRebuilds.get(projectPath);
     if (running !== undefined) {
-      const joined = await running;
+      // Its engine may be queued for the very slot this call holds between its own engines.
+      const joined = await withTheSlotFree(async () => await running);
       if (!joined.ok) {
         return joined;
       }
@@ -8527,6 +8529,11 @@ export class GodotServer {
     if (!this.editorHasOpen(projectPath)) {
       return { waitedMs: 0, stillScanning: false };
     }
+    // An editor's scan can take minutes, which a slot held between engines would idle through.
+    return await withTheSlotFree(async () => await this.untilTheScanIsWritten(projectPath));
+  }
+
+  private async untilTheScanIsWritten(projectPath: string): Promise<ScanWait> {
     const started = Date.now();
     let sawAScan = false;
     let scanEndedAt: number | null = null;
@@ -9134,17 +9141,6 @@ export class GodotServer {
     force: boolean,
     timeoutMs: number,
   ): Promise<{ ok: true; payload: OperationParams } | { ok: false; response: ToolResponse }> {
-    return this.editorHasOpen(projectPath)
-      ? await this.reimportOf(projectPath, resourcePath, force, timeoutMs)
-      : await inOneSlot(() => this.reimportOf(projectPath, resourcePath, force, timeoutMs));
-  }
-
-  private async reimportOf(
-    projectPath: string,
-    resourcePath: string | undefined,
-    force: boolean,
-    timeoutMs: number,
-  ): Promise<{ ok: true; payload: OperationParams } | { ok: false; response: ToolResponse }> {
     const ask: OperationParams = resourcePath === undefined ? { includeUpToDate: force } : { resourcePath };
     const before = await this.operation('get_import_status', ask, projectPath);
     if (!before.ok) {
@@ -9461,28 +9457,7 @@ export class GodotServer {
     return { ok: true, finished: false };
   }
 
-  /**
-   * Runs [param body] holding one engine slot for every engine it starts, unless an editor of the
-   * project is open: its calls wait on that editor between engines, and a slot held across the wait
-   * would idle.
-   */
-  private async inOneSlotUnlessEdited<T>(args: OperationParams, body: () => Promise<T>): Promise<T> {
-    const projectPath = readNonEmptyString(args, 'projectPath');
-    return projectPath !== undefined && this.editorHasOpen(projectPath)
-      ? await body()
-      : await inOneSlot(body);
-  }
-
-  /** One headless operation, with the class rebuild it may need first, in one engine slot. */
   private async operation(
-    operation: string,
-    params: OperationParams,
-    projectPath: string,
-  ): Promise<HeadlessOutcome> {
-    return await inOneSlot(() => this.operationInSlot(operation, params, projectPath));
-  }
-
-  private async operationInSlot(
     operation: string,
     params: OperationParams,
     projectPath: string,
@@ -9650,7 +9625,7 @@ export class GodotServer {
       engineNote: engine.note ?? undefined,
       structure: projectStructure(project.value.path),
     };
-    return await inOneSlot(() => this.projectInfoSections(args, include, project, info));
+    return await this.projectInfoSections(args, include, project, info);
   }
 
   /** Each section project_info was asked for, run and written into [param info]. */
@@ -21474,14 +21449,6 @@ export class GodotServer {
    * fresh engine.
    */
   private async settleRenameOnDisk(
-    projectPath: string,
-    changed: readonly string[],
-    asked: { rebuildCache: boolean; moved: boolean },
-  ): Promise<{ ok: boolean; report: Record<string, unknown> }> {
-    return await inOneSlot(() => this.settledOnDisk(projectPath, changed, asked));
-  }
-
-  private async settledOnDisk(
     projectPath: string,
     changed: readonly string[],
     asked: { rebuildCache: boolean; moved: boolean },

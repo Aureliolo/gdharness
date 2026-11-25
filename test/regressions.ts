@@ -98016,8 +98016,8 @@ async function testScriptDiagnosticsSaysItsErrorsCameFromAnUnreadableClassList()
 let operationStandInBuilt: string | null = null;
 
 /**
- * A program a server accepts as an engine that answers the check_scripts and check_warnings
- * operations without a real Godot, and logs each start and end to the file GDH_STAND_IN_LOG names.
+ * A program a server accepts as an engine that answers the check_scripts, check_warnings and
+ * create_script operations without a real Godot, and logs each start and end to the file GDH_STAND_IN_LOG names.
  * A script whose path holds "broken" fails to compile, and stops the engine at it, as Godot does.
  * GDH_STAND_IN_PAUSE_MS holds each engine that long before it answers. GDH_STAND_IN_CRASH names an
  * operation whose engine ends with no answer.
@@ -98052,8 +98052,14 @@ function operationStandIn(): string {
       '  process.exit(1);',
       '}',
       "const broken = paths.findIndex((path) => path.includes('broken'));",
+      "if (operation === 'create_script') {",
+      "  const made = String(params.scriptPath ?? params.script_path).replace('res://', '');",
+      "  writeFileSync(process.env.GDH_STAND_IN_PROJECT + '/' + made, 'class_name ' + (params.className ?? params.class_name) + '\\nextends Node\\n');",
+      '}',
       'const answer =',
-      "  operation === 'check_scripts'",
+      "  operation === 'create_script'",
+      "    ? { full_path: params.scriptPath ?? params.script_path, class_name: params.className ?? params.class_name, parses: true }",
+      "    : operation === 'check_scripts'",
       '    ? {',
       '        checked: broken < 0 ? paths : paths.slice(0, broken + 1),',
       '        failed: broken < 0 ? [] : [paths[broken]],',
@@ -98327,6 +98333,218 @@ async function testScriptDiagnosticsInsideAHeldSlotTakesNone(): Promise<void> {
       assert.deepEqual(leftInSlots(slots), ['0.lock'], 'and no slot of its own is taken');
       assert.equal(readFileSync(lent, 'utf8'), lock, 'the lent slot stays with its holder');
     } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+    sweep(slots);
+  }
+}
+
+/** The answers of two script_diagnostics calls that meet at one class rebuild, and what the engines did. */
+interface TwoCallsAtOneRebuild {
+  readonly first: string | null;
+  readonly second: string | null;
+  readonly entries: StandInEntry[];
+  /** When the slot another process held from the first engine on was given back, if one was. */
+  readonly foreignGivenBackAt: number | null;
+}
+
+/**
+ * A call over three scripts, and a second call sent once the first one's engine started, after a
+ * class_name script was written. The second starts the class rebuild and the first joins it before
+ * its next engine. With [param slotCount] 2, another process takes the second slot once the first
+ * engine starts and keeps it for 12 seconds.
+ */
+async function twoDiagnosticsAtOneRebuild(slotCount: 1 | 2): Promise<TwoCallsAtOneRebuild> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-rebuild-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-rebuild-slots-'));
+  const logFile = join(project, 'stand-in.log');
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    for (const name of ['a', 'broken', 'c']) {
+      writeFileSync(join(project, `${name}.gd`), 'extends Node\n');
+    }
+    writeFileSync(logFile, '');
+    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
+    const taker = new EngineSlots(slots, slotCount, holder, undefined, () => 'other');
+    const server = new ServerProcess({
+      env: {
+        [SLOTS_VARIABLE]: slots,
+        [SLOT_COUNT_VARIABLE]: String(slotCount),
+        GODOT_PATH: operationStandIn(),
+        GDH_STAND_IN_LOG: logFile,
+        GDH_STAND_IN_PAUSE_MS: '1500',
+        GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+        GDHARNESS_LSP_PORT: String(await reservePort()),
+      },
+    });
+    let foreignGivenBackAt: number | null = null;
+    try {
+      await server.initialize('regression-test');
+      const diagnose = async (scriptPath: string | string[]): Promise<string | null> => {
+        const said = await server
+          .request('tools/call', { name: 'script_diagnostics', arguments: { projectPath: project, scriptPath } }, 40_000)
+          .catch(() => null);
+        return said === null ? null : (textOf(said) ?? null);
+      };
+      const first = diagnose(['a.gd', 'broken.gd', 'c.gd']);
+      assert.ok(
+        await cameTrue(() => standInEntries(logFile).some((entry) => entry.event === 'start'), 30_000),
+        'the first call starts its engine',
+      );
+      const foreign = slotCount === 2 ? await taker.take() : null;
+      const givenBack =
+        foreign === null
+          ? Promise.resolve()
+          : delay(12_000).then(() => {
+              foreignGivenBackAt = Date.now();
+              taker.release(foreign);
+            });
+      writeFileSync(join(project, 'fresh.gd'), 'class_name Fresh\nextends Node\n');
+      const second = diagnose('c.gd');
+      const [firstSaid, secondSaid] = await Promise.all([first, second]);
+      await givenBack;
+      return { first: firstSaid, second: secondSaid, entries: standInEntries(logFile), foreignGivenBackAt };
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+    sweep(slots);
+  }
+}
+
+/**
+ * Two calls on one slot, one joining the class rebuild the other started, both answer: the joiner
+ * gives its slot back while it waits, so the rebuild it waits for can run.
+ */
+async function testDiagnosticsJoiningAClassRebuildOnOneSlotBothAnswer(): Promise<void> {
+  const ran = await twoDiagnosticsAtOneRebuild(1);
+  const engines = ran.entries.filter((entry) => entry.event === 'start').map((entry) => entry.operation);
+  assert.ok(engines.includes('refresh_class_cache'), `the class cache is rebuilt: ${engines.join(', ')}`);
+  assert.match(ran.first ?? '', /Parse Error: stand-in/, `the first call answers: ${engines.join(', ')}`);
+  assert.match(ran.second ?? '', /"clean": true/, `the second call answers: ${engines.join(', ')}`);
+}
+
+/**
+ * With two slots, one held by another process, the rebuild a call joins runs on the slot the
+ * joiner held, rather than waiting for the other process while the joiner's slot idles.
+ */
+async function testDiagnosticsJoiningAClassRebuildHoldNoIdleSlot(): Promise<void> {
+  const ran = await twoDiagnosticsAtOneRebuild(2);
+  const rebuild = ran.entries.find((entry) => entry.event === 'start' && entry.operation === 'refresh_class_cache');
+  assert.ok(rebuild !== undefined, 'the class cache is rebuilt');
+  assert.notEqual(ran.foreignGivenBackAt, null);
+  assert.ok(
+    rebuild.at < (ran.foreignGivenBackAt ?? 0),
+    `the rebuild starts before the other process gives its slot back: ${(ran.foreignGivenBackAt ?? 0) - rebuild.at}`,
+  );
+  assert.match(ran.first ?? '', /Parse Error: stand-in/);
+  assert.match(ran.second ?? '', /"clean": true/);
+}
+
+/**
+ * script_edit create with the project's editor open holds no slot through its exchange with the
+ * editor: another taker queued behind its engine gets the slot before the call answers.
+ */
+async function testScriptCreateHoldsNoSlotWhileItAsksTheEditor(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-create-slot-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-create-slot-slots-'));
+  const logFile = join(project, 'stand-in.log');
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(logFile, '');
+    const port = await reservePort();
+    const server = new ServerProcess({
+      env: {
+        [SLOTS_VARIABLE]: slots,
+        [SLOT_COUNT_VARIABLE]: '1',
+        GODOT_PATH: operationStandIn(),
+        GDH_STAND_IN_LOG: logFile,
+        GDH_STAND_IN_PAUSE_MS: '1000',
+        GDH_STAND_IN_PROJECT: project,
+        GDHARNESS_BRIDGE_PORT: String(port),
+        GDHARNESS_LSP_PORT: String(await reservePort()),
+      },
+    });
+    let editor: WebSocket | null = null;
+    try {
+      await server.initialize('regression-test');
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+      editor = socket;
+      await new Promise<void>((settle, reject) => {
+        socket.once('open', () => {
+          settle();
+        });
+        socket.once('error', reject);
+      });
+      const asked: number[] = [];
+      let scanUntil = 0;
+      socket.on('message', (data: Buffer) => {
+        const message: unknown = JSON.parse(data.toString('utf8'));
+        if (get(message, 'type') !== 'tool_invoke') {
+          return;
+        }
+        const now = Date.now();
+        asked.push(now);
+        const tool = get(message, 'tool');
+        if (tool === 'rescan_filesystem' && scanUntil === 0) {
+          scanUntil = now + 2000;
+        }
+        const scanning = now < scanUntil;
+        const result =
+          tool === 'scan_status'
+            ? { ok: true, scanning, importing: false, sinceScanFinishedMs: scanning ? 0 : 600_000, openScenes: [], unsavedScenes: [] }
+            : { ok: true, started: true };
+        socket.send(JSON.stringify({ type: 'tool_result', id: get(message, 'id'), success: true, result }));
+      });
+      socket.send(JSON.stringify(greeting(project)));
+      for (let waited = 0; waited < 10_000; waited += 100) {
+        const now = get(
+          parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+          'editor',
+        );
+        if (get(now, 'connected') === true) {
+          break;
+        }
+        await delay(100);
+      }
+      const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
+      const taker = new EngineSlots(slots, 1, holder, undefined, () => 'other');
+      const call = server.request(
+        'tools/call',
+        {
+          name: 'script_edit',
+          arguments: { projectPath: project, op: 'create', scriptPath: 'res://made.gd', className: 'Made', extends: 'Node' },
+        },
+        60_000,
+      );
+      assert.ok(
+        await cameTrue(() => standInEntries(logFile).some((entry) => entry.event === 'start'), 30_000),
+        'the call starts its engine',
+      );
+      let competitorTookAt: number | null = null;
+      const competitor = taker.take().then((lock) => {
+        competitorTookAt = Date.now();
+        taker.release(lock);
+      });
+      const said = textOf(await call) ?? '';
+      const answeredAt = Date.now();
+      await Promise.race([competitor, delay(30_000)]);
+      const lastEnd = Math.max(
+        ...standInEntries(logFile)
+          .filter((entry) => entry.event === 'end')
+          .map((entry) => entry.at),
+      );
+      assert.ok(asked.some((at) => at > lastEnd), `the editor is asked after the last engine: ${said}`);
+      assert.notEqual(competitorTookAt, null, 'the slot is given back');
+      assert.ok(
+        (competitorTookAt ?? Number.POSITIVE_INFINITY) < answeredAt,
+        `the slot is free while the call asks the editor: ${(competitorTookAt ?? 0) - answeredAt}`,
+      );
+    } finally {
+      editor?.close();
       await server.stop();
     }
   } finally {
@@ -132716,6 +132934,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testScriptDiagnosticsWaitsOnceOnABusyMachine,
   testScriptDiagnosticsGivesItsSlotBackWhenItEndsMidway,
   testScriptDiagnosticsInsideAHeldSlotTakesNone,
+  testDiagnosticsJoiningAClassRebuildOnOneSlotBothAnswer,
+  testDiagnosticsJoiningAClassRebuildHoldNoIdleSlot,
+  testScriptCreateHoldsNoSlotWhileItAsksTheEditor,
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
   testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed,
   testWhatAStaleTypeDependsOnIsNamed,
