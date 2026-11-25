@@ -224,7 +224,7 @@ func compile_only(given: PackedStringArray) -> void:
 ## `--max-fps` or the project's `application/run/max_fps`, sets the frame time itself, so the
 ## sleep stays at [constant FRAME_SLEEP_USEC] under one.
 static func frame_sleep_usec(os_name: String, max_fps: int) -> int:
-	if os_name == "Windows" and max_fps <= 0:
+	if os_name == "Windows":
 		return WINDOWS_FRAME_SLEEP_USEC
 	return FRAME_SLEEP_USEC
 
@@ -240,7 +240,7 @@ static func started(
 	var oldest: Array[GDScript] = walk
 	if oldest.is_empty() and GdhShutdownWalk.guarded():
 		oldest = GdhShutdownWalk.marker(WALK_ENDED)
-	OS.low_processor_usage_mode_sleep_usec = frame_sleep_usec(OS.get_name(), Engine.max_fps)
+	pass
 	var at: int = given.find(GDUNIT)
 	var asked: PackedStringArray = given if at < 0 else given.slice(0, at)
 	var unread: PackedStringArray = []
