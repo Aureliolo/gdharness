@@ -75015,10 +75015,10 @@ function testACrashInAReusedEngineFailsOnlyItsShareAndTheLaneGoesOn(): void {
 }
 
 /**
- * A share that ran out of memory in an engine that took several runs again alone, and each share has
- * the figure for what the engine held while it ran.
+ * A share that ran out of memory in an engine that took several keeps its verdict and runs no more,
+ * and each share has the figure for what the engine held while it ran.
  */
-function testAnOutOfMemoryShareInAReusedEngineRunsAgainAlone(): void {
+function testAnOutOfMemoryShareInAReusedEngineIsNotRunAgain(): void {
   const engines = commandTestEngines();
   if (engines === null) {
     return;
@@ -75041,9 +75041,91 @@ function testAnOutOfMemoryShareInAReusedEngineRunsAgainAlone(): void {
     const logs = run.result.logs ?? '';
     assert.deepEqual(
       ['engine-0-again', 'engine-1-again', 'engine-2-again'].map((name) => existsSync(join(logs, name))),
-      [false, true, false],
-      `only the share that ran out of memory ran again: ${logs}`,
+      [false, false, false],
+      `no share ran again: ${logs}`,
     );
+  } finally {
+    run.cleanup();
+  }
+}
+
+/** A suite whose `before()` prints the allocator's null, after which its one case passes. */
+const STARVING_IN_BEFORE =
+  'extends GdUnitTestSuite\n\nfunc before() -> void:\n\tprinterr("ERROR: Parameter \\"mem\\" is null.\\n   at: alloc_static (core/os/memory.cpp:75)")\n\nfunc test_it() -> void:\n\tawait get_tree().create_timer(1.5).timeout\n\tassert_bool(true).is_true()\n';
+
+/** The engines of [param result] that ran [param path], with their verdicts. */
+function enginesRunning(result: RunResult, path: string): boolean[] {
+  return result.engines.filter((engine) => engine.suites.includes(path)).map((engine) => engine.passed);
+}
+
+/** Whether an engine of the run kept under [param logs] was run again. */
+function anyRunAgain(logs: string): boolean {
+  return existsSync(logs) && readdirSync(logs).some((name) => name.endsWith('-again'));
+}
+
+/**
+ * An engine that ran out of memory in `before()` and failed no case is not run again, and the run is
+ * red, naming the engine and the memory each engine held.
+ */
+function testAStarvedEngineWithNoFailedCaseIsNotRunAgain(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const run = sharedEngineRun(
+    engines,
+    { a: STARVING_IN_BEFORE, b: sharedEngineSuite('\tawait get_tree().create_timer(1.5).timeout\n') },
+    2,
+  );
+  try {
+    assert.equal(run.status, 1, run.said);
+    assert.equal(run.result.passed, false, run.said);
+    assert.deepEqual(enginesRunning(run.result, 'res://tests/a_test.gd'), [false], run.said);
+    assert.deepEqual(enginesRunning(run.result, 'res://tests/b_test.gd'), [true], run.said);
+    assert.ok(
+      run.result.problems.some((problem) => problem.includes('the engine ran out of memory')),
+      run.result.problems.join('\n'),
+    );
+    assert.match(
+      run.said,
+      /An engine ran out of memory\. The most each held in this run: engine 0 \d+\.\d GB, engine 1 \d+\.\d GB\./,
+      `the run names each engine and what it held: ${run.said}`,
+    );
+    assert.doesNotMatch(run.said, /runs? again/, run.said);
+    assert.equal(anyRunAgain(run.result.logs ?? ''), false, `no engine ran again: ${run.said}`);
+  } finally {
+    run.cleanup();
+  }
+}
+
+/** An engine that ran out of memory beside one with a real failure: neither runs again, and both are named. */
+function testAStarvedEngineBesideARealFailureLeavesBothNamed(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const failing =
+    'extends GdUnitTestSuite\n\nfunc test_it() -> void:\n\tawait get_tree().create_timer(1.5).timeout\n\tassert_int(1).is_equal(2)\n';
+  const run = sharedEngineRun(engines, { a: STARVING_IN_BEFORE, b: failing }, 2);
+  try {
+    assert.equal(run.status, 1, run.said);
+    assert.deepEqual(enginesRunning(run.result, 'res://tests/a_test.gd'), [false], run.said);
+    assert.deepEqual(enginesRunning(run.result, 'res://tests/b_test.gd'), [false], run.said);
+    const { problems } = run.result;
+    assert.ok(
+      problems.some((problem) => problem.includes('the engine ran out of memory')),
+      problems.join('\n'),
+    );
+    assert.ok(
+      problems.some((problem) => problem.includes('res://tests/b_test.gd > test_it failed')),
+      problems.join('\n'),
+    );
+    assert.match(
+      run.said,
+      /An engine ran out of memory\. The most each held in this run: engine 0 \d+\.\d GB, engine 1 \d+\.\d GB\./,
+      run.said,
+    );
+    assert.equal(anyRunAgain(run.result.logs ?? ''), false, `no engine ran again: ${run.said}`);
   } finally {
     run.cleanup();
   }
@@ -89951,7 +90033,7 @@ function checksPeaksReadBackFromTheTimes(gib: number, peaks: SuiteTimes): void {
 /** The out-of-memory line names every engine of the run in index order, with its figure or unread. */
 function testARunOutOfMemoryNamesEveryEngine(): void {
   const gib = 1024 ** 3;
-  const first = 'An engine ran out of memory, so every engine that failed runs again, one at a time.';
+  const first = 'An engine ran out of memory.';
   assert.equal(
     outOfMemorySaid([{ index: 0, peakBytes: 3.3 * gib }, { index: 1 }]),
     `${first} The most each held in this run: engine 0 3.3 GB, engine 1 unread.`,
@@ -135512,7 +135594,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDocsHeadingsHaveTheIdsMarkdownlintComputes,
   testTheCompileTimeOfAReusedShareIsReadFromTheRunnersLine,
   testACrashInAReusedEngineFailsOnlyItsShareAndTheLaneGoesOn,
-  testAnOutOfMemoryShareInAReusedEngineRunsAgainAlone,
+  testAnOutOfMemoryShareInAReusedEngineIsNotRunAgain,
+  testAStarvedEngineWithNoFailedCaseIsNotRunAgain,
+  testAStarvedEngineBesideARealFailureLeavesBothNamed,
   testAHungShareInAReusedEngineIsEndedByTheDeadlineOfItsOwn,
   testARunNotDealtInSharesStartsEveryEngineForItsOwnPart,
   testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited,

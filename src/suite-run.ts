@@ -656,8 +656,6 @@ interface EngineRan {
   /** When it started, in milliseconds since the epoch, once it had a slot. */
   readonly began: number;
   readonly seconds: number;
-  /** Whether this is the engine run again alone after one ran out of memory. */
-  readonly again: boolean;
   /** The file the runner wrote what it loaded into, a line as each suite ended. */
   readonly reached: string;
   /** The most bytes the engine was read holding, when it was read at all. */
@@ -1365,7 +1363,7 @@ export async function takenLanes<P extends { readonly lane: number }>(
   return { lanes, taken, shared, follows, ...(granted === null ? {} : { granted }) };
 }
 
-/** Runs the engines of the deal, and runs again alone any that failed for want of memory. */
+/** Runs the engines of the deal, and says what each held when one ran out of memory. */
 async function ranEngines(
   context: RunContext,
   deal: Deal,
@@ -1397,7 +1395,7 @@ async function ranEngines(
           lanes.length,
           taken,
           times,
-          (plan, index, lock, holds, reuse) => runEngine(launch, plan, index, times, '', lock, holds, reuse),
+          (plan, index, lock, holds, reuse) => runEngine(launch, plan, index, times, lock, holds, reuse),
           handed,
           memory,
           follower === null
@@ -1421,29 +1419,10 @@ async function ranEngines(
     // A grant that came once the work was done goes back unused.
     started.granted?.end();
   }
-  return await rerunAfterStarving(ran, say, (engine) =>
-    runEngine(launch, engine.plan, engine.index, times, 'again'),
-  );
-}
-
-/**
- * [param ran] as it stands, or once an engine ran out of memory and another failed, with every
- * failed engine run again by [param runAgain], one after another in the order they ran.
- */
-export async function rerunAfterStarving<
-  T extends Pick<EngineRan, 'index' | 'peakBytes'> & {
-    readonly verdict: Pick<EngineVerdict, 'passed' | 'starved'>;
-  },
->(ran: readonly T[], say: (line: string) => void, runAgain: (engine: T) => Promise<T>): Promise<T[]> {
-  if (!ran.some((engine) => engine.verdict.starved) || ran.every((engine) => engine.verdict.passed)) {
-    return [...ran];
+  if (ran.some((engine) => engine.verdict.starved)) {
+    say(outOfMemorySaid(ran));
   }
-  say(outOfMemorySaid(ran));
-  const again: T[] = [];
-  for (const engine of ran) {
-    again.push(engine.verdict.passed ? engine : await runAgain(engine));
-  }
-  return again;
+  return ran;
 }
 
 /** Writes the times the engines measured, saying so where they could not be written. */
@@ -1494,8 +1473,8 @@ export function memorySaid(room: number, lanes: number, held: string): string {
 }
 
 /**
- * What a run says when an engine ran out of memory: the failed engines run again, and each
- * engine's most held in this run, or that it was not read, shows what else held the machine.
+ * What a run says when an engine ran out of memory: each engine's most held in this run, or that it
+ * was not read, which shows what else held the machine.
  */
 export function outOfMemorySaid(engines: readonly Pick<EngineRan, 'index' | 'peakBytes'>[]): string {
   const held = engines
@@ -1504,7 +1483,7 @@ export function outOfMemorySaid(engines: readonly Pick<EngineRan, 'index' | 'pea
         `engine ${String(engine.index)} ${engine.peakBytes === undefined ? 'unread' : gigabytes(engine.peakBytes)}`,
     )
     .join(', ');
-  return `An engine ran out of memory, so every engine that failed runs again, one at a time. The most each held in this run: ${held}.`;
+  return `An engine ran out of memory. The most each held in this run: ${held}.`;
 }
 
 /** How often a share held back for memory reads it again. */
@@ -2289,7 +2268,7 @@ async function runLane(
     await handed?.lend(lock);
     const ran: EngineRan[] = [];
     for (const { plan, index } of lane) {
-      ran.push(await runEngine(launch, plan, index, times, '', lock));
+      ran.push(await runEngine(launch, plan, index, times, lock));
     }
     return ran;
   } finally {
@@ -2721,12 +2700,11 @@ async function runEngine(
   plan: EnginePlan,
   index: number,
   times: SuiteTimes,
-  again = '',
   slot: string | null = null,
   holds?: (bytes: number) => void,
   reuse?: ShareReuse<EngineRan>,
 ): Promise<EngineRan> {
-  const directory = join(launch.runDirectory, `engine-${String(index)}${again === '' ? '' : `-${again}`}`);
+  const directory = join(launch.runDirectory, `engine-${String(index)}`);
   mkdirSync(join(directory, 'user'), { recursive: true });
   const sharesIn = reuse === undefined ? undefined : join(directory, 'shares');
   if (sharesIn !== undefined) {
@@ -2773,7 +2751,7 @@ async function runEngine(
       launch.slots.release(lock);
     }
   }
-  return judgedShare(launch, running.share, log, end, again);
+  return judgedShare(launch, running.share, log, end);
 }
 
 /** One share of suites as an engine runs it: where its files are and when it began. */
@@ -2824,7 +2802,7 @@ async function handedOn(
   if (drawn === null) {
     return null;
   }
-  reuse.done(judgedShare(launch, running.share, log, ended.end, '', ended.to));
+  reuse.done(judgedShare(launch, running.share, log, ended.end, ended.to));
   const directory = join(launch.runDirectory, `engine-${String(drawn.index)}`);
   mkdirSync(directory, { recursive: true });
   carryLaneFile(running.share.directory, directory);
@@ -2848,14 +2826,7 @@ async function handedOn(
  * the engine's log, or to its end. A share cut out of a longer log has its lines written beside its
  * files.
  */
-function judgedShare(
-  launch: Launch,
-  share: ShareRun,
-  log: string,
-  end: EngineEnd,
-  again: string,
-  to?: number,
-): EngineRan {
+function judgedShare(launch: Launch, share: ShareRun, log: string, end: EngineEnd, to?: number): EngineRan {
   const shareLog = join(share.directory, 'engine.log');
   if (log !== shareLog) {
     writeFileSync(shareLog, shareText(log, share.from, to));
@@ -2878,7 +2849,6 @@ function judgedShare(
     log: shareLog,
     began: share.began,
     seconds: (Date.now() - share.began) / 1000,
-    again: again !== '',
     reached: share.files.reached,
     ...(end.peakBytes === undefined ? {} : { peakBytes: end.peakBytes }),
     slot: share.slot,
@@ -3039,7 +3009,7 @@ function printWhatEnginesPrinted(ran: readonly EngineRan[]): void {
 /** Prints what failed in each engine of [param failed], and notes it at the top of its kept log. */
 function printFailedEngines(failed: readonly EngineRan[], logs: RunLogs): void {
   for (const engine of failed) {
-    const heading = `--- engine ${String(engine.index)}: ${plural(engine.plan.suites.length, 'suite')}, ${engine.seconds.toFixed(1)} s${engine.again ? ', run again alone after an engine ran out of memory, and failed again' : ''}`;
+    const heading = `--- engine ${String(engine.index)}: ${plural(engine.plan.suites.length, 'suite')}, ${engine.seconds.toFixed(1)} s`;
     console.log('');
     console.log(heading);
     for (const fault of engine.verdict.faults) {

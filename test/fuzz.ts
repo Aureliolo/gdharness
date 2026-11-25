@@ -94,14 +94,7 @@ import {
   type Unit,
   unitsOf,
 } from '../src/suite-plan.js';
-import {
-  HandedSlot,
-  MemoryGate,
-  ordered,
-  type RunOrder,
-  rerunAfterStarving,
-  runShares,
-} from '../src/suite-run.js';
+import { HandedSlot, MemoryGate, ordered, type RunOrder, runShares } from '../src/suite-run.js';
 import { inTurnFor, tryTake } from '../src/write-turns.js';
 import { greeting } from './support/greeting.js';
 import { bandWalk, PORT_BAND } from './support/server.js';
@@ -2537,69 +2530,6 @@ function suitesFollowTheOrder(order: RunOrder, suites: readonly string[], select
         : rank(before) < rank(here) || (rank(before) === rank(here) && before <= here);
     assert.ok(holds, `${order}: ${before} then ${here}`);
   }
-}
-
-interface FinishedEngine {
-  readonly index: number;
-  readonly peakBytes?: number;
-  readonly verdict: { readonly passed: boolean; readonly starved: boolean };
-  readonly again?: boolean;
-}
-
-/**
- * Failed engines run again only once one of them ran out of memory, one at a time, in the order they
- * ran. Engines that passed are never run again and stay where they were.
- */
-async function failedEnginesRunAgainOneAtATime(): Promise<void> {
-  const engine = fc.record({
-    passed: fc.boolean(),
-    starved: fc.boolean(),
-    delay: fc.nat({ max: 3 }),
-    againPasses: fc.boolean(),
-  });
-  await fc.assert(
-    fc.asyncProperty(fc.array(engine, { maxLength: 8 }), async (drawn) => {
-      const ran: FinishedEngine[] = drawn.map((one, index) => ({
-        index,
-        verdict: { passed: one.passed, starved: one.starved },
-      }));
-      let going = 0;
-      const calls: number[] = [];
-      const said: string[] = [];
-      const result = await rerunAfterStarving(
-        ran,
-        (line) => said.push(line),
-        async (engineRan) => {
-          going += 1;
-          assert.equal(going, 1, 'engines run again one at a time');
-          calls.push(engineRan.index);
-          const one = drawn[engineRan.index];
-          for (let tick = 0; tick < (one?.delay ?? 0); tick += 1) {
-            await Promise.resolve();
-          }
-          going -= 1;
-          return {
-            index: engineRan.index,
-            verdict: { passed: one?.againPasses === true, starved: false },
-            again: true,
-          };
-        },
-      );
-      const failed = ran.filter((one) => !one.verdict.passed).map((one) => one.index);
-      const rerun = ran.some((one) => one.verdict.starved) && failed.length > 0;
-      assert.deepEqual(calls, rerun ? failed : [], 'every failed engine runs again once, in index order');
-      assert.equal(said.length, rerun ? 1 : 0);
-      assert.equal(result.length, ran.length);
-      for (const [at, one] of ran.entries()) {
-        const now = result[at];
-        assert.equal(now?.index, one.index);
-        if (!rerun || one.verdict.passed) {
-          assert.equal(now, one, 'an engine that passed stays as it was');
-        }
-      }
-    }),
-    { numRuns: 200 },
-  );
 }
 
 type SlotOffer = { readonly kind: 'give' | 'lend'; readonly lock: string } | { readonly kind: 'ended' };
@@ -5213,7 +5143,6 @@ aFoldedErrorCostsTheSameAtEveryFrame();
 aWideFoldSpreadsNoList();
 theDebuggerStreamIsCutProof();
 aSuiteOrderKeepsEveryUnitAndRepeats();
-await failedEnginesRunAgainOneAtATime();
 await theCompileCheckTakesOnlyTheFirstSlotOffered();
 await anInheritedSlotServesOneTakeAtATime();
 await aTakeOverRereadsTheLockUnderTheStealFile();
