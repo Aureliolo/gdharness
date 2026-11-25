@@ -98058,7 +98058,7 @@ function operationStandIn(): string {
       '}',
       'const answer =',
       "  operation === 'create_script'",
-      "    ? { full_path: params.scriptPath ?? params.script_path, class_name: params.className ?? params.class_name, parses: true }",
+      '    ? { full_path: params.scriptPath ?? params.script_path, class_name: params.className ?? params.class_name, parses: true }',
       "    : operation === 'check_scripts'",
       '    ? {',
       '        checked: broken < 0 ? paths : paths.slice(0, broken + 1),',
@@ -98384,7 +98384,11 @@ async function twoDiagnosticsAtOneRebuild(slotCount: 1 | 2): Promise<TwoCallsAtO
       await server.initialize('regression-test');
       const diagnose = async (scriptPath: string | string[]): Promise<string | null> => {
         const said = await server
-          .request('tools/call', { name: 'script_diagnostics', arguments: { projectPath: project, scriptPath } }, 40_000)
+          .request(
+            'tools/call',
+            { name: 'script_diagnostics', arguments: { projectPath: project, scriptPath } },
+            40_000,
+          )
           .catch(() => null);
         return said === null ? null : (textOf(said) ?? null);
       };
@@ -98433,7 +98437,9 @@ async function testDiagnosticsJoiningAClassRebuildOnOneSlotBothAnswer(): Promise
  */
 async function testDiagnosticsJoiningAClassRebuildHoldNoIdleSlot(): Promise<void> {
   const ran = await twoDiagnosticsAtOneRebuild(2);
-  const rebuild = ran.entries.find((entry) => entry.event === 'start' && entry.operation === 'refresh_class_cache');
+  const rebuild = ran.entries.find(
+    (entry) => entry.event === 'start' && entry.operation === 'refresh_class_cache',
+  );
   assert.ok(rebuild !== undefined, 'the class cache is rebuilt');
   assert.notEqual(ran.foreignGivenBackAt, null);
   assert.ok(
@@ -98495,7 +98501,14 @@ async function testScriptCreateHoldsNoSlotWhileItAsksTheEditor(): Promise<void> 
         const scanning = now < scanUntil;
         const result =
           tool === 'scan_status'
-            ? { ok: true, scanning, importing: false, sinceScanFinishedMs: scanning ? 0 : 600_000, openScenes: [], unsavedScenes: [] }
+            ? {
+                ok: true,
+                scanning,
+                importing: false,
+                sinceScanFinishedMs: scanning ? 0 : 600_000,
+                openScenes: [],
+                unsavedScenes: [],
+              }
             : { ok: true, started: true };
         socket.send(JSON.stringify({ type: 'tool_result', id: get(message, 'id'), success: true, result }));
       });
@@ -98516,7 +98529,13 @@ async function testScriptCreateHoldsNoSlotWhileItAsksTheEditor(): Promise<void> 
         'tools/call',
         {
           name: 'script_edit',
-          arguments: { projectPath: project, op: 'create', scriptPath: 'res://made.gd', className: 'Made', extends: 'Node' },
+          arguments: {
+            projectPath: project,
+            op: 'create',
+            scriptPath: 'res://made.gd',
+            className: 'Made',
+            extends: 'Node',
+          },
         },
         60_000,
       );
@@ -98524,9 +98543,9 @@ async function testScriptCreateHoldsNoSlotWhileItAsksTheEditor(): Promise<void> 
         await cameTrue(() => standInEntries(logFile).some((entry) => entry.event === 'start'), 30_000),
         'the call starts its engine',
       );
-      let competitorTookAt: number | null = null;
+      const competitorTook: { at: number | null } = { at: null };
       const competitor = taker.take().then((lock) => {
-        competitorTookAt = Date.now();
+        competitorTook.at = Date.now();
         taker.release(lock);
       });
       const said = textOf(await call) ?? '';
@@ -98537,11 +98556,14 @@ async function testScriptCreateHoldsNoSlotWhileItAsksTheEditor(): Promise<void> 
           .filter((entry) => entry.event === 'end')
           .map((entry) => entry.at),
       );
-      assert.ok(asked.some((at) => at > lastEnd), `the editor is asked after the last engine: ${said}`);
-      assert.notEqual(competitorTookAt, null, 'the slot is given back');
       assert.ok(
-        (competitorTookAt ?? Number.POSITIVE_INFINITY) < answeredAt,
-        `the slot is free while the call asks the editor: ${(competitorTookAt ?? 0) - answeredAt}`,
+        asked.some((at) => at > lastEnd),
+        `the editor is asked after the last engine: ${said}`,
+      );
+      assert.notEqual(competitorTook.at, null, 'the slot is given back');
+      assert.ok(
+        (competitorTook.at ?? Number.POSITIVE_INFINITY) < answeredAt,
+        `the slot is free while the call asks the editor: ${(competitorTook.at ?? 0) - answeredAt}`,
       );
     } finally {
       editor?.close();
