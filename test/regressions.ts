@@ -86894,7 +86894,11 @@ async function checksTheClassesCommandStartsOnAFullMachine(fixture: MachineSlotF
       resolveEnd(code);
     });
   });
-  const code = await ended;
+  const code = await Promise.race([ended, delay(ENGINE_CALL_TIMEOUT_MS).then(() => 'still running')]);
+  if (code === 'still running') {
+    classes.kill();
+    await ended;
+  }
   assert.deepEqual(
     [code, holderOf(readFileSync(ours, 'utf8'))?.pid, leftInSlots(slots)],
     [0, process.pid, ['0.lock']],
