@@ -213,7 +213,7 @@ export const START_TOLERANCE_MS = 2000;
 /** How long a lock may stay empty before its taker is taken to have died writing it. */
 export const UNWRITTEN_MS = 10_000;
 
-/** How long a take that finds other live locks waits for their stamps to land before it counts them again. */
+/** How long a take lets its lock's write settle before it counts the folder again, past the clock's tick. */
 const LOCK_SETTLE_MS = 50;
 
 /** A live lock's slot, when it was written, its holder's pid and the memory it holds. */
@@ -1965,9 +1965,6 @@ export class EngineSlots {
       return null;
     }
     const lock = await this.lockOneOf(ahead.tried, game, need);
-    if (lock !== null) {
-      this.stamp(lock);
-    }
     if (lock !== null && typeof look?.queue === 'number' && (await this.overTheShare(lock))) {
       this.release(lock);
       this.drawn = slotsDrawnOn(this.count, taker, 'queued');
@@ -1984,17 +1981,15 @@ export class EngineSlots {
    * What the held slots' locks hold, and when each was written: the slots {@link heldLocks} reads. A
    * lock without a figure of its own counts the flat figure for each slot it stands for. One that
    * names no holder yet counts nothing, as a lock past the count does, since neither takes a slot.
-   * One gone before its time is read was given back, and counts nothing either.
    */
   private async liveMemory(): Promise<LiveMemory[]> {
     const live: LiveMemory[] = [];
     for (const { slot, lock, content } of await this.heldLocks()) {
       const holder = content === null ? null : holderOf(content);
-      const at = this.writtenAt(lock);
-      if (holder !== null && at !== undefined) {
+      if (holder !== null) {
         live.push({
           slot,
-          at,
+          at: this.writtenAt(lock) ?? 0,
           pid: holder.pid,
           bytes: holder.memory ?? ENGINE_MEMORY_BYTES * (holder.wants ?? 1),
         });
@@ -2068,61 +2063,35 @@ export class EngineSlots {
   }
 
   /**
-   * Stamps the lock just written at [param lock] with the clock as read after the write. A taker
-   * that missed this lock looked before it was written, and so before this stamp: it sorts after
-   * every lock whose taker missed it, whatever tick the file system gave the write.
-   */
-  private stamp(lock: string): void {
-    const now = new Date();
-    try {
-      utimesSync(lock, now, now);
-    } catch {
-      // Gone or held shut: its write time stands, and the look orders it by that.
-    }
-  }
-
-  /**
-   * Whether the lock just taken at [param lock] is one too many. The live locks are ordered by their
-   * stamps ({@link stamp}), then by holder and slot, and each in turn keeps its slot where it fits
-   * the budget beside those kept before it, the first always. Every taker orders the same locks
-   * the same way and reaches the same verdict. The look waits for the clock to pass this lock's
-   * stamp, so every lock it misses sorts after this one. A look that finds other live locks is
-   * taken again once their stamps have landed, and that second look decides.
+   * Whether the lock just taken at [param lock] is one too many: the live locks, ordered by when
+   * they were written, then by holder and slot, hold more than the budget up to and including this
+   * one, and it is not the first. Every taker orders the same locks the same way, so two takers
+   * that both counted room for one engine before either took it cannot both keep theirs. A look
+   * that finds the lock inside the budget is taken again once its write has settled, since a lock
+   * written after the first look, within the clock's tick of this one, can sort before it.
    */
   private async overTheBudget(lock: string, need: number, line: SlotLine | undefined): Promise<boolean> {
     const slot = Number(/(\d+)\.lock$/.exec(lock)?.[1]);
-    const stamped = this.writtenAt(lock) ?? 0;
-    // A clock set back since the stamp is not waited out.
-    const until = Date.now() + LOCK_SETTLE_MS;
-    while (Date.now() <= stamped && Date.now() < until) {
-      await delay(1);
-    }
-    if (!(await this.liveMemory()).some((one) => one.slot !== slot)) {
-      return false;
-    }
-    await delay(LOCK_SETTLE_MS);
-    const live = (await this.liveMemory()).toSorted(
-      (a, b) => a.at - b.at || a.pid - b.pid || a.slot - b.slot,
-    );
-    let kept = 0;
-    let first = true;
-    for (const one of live) {
-      const fits = first || kept + one.bytes <= this.memoryBudget;
-      if (one.slot === slot) {
-        if (fits) {
-          return false;
-        }
-        const held = live.reduce((sum, other) => sum + other.bytes, 0);
+    for (let look = 0; look < 2; look += 1) {
+      if (look > 0) {
+        await delay(LOCK_SETTLE_MS);
+      }
+      const live = (await this.liveMemory()).toSorted(
+        (a, b) => a.at - b.at || a.pid - b.pid || a.slot - b.slot,
+      );
+      const place = live.findIndex((one) => one.slot === slot);
+      if (place < 1) {
+        continue;
+      }
+      const through = live.slice(0, place + 1).reduce((sum, one) => sum + one.bytes, 0);
+      if (through > this.memoryBudget) {
+        const held = live.reduce((sum, one) => sum + one.bytes, 0);
         this.drawn = {
           ...this.drawn,
           short: { budget: this.memoryBudget, held: held - need, ahead: 0, need },
         };
         await this.waitsForMemory(line);
         return true;
-      }
-      if (fits) {
-        kept += one.bytes;
-        first = false;
       }
     }
     return false;
