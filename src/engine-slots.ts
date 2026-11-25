@@ -384,6 +384,54 @@ interface SeatedGate {
  */
 export const GATE_LEND_MS = 10_000;
 
+/** How long a process keeps its reading of the process table for the lend ({@link EngineSlots.lentRoom}). */
+const LEND_TABLE_KEPT_MS = 5000;
+
+/** Each table reader's last reading, when it began and what it gave, so waiting takers share one. */
+const lendTables = new WeakMap<
+  () => Promise<ProcessTree | undefined>,
+  { at: number; tree: Promise<ProcessTree | undefined> }
+>();
+
+/**
+ * The process table through [param read], or its reading kept from under {@link LEND_TABLE_KEPT_MS}
+ * ago where every lock it places was written before that reading began ([param newestLock]). A kept
+ * table can only still list a process that has since ended, which places an engine that has gone and
+ * lends less, never more. A lock written since may name a process the kept table never saw.
+ */
+function lendTableOf(
+  read: () => Promise<ProcessTree | undefined>,
+  newestLock: number,
+): Promise<ProcessTree | undefined> {
+  const now = Date.now();
+  const kept = lendTables.get(read);
+  if (kept !== undefined && now >= kept.at && now - kept.at < LEND_TABLE_KEPT_MS && newestLock < kept.at) {
+    return kept.tree;
+  }
+  const tree = read();
+  lendTables.set(read, { at: now, tree });
+  return tree;
+}
+
+/**
+ * The most side work may be lent after the moment [param written], as {@link EngineSlots.lentRoom}
+ * counts it with every seated gate quiet, or 0 where that cannot pass [param counted]. It reads only
+ * the gates' seats and the [param held] locks, never the process table.
+ */
+function mostLent(
+  gates: readonly SeatedGate[],
+  gated: number,
+  held: readonly { at: number | undefined }[],
+  written: number,
+  counted: number,
+): number {
+  const now = Date.now();
+  const before = held.filter(({ at }) => at === undefined || at < written).length;
+  const seated = gates.filter((gate) => now - gate.seat >= GATE_LEND_MS).length;
+  const most = Math.floor((gated * seated) / gates.length) - before;
+  return seated === 0 || most <= counted ? 0 : most;
+}
+
 /**
  * The folder, inside the slots', where every give-back of slot n writes the file n:
  * `{"freed": <ms since the epoch>}`. Side work is lent a gate slot only once it has stood free
@@ -995,7 +1043,8 @@ type GateQueue = 'none' | 'queued' | number;
  * One look at the machine's queue: {@link GateQueue}, the gates' free slots it was counted from, and
  * how many side work may hold in all ([param limit], unlimited where no count bounds it) with the
  * gates' slots taken since the count, oldest first ([param since]). A take names its slots from the
- * same free slots the share was counted from.
+ * same free slots the share was counted from. Only a recount after a take reads [param limit] past
+ * the count, so a first look leaves the lend out of it unless a slot can be lent.
  */
 interface GateLook {
   readonly queue: GateQueue;
@@ -2043,7 +2092,7 @@ export class EngineSlots {
    */
   private async overTheShare(lock: string): Promise<boolean> {
     const slot = Number(/(\d+)\.lock$/.exec(lock)?.[1]);
-    const again = await this.gateLook();
+    const again = await this.gateLook(true);
     return again.since.length > again.limit && again.since.indexOf(slot) >= again.limit;
   }
 
@@ -2459,14 +2508,14 @@ export class EngineSlots {
   /**
    * One look at the machine's queue, with the free slots read once for the whole look. A mark whose
    * gate has gone is removed with its `.seated` file, by the rule a lock is freed by, and one not
-   * yet written names nobody and is passed over.
+   * yet written names nobody and is passed over. A [param recount] after a take counts the limit in full.
    */
-  private async gateLook(): Promise<GateLook> {
+  private async gateLook(recount = false): Promise<GateLook> {
     const marks = await this.gateMarks();
     if (marks.live === 0) {
       return { queue: 'none', free: [], limit: Number.POSITIVE_INFINITY, since: [] };
     }
-    const share = await this.sideShare(marks.newestSeat, marks.gates);
+    const share = await this.sideShare(marks.newestSeat, marks.gates, recount);
     return { ...share.look, queue: share.side > 0 ? share.side : 'queued' };
   }
 
@@ -2527,6 +2576,7 @@ export class EngineSlots {
   private async sideShare(
     newestSeat: number,
     gates: readonly SeatedGate[],
+    recount: boolean,
   ): Promise<{ side: number; look: Omit<GateLook, 'queue'> }> {
     const gated = Math.max(1, this.count - keptSlotsOf(this.count));
     const free = (await this.openSlots()).filter((slot) => slot < gated);
@@ -2561,11 +2611,16 @@ export class EngineSlots {
       .map((one) => one.slot);
     const top = free.toSorted((a, b) => b - a);
     const counted = top.slice(0, Math.max(0, Math.min(said.count - since.length, free.length)));
-    const lent = await this.lentRoom(gates, gated, locks, said.written, said.count);
+    const most = mostLent(gates, gated, locks, said.written, said.count);
     const ripe =
-      lent - since.length > counted.length
+      most - since.length > counted.length
         ? await this.standingFreed(top.slice(counted.length), Math.min(...gates.map((gate) => gate.seat)))
         : [];
+    // The process table is read only where the lend can change the answer.
+    const lent =
+      ripe.length > 0 || (recount && since.length > said.count && most > said.count)
+        ? await this.lentRoom(gates, gated, locks, said.written, said.count)
+        : 0;
     const offered = [...counted, ...ripe.slice(0, Math.max(0, lent - since.length - counted.length))];
     return { side: offered.length, look: { free: offered, limit: Math.max(said.count, lent), since } };
   }
@@ -2624,10 +2679,11 @@ export class EngineSlots {
     const before = held.filter(({ at }) => at === undefined || at < written).length;
     const seated = gates.filter((gate) => now - gate.seat >= GATE_LEND_MS);
     const roomOf = (quiet: number): number => Math.floor((gated * quiet) / gates.length) - before;
-    if (seated.length === 0 || roomOf(seated.length) <= counted) {
+    if (mostLent(gates, gated, held, written, counted) === 0) {
       return 0;
     }
-    const tree = held.length === 0 ? new Map() : await this.processes();
+    const newestLock = Math.max(...held.map(({ at }) => at ?? Number.POSITIVE_INFINITY));
+    const tree = held.length === 0 ? new Map() : await lendTableOf(this.processes, newestLock);
     if (tree === undefined) {
       return 0;
     }

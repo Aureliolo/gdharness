@@ -77604,6 +77604,105 @@ async function testASlotWhoseFreedMarkCannotBeWrittenIsGivenBackAndReadsAsUnmark
   );
 }
 
+/** A side taker of the lend rig's [param directory] whose process table, from [param parents], counts its reads. */
+function countingSideTaker(
+  directory: string,
+  self: Tenant,
+  parents: ReadonlyMap<number, number>,
+): { slots: EngineSlots; reads: () => number } {
+  let reads = 0;
+  const slots = new EngineSlots(directory, 8, self, undefined, () => 'other', undefined, {
+    processes: () => {
+      reads += 1;
+      return Promise.resolve(new Map([...parents].map(([pid, parent]) => [pid, { parent, command: '' }])));
+    },
+  });
+  return { slots, reads: () => reads };
+}
+
+/**
+ * A gate running three of its six engines, with its three free slots given back a moment ago, has
+ * nothing a waiting side taker could be lent by the slot folder alone. Twenty looks read no process
+ * table.
+ */
+async function testALookWithNoSlotFreedTenSecondsReadsNoProcessTable(): Promise<void> {
+  await withALendRig(
+    async ({ directory, start, at, seat, engine, take, a, self, parents }) => {
+      seat('gate-1', start - 60_000);
+      for (const slot of [0, 1, 2]) {
+        engine(slot, a, start - 2000);
+      }
+      mkdirSync(join(directory, FREED_FOLDER), { recursive: true });
+      for (const slot of [3, 4, 5]) {
+        writeFileSync(join(directory, FREED_FOLDER, String(slot)), JSON.stringify({ freed: start - 500 }));
+      }
+      const side = countingSideTaker(directory, self, parents);
+      try {
+        for (let look = 0; look < 20; look += 1) {
+          at(start + look * 100);
+          assert.equal(await take(side.slots), null, 'nothing is lent');
+        }
+        assert.equal(side.reads(), 0, 'and no look reads the process table');
+      } finally {
+        side.slots.releaseAll();
+      }
+    },
+    { held: [] },
+  );
+}
+
+/**
+ * A waiting side taker keeps its reading of the process table: twenty looks over four seconds, each
+ * with three unmarked slots it could be lent beside a gate still starting engines, read it once.
+ */
+async function testTwentyLooksOverFourSecondsReadTheProcessTableOnce(): Promise<void> {
+  await withALendRig(
+    async ({ directory, start, at, seat, engine, take, a, self, parents }) => {
+      seat('gate-1', start - 60_000);
+      for (const slot of [0, 1, 2]) {
+        engine(slot, a, start - 2000);
+      }
+      const side = countingSideTaker(directory, self, parents);
+      try {
+        for (let look = 0; look < 20; look += 1) {
+          at(start + look * 200);
+          assert.equal(await take(side.slots), null, 'the gate is not quiet, so nothing is lent');
+        }
+        assert.equal(side.reads(), 1, 'and the process table is read once');
+      } finally {
+        side.slots.releaseAll();
+      }
+    },
+    { held: [] },
+  );
+}
+
+/**
+ * A kept process table is read again once a lock is written after it, since its holder may be new:
+ * an engine the gate starts below its process a second after the reading keeps the gate from quiet.
+ */
+async function testALockWrittenAfterAKeptProcessTableIsPlacedByANewReading(): Promise<void> {
+  await withALendRig(
+    async ({ directory, start, at, seat, engine, take, a, c, self, parents }) => {
+      seat('gate-1', start - 60_000);
+      engine(0, a, start - 8000);
+      const side = countingSideTaker(directory, self, parents);
+      try {
+        at(start);
+        assert.equal(await take(side.slots), null, 'the gate took its engine 8 s ago');
+        parents.set(c.pid, a.pid);
+        engine(1, c, start + 1000);
+        at(start + 2100);
+        assert.equal(await take(side.slots), null, 'its new engine below it keeps it from quiet');
+        assert.equal(side.reads(), 2, 'which a second reading places');
+      } finally {
+        side.slots.releaseAll();
+      }
+    },
+    { held: [] },
+  );
+}
+
 /** One table of the shared lending fixture. */
 interface LendTable {
   name: string;
@@ -133571,6 +133670,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheLendCountsEveryGateEngineAsTheQueueDoes,
   testAQuietGateRunningTwoOfSixLendsFour,
   testASlotGivenBackFiftyMillisecondsAgoIsNotLent,
+  testALookWithNoSlotFreedTenSecondsReadsNoProcessTable,
+  testTwentyLooksOverFourSecondsReadTheProcessTableOnce,
+  testALockWrittenAfterAKeptProcessTableIsPlacedByANewReading,
   testASlotWhoseFreedMarkCannotBeWrittenIsGivenBackAndReadsAsUnmarked,
   testTheSharedLendingTablesAnswerAsTheQueueDoes,
   testACountFromBeforeASeatIsStaleForSideWork,
