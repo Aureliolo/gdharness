@@ -786,7 +786,8 @@ These engines of one project run one at a time across the machine, since each wr
 `.godot`. Each takes the project's lock, `<directory>/projects/<key>.lock`, made and judged as a
 slot's lock is, and waits while another holds it. The key is the first 16 hex digits of the SHA-256
 of the project's resolved path, lower-cased on Windows. An engine for another project does not
-wait.
+wait. A tool call waiting for the lock is told as for a slot, below, with the process that holds it
+named.
 
 ### Games and their slots
 

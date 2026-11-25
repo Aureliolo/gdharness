@@ -3374,15 +3374,65 @@ export function projectLockOf(
   return join(directory, PROJECTS_FOLDER, `${key}.lock`);
 }
 
-/** Runs [param body] holding [param project]'s lock, waiting while another engine of it holds it. */
+/** Who holds the lock at [param lock], or null where it cannot be read or names nobody. */
+function projectHolderOf(lock: string): SlotHolder | null {
+  try {
+    return holderOf(readFileSync(lock, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What waiting [param waitedMs] for [param project]'s lock, held by [param holder], says to the
+ * client of the call that waits.
+ */
+function projectWaitSaid(waitedMs: number, project: string | undefined, holder: SlotHolder | null): string {
+  const so = `Waiting${waitedMs >= 1000 ? ` ${String(Math.round(waitedMs / 1000))} s so far` : ''} for an engine`;
+  return `${so}: another engine of ${projectNamed(project)} is running${heldBySaid(holder)}, and this one starts when it ends.`;
+}
+
+/** What a call's answer says of its wait for [param project]'s lock, [param waitedMs] in all. */
+function projectWaitedSaid(waitedMs: number, project: string | undefined, holder: SlotHolder | null): string {
+  return `This call waited ${String(Math.round(waitedMs / 1000))} s for another engine of ${projectNamed(project)} in all. When it first waited, that engine was run${holder === null ? ' by another call' : heldBySaid(holder)}.`;
+}
+
+function projectNamed(project: string | undefined): string {
+  return project === undefined ? 'no project' : `the project ${project}`;
+}
+
+function heldBySaid(holder: SlotHolder | null): string {
+  return holder === null ? '' : ` by ${holdersNamed(1, [holder]).join('')}`;
+}
+
+/**
+ * Runs [param body] holding [param project]'s lock, waiting while another engine of it holds it. A
+ * call that waits is told so as a slot wait is, and its answer's engine_slot_wait counts the wait.
+ */
 async function inTheProjectsTurn<T>(body: () => Promise<T>, project: string | undefined): Promise<T> {
   const lock = projectLockOf(project);
   mkdirSync(dirname(lock), { recursive: true });
   const slots = await processSlots();
   const signal = callSignal();
+  const progress = callProgress();
+  const waits = callSlotWaits();
+  const began = Date.now();
+  let blockedBy: SlotHolder | null | undefined;
+  let said = Number.NEGATIVE_INFINITY;
   while (!(await slots.takeFile(lock))) {
     signal?.throwIfAborted();
+    blockedBy ??= projectHolderOf(lock);
+    const now = Date.now();
+    if (progress !== undefined && now - said >= WAIT_SAID_MS) {
+      said = now;
+      progress((now - began) / 1000, projectWaitSaid(now - began, project, blockedBy));
+    }
     await delay(PROJECT_LOOK_MS);
+  }
+  if (waits !== undefined && blockedBy !== undefined) {
+    waits.ms += Date.now() - began;
+    const heldBy = blockedBy;
+    waits.said ??= (waitedMs) => projectWaitedSaid(waitedMs, project, heldBy);
   }
   try {
     return await body();
