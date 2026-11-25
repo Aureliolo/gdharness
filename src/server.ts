@@ -8411,7 +8411,7 @@ export class GodotServer {
     // engine, waits for a slot of its own and writes the same cache file.
     const running = this.classRebuilds.get(projectPath);
     if (running !== undefined) {
-      // Its engine may be queued for the very slot this call holds between its own engines.
+      // The rebuild takes no slot, so the one this call holds between its engines goes to others meanwhile.
       const joined = await withTheSlotFree(async () => await running);
       if (!joined.ok) {
         return joined;
