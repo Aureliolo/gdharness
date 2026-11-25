@@ -3635,28 +3635,9 @@ export async function inOneSlot<T>(body: () => Promise<T>): Promise<T> {
   try {
     return await keptForSteps.run(kept, body);
   } finally {
-    await givenBack(kept);
+    // A take that failed was thrown to the engine step that asked for it, and holds nothing.
+    const held = await kept.held?.catch(() => null);
+    held?.release();
+    await held?.settled();
   }
-}
-
-/**
- * Runs [param wait] with the slot {@link inOneSlot} holds given back first, and the next engine step
- * taking one again. A command waiting on another's engine or on an editor would otherwise keep a
- * slot that engine may be queued for. Outside {@link inOneSlot} it only runs [param wait].
- */
-export async function withTheSlotFree<T>(wait: () => Promise<T>): Promise<T> {
-  const kept = keptForSteps.getStore();
-  if (kept !== undefined) {
-    await givenBack(kept);
-  }
-  return await wait();
-}
-
-async function givenBack(kept: { held: Promise<CallSlot> | null }): Promise<void> {
-  const taken = kept.held;
-  kept.held = null;
-  // A take that failed was thrown to the engine step that asked for it, and holds nothing.
-  const held = await taken?.catch(() => null);
-  held?.release();
-  await held?.settled();
 }
