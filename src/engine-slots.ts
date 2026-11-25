@@ -45,6 +45,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash } from 'node:crypto';
 import {
   closeSync,
   existsSync,
@@ -3593,27 +3594,115 @@ export interface CallSlot {
   readonly leave: () => void;
 }
 
-/** The slot a command of several engine steps holds for all of them, inside {@link inOneSlot}. */
+/** Set inside {@link withoutASlot}, whose engines take no slot. */
+const withoutSlots = new AsyncLocalStorage<true>();
 const keptForSteps = new AsyncLocalStorage<{ held: Promise<CallSlot> | null; project?: string }>();
 
 /**
- * Names the project the command inside {@link inOneSlot} runs for, which gives its slot the
- * project's repository, and high priority where the list names it. Call it before the first engine step. Outside
- * {@link inOneSlot} it does nothing.
+ * The folder under the machine's slots with one lock for each project an engine runs for without a
+ * slot. Those engines of one project run one at a time across the machine, since each writes the
+ * project's .godot, so the count running at once is bounded by the projects in use. A lock is taken
+ * and judged as a slot's is, so a dead holder's is taken over.
  */
-export function forTheProject(project: string): void {
-  const kept = keptForSteps.getStore();
-  if (kept !== undefined) {
-    kept.project = project;
+export const PROJECTS_FOLDER = 'projects';
+
+/** How often an engine waiting for its project's lock looks again. */
+const PROJECT_LOOK_MS = 100;
+
+/** The lock in [param directory] that the slotless engines of [param project] take in turn. */
+export function projectLockOf(
+  project: string | undefined,
+  directory: string = machineSlotsDirectory(),
+): string {
+  const key =
+    project === undefined
+      ? 'none'
+      : createHash('sha256').update(comparable(project)).digest('hex').slice(0, 16);
+  return join(directory, PROJECTS_FOLDER, `${key}.lock`);
+}
+
+/** Who holds the lock at [param lock], or null where it cannot be read or names nobody. */
+function projectHolderOf(lock: string): SlotHolder | null {
+  try {
+    return holderOf(readFileSync(lock, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What waiting [param waitedMs] for [param project]'s lock, held by [param holder], says to the
+ * client of the call that waits.
+ */
+function projectWaitSaid(waitedMs: number, project: string | undefined, holder: SlotHolder | null): string {
+  const so = `Waiting${waitedMs >= 1000 ? ` ${String(Math.round(waitedMs / 1000))} s so far` : ''} for an engine`;
+  return `${so}: another engine of ${projectNamed(project)} is running${heldBySaid(holder)}, and this one starts when it ends.`;
+}
+
+/** What a call's answer says of its wait for [param project]'s lock, [param waitedMs] in all. */
+function projectWaitedSaid(waitedMs: number, project: string | undefined, holder: SlotHolder | null): string {
+  return `This call waited ${String(Math.round(waitedMs / 1000))} s for another engine of ${projectNamed(project)} in all. When it first waited, that engine was run${holder === null ? ' by another call' : heldBySaid(holder)}.`;
+}
+
+function projectNamed(project: string | undefined): string {
+  return project === undefined ? 'no project' : `the project ${project}`;
+}
+
+function heldBySaid(holder: SlotHolder | null): string {
+  return holder === null ? '' : ` by ${holdersNamed(1, [holder]).join('')}`;
+}
+
+/**
+ * Runs [param body] holding [param project]'s lock, waiting while another engine of it holds it. A
+ * call that waits is told so as a slot wait is, and its answer's engine_slot_wait counts the wait.
+ */
+async function inTheProjectsTurn<T>(body: () => Promise<T>, project: string | undefined): Promise<T> {
+  const lock = projectLockOf(project);
+  mkdirSync(dirname(lock), { recursive: true });
+  const slots = await processSlots();
+  const signal = callSignal();
+  const progress = callProgress();
+  const waits = callSlotWaits();
+  const began = Date.now();
+  let blockedBy: SlotHolder | null | undefined;
+  let said = Number.NEGATIVE_INFINITY;
+  while (!(await slots.takeFile(lock))) {
+    signal?.throwIfAborted();
+    blockedBy ??= projectHolderOf(lock);
+    const now = Date.now();
+    if (progress !== undefined && now - said >= WAIT_SAID_MS) {
+      said = now;
+      progress((now - began) / 1000, projectWaitSaid(now - began, project, blockedBy));
+    }
+    await delay(PROJECT_LOOK_MS);
+  }
+  if (waits !== undefined && blockedBy !== undefined) {
+    waits.ms += Date.now() - began;
+    const heldBy = blockedBy;
+    waits.said ??= (waitedMs) => projectWaitedSaid(waitedMs, project, heldBy);
+  }
+  try {
+    return await body();
+  } finally {
+    await giveBackSlotAsync(lock, slots.holder.pid);
   }
 }
 
 /**
  * Runs [param body] holding one of the machine's slots for the call, handing it the slot's lock,
- * and gives it back after. Inside {@link inOneSlot} it uses the slot held there. [param project] is
- * the project the call is for, in place of the one {@link forTheProject} named.
+ * and gives it back after. [param project] is the project the call is for. With [param free], or
+ * inside {@link withoutASlot}, it takes no slot and [param body] gets null. It waits only for the
+ * project's other slotless engines ({@link PROJECTS_FOLDER}). An engine started inside another
+ * engine's slot (GODOT_ENGINE_HELD) runs on that slot either way.
  */
-export async function inASlot<T>(body: (lock: string) => Promise<T>, project?: string): Promise<T> {
+export async function inASlot<T>(
+  body: (lock: string | null) => Promise<T>,
+  project?: string,
+  free = false,
+): Promise<T> {
+  if ((free || withoutSlots.getStore() === true) && nonEmpty(process.env[HELD_VARIABLE]) === undefined) {
+    return await inTheProjectsTurn(async () => await body(null), project);
+  }
   const kept = keptForSteps.getStore();
   if (kept !== undefined) {
     kept.held ??= slotForCall(false, project ?? kept.project);
@@ -3629,10 +3718,15 @@ export async function inASlot<T>(body: (lock: string) => Promise<T>, project?: s
 }
 
 /**
- * Runs [param body], a command whose engines run one after another, holding one slot for all of
- * them. Each engine taking its own slot queued again on a busy machine: one `gdharness setup` waited
- * 122, 933 and 335 seconds for its three, 24 minutes in all. The slot is taken at the first engine,
- * so a command refused before one, for want of Godot or for its arguments, says so at once.
+ * Runs [param body], a command whose engines are short setup steps, with every engine it starts
+ * taking no slot. Setup waited behind runs of forty minutes or more for each of its engines.
+ */
+export async function withoutASlot<T>(body: () => Promise<T>): Promise<T> {
+  return await withoutSlots.run(true, body);
+}
+
+/**
+ * Runs [param body], a call whose engines run one after another, holding one slot for all of them.
  */
 export async function inOneSlot<T>(body: () => Promise<T>): Promise<T> {
   if (keptForSteps.getStore() !== undefined) {

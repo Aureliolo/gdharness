@@ -18,6 +18,7 @@ import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import type { Sample } from './engine-spent.js';
 import { errorMessage } from './errors.js';
 import type { GameLog, LogEntry } from './game-log.js';
+import { HEADLESS_OPERATIONS } from './headless-operations.js';
 import { IMPORTABLE_EXTENSIONS } from './import-freshness.js';
 import { freeLibraryCopiesAsync, seedExtensionList } from './library-copies.js';
 import { realAsFarAsItExists } from './paths.js';
@@ -480,7 +481,7 @@ function defaultImportEngine(godotPath: string, projectPath: string): ImportEngi
           join(logDir, 'engine.log'),
           ...args.filter((arg) => arg !== '--headless'),
         ],
-        { project: projectPath },
+        { project: projectPath, slotless: true },
       );
     } finally {
       discard(logDir);
@@ -537,6 +538,14 @@ export async function runOperation(
 }
 
 const REFRESH_CLASS_LIST = 'refresh_class_cache';
+
+/**
+ * The operations of project_import, the class rebuild among them, which take no engine slot as its
+ * import does: short steps of an import path that every other call waits behind.
+ */
+const SLOTLESS_OPERATIONS: ReadonlySet<string> = new Set(
+  Object.values(HEADLESS_OPERATIONS['project_import'] ?? {}),
+);
 
 /**
  * [param outcome] of a class list rebuild, answered against [param listedBefore], the list before
@@ -625,6 +634,7 @@ async function operationOutcome(
     ran = await runEngine(engine.godotPath, args, {
       timeout: engine.ceiling ?? OPERATION_CEILING,
       project: engine.project ?? projectPath,
+      ...(SLOTLESS_OPERATIONS.has(operation) ? { slotless: true } : {}),
       ...(engine.sample === undefined ? {} : { sample: engine.sample }),
     });
     answer = answerIn(answerFile);
