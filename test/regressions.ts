@@ -75125,6 +75125,38 @@ function testAStarvedEngineBesideARealFailureLeavesBothNamed(): void {
   }
 }
 
+/**
+ * A failed engine is not run again. The one case here fails unless an earlier run of it left its marker,
+ * so a build that reruns the engine would pass it, and the marker would hold two lines.
+ */
+function testAFailedEngineBesideAStarvedOneIsNotRunToPassOnASecondTry(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const failsFirst =
+    'extends GdUnitTestSuite\n\nfunc test_it() -> void:\n\tvar marker := ProjectSettings.globalize_path("res://") + "first-run.txt"\n\tvar seen := FileAccess.file_exists(marker)\n\tvar file := FileAccess.open(marker, FileAccess.READ_WRITE if seen else FileAccess.WRITE)\n\tfile.seek_end()\n\tfile.store_line("ran")\n\tfile.close()\n\tawait get_tree().create_timer(1.5).timeout\n\tassert_bool(seen).is_true()\n';
+  const run = sharedEngineRun(engines, { a: STARVING_IN_BEFORE, b: failsFirst }, 2);
+  try {
+    assert.equal(run.status, 1, run.said);
+    assert.equal(run.result.passed, false, run.said);
+    assert.deepEqual(enginesRunning(run.result, 'res://tests/a_test.gd'), [false], run.said);
+    assert.deepEqual(enginesRunning(run.result, 'res://tests/b_test.gd'), [false], run.said);
+    const { problems } = run.result;
+    assert.ok(
+      problems.some((problem) => problem.includes('res://tests/b_test.gd > test_it failed')),
+      problems.join('\n'),
+    );
+    assert.ok(
+      problems.some((problem) => problem.includes('the engine ran out of memory')),
+      problems.join('\n'),
+    );
+    assert.equal(anyRunAgain(run.result.logs ?? ''), false, `no engine ran again: ${run.said}`);
+  } finally {
+    run.cleanup();
+  }
+}
+
 /** A suite that hangs in an engine taken over for a later share is ended by the deadline counted from its share. */
 function testAHungShareInAReusedEngineIsEndedByTheDeadlineOfItsOwn(): void {
   const engines = commandTestEngines();
@@ -133842,6 +133874,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnOutOfMemoryShareInAReusedEngineIsNotRunAgain,
   testAStarvedEngineWithNoFailedCaseIsNotRunAgain,
   testAStarvedEngineBesideARealFailureLeavesBothNamed,
+  testAFailedEngineBesideAStarvedOneIsNotRunToPassOnASecondTry,
   testAHungShareInAReusedEngineIsEndedByTheDeadlineOfItsOwn,
   testARunNotDealtInSharesStartsEveryEngineForItsOwnPart,
   testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited,
