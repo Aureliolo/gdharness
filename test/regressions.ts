@@ -88081,6 +88081,200 @@ function testATestRunDealsByAndRecordsIntoTheTimesItIsGiven(): void {
   }
 }
 
+/** The frame wait a test engine on Windows is given, from the measurements beside it in listed.gd. */
+const WINDOWS_FRAME_SLEEP_USEC = 6000;
+const FRAME_SLEEP_USEC = 1000;
+
+interface SleepProbe {
+  readonly said: string;
+  readonly status: number | null;
+  readonly start: { pid: number; at: number; frames: number } | null;
+  readonly end: { pid: number; at: number; frames: number } | null;
+  /** The engine's processor seconds read between the two stamps, with the clock time of each reading. */
+  readonly readings: { at: number; seconds: number }[];
+}
+
+function stampOf(file: string): { pid: number; at: number; frames: number } | null {
+  if (!existsSync(file)) {
+    return null;
+  }
+  const [pid, at, frames] = readFileSync(file, 'utf8').trim().split(' ').map(Number);
+  return pid === undefined || at === undefined || frames === undefined ? null : { pid, at, frames };
+}
+
+/**
+ * Runs one gdUnit4 case in a project through the test command and reads what it stamped: the engine's
+ * pid, the time and the frame count when the case's wait began and ended. [param sampling] has the
+ * engine's processor time read in between. Null where no engine is to be had and none is required.
+ */
+async function runSleepProbe(
+  body: string,
+  options: { args?: string[]; settings?: string; sampling?: boolean } = {},
+): Promise<SleepProbe | null> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('frame wait regression skipped (Godot or gdUnit4 not found)');
+    return null;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-frame-wait-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-frame-wait-slots-'));
+  const stamps = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-frame-wait-out-'));
+  try {
+    writeTree(project, {
+      'project.godot': `config_version=5\n\n[application]\nconfig/name="FrameWait"\n${options.settings ?? ''}`,
+      'tests/wait_test.gd':
+        'extends GdUnitTestSuite\n\n' +
+        'func _stamp(name: String) -> void:\n' +
+        '\tvar f: FileAccess = FileAccess.open(OS.get_environment("STAMPS") + "/" + name, FileAccess.WRITE)\n' +
+        '\tf.store_string("%d %f %d" % [OS.get_process_id(), Time.get_unix_time_from_system(), Engine.get_process_frames()])\n' +
+        '\tf.close()\n\n' +
+        'func test_wait() -> void:\n' +
+        '\t_stamp("start.txt")\n' +
+        body +
+        '\t_stamp("end.txt")\n',
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const child = spawnHidden(
+      process.execPath,
+      ['build/cli.js', 'test', project, '--slots', slots, ...(options.args ?? [])],
+      {
+        env: {
+          ...process.env,
+          GODOT_PATH: godotPath,
+          STAMPS: stamps,
+          RUNNER_GD: resolve('build', 'godot', 'tests', 'listed.gd').replaceAll('\\', '/'),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    let said = '';
+    child.stdout.on('data', (chunk: Buffer) => (said += chunk.toString()));
+    child.stderr.on('data', (chunk: Buffer) => (said += chunk.toString()));
+    const exited = new Promise<number | null>((done) => child.once('close', done));
+    const killer = setTimeout(() => child.kill(), 4 * ENGINE_CALL_TIMEOUT_MS);
+    const readings: SleepProbe['readings'] = [];
+    const over = { ended: false };
+    void exited.then(() => (over.ended = true));
+    while (!over.ended) {
+      const start = stampOf(join(stamps, 'start.txt'));
+      if (options.sampling && start && !existsSync(join(stamps, 'end.txt'))) {
+        const seconds = (await processorSecondsOf([start.pid])).get(start.pid);
+        if (seconds !== undefined && !existsSync(join(stamps, 'end.txt'))) {
+          readings.push({ at: Date.now() / 1000, seconds });
+        }
+      }
+      await delay(100);
+    }
+    const status = await exited;
+    clearTimeout(killer);
+    return {
+      said,
+      status,
+      start: stampOf(join(stamps, 'start.txt')),
+      end: stampOf(join(stamps, 'end.txt')),
+      readings,
+    };
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(slots, { recursive: true, force: true });
+    rmSync(stamps, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A test engine sleeps after each frame for the wait the system it runs on sleeps through: the
+ * measured one on Windows, where a short delay spins, and 1 ms on Linux and macOS. The runner's own
+ * answer for each system is read through the script the server ships.
+ */
+async function testATestEngineGetsTheFrameWaitItsSystemSleepsThrough(): Promise<void> {
+  const wanted = process.platform === 'win32' ? WINDOWS_FRAME_SLEEP_USEC : FRAME_SLEEP_USEC;
+  const probe = await runSleepProbe(
+    [
+      '\tvar runner: GDScript = load(OS.get_environment("RUNNER_GD")) as GDScript',
+      `\tassert_int(OS.low_processor_usage_mode_sleep_usec).is_equal(${String(wanted)})`,
+      '\tassert_int(runner.call("frame_sleep_usec", "Windows", 0)).is_equal(' +
+        String(WINDOWS_FRAME_SLEEP_USEC) +
+        ')',
+      `\tassert_int(runner.call("frame_sleep_usec", "Linux", 0)).is_equal(${String(FRAME_SLEEP_USEC)})`,
+      `\tassert_int(runner.call("frame_sleep_usec", "macOS", 0)).is_equal(${String(FRAME_SLEEP_USEC)})`,
+      '',
+    ].join('\n'),
+  );
+  if (probe) {
+    assert.equal(probe.status, 0, probe.said);
+    assert.ok(probe.end, `the case ran to its end: ${probe.said}`);
+  }
+}
+
+/** A case waiting on a thread keeps its engine under a quarter of a core, where a spinning wait used most of one. */
+async function testACaseWaitingOnAThreadUsesUnderAQuarterOfACore(): Promise<void> {
+  const probe = await runSleepProbe(
+    [
+      '\tvar t: Thread = Thread.new()',
+      '\tvar _s: int = t.start(func() -> void: OS.delay_msec(3000))',
+      '\twhile t.is_alive():',
+      '\t\tawait get_tree().process_frame',
+      '\tt.wait_to_finish()',
+      '',
+    ].join('\n'),
+    { sampling: true },
+  );
+  if (!probe) {
+    return;
+  }
+  assert.equal(probe.status, 0, probe.said);
+  const first = probe.readings.at(0);
+  const last = probe.readings.at(-1);
+  assert.ok(
+    first && last && last.at - first.at >= 1.5,
+    `the engine was read across the wait: ${JSON.stringify(probe.readings)}`,
+  );
+  const cores = (last.seconds - first.seconds) / (last.at - first.at);
+  assert.ok(
+    cores < 0.25,
+    `the engine used ${cores.toFixed(2)} of a core over the wait: ${JSON.stringify(probe.readings)}`,
+  );
+}
+
+/** A case awaiting 300 frames ends within a few seconds, whatever the frame wait. */
+async function testACaseAwaitingThreeHundredFramesEndsInSeconds(): Promise<void> {
+  const probe = await runSleepProbe(
+    ['\tfor i: int in 300:', '\t\tawait get_tree().process_frame', ''].join('\n'),
+  );
+  if (probe === null) {
+    return;
+  }
+  assert.ok(probe.start && probe.end, `the case ran to its end: ${probe.said}`);
+  assert.equal(probe.status, 0, probe.said);
+  assert.equal(probe.end.frames - probe.start.frames >= 300, true, 'the frames passed');
+  const took = probe.end.at - probe.start.at;
+  assert.ok(took < 8, `300 frames took ${took.toFixed(2)} s`);
+}
+
+/** A suite naming its own frame cap, by flag or by project setting, keeps it and the 1 ms wait. */
+async function testASuiteNamingItsOwnFrameCapKeepsIt(): Promise<void> {
+  const body = (cap: number): string =>
+    [
+      `\tassert_int(Engine.max_fps).is_equal(${String(cap)})`,
+      `\tassert_int(OS.low_processor_usage_mode_sleep_usec).is_equal(${String(FRAME_SLEEP_USEC)})`,
+      '',
+    ].join('\n');
+  const byFlag = await runSleepProbe(body(30), { args: ['--engine-arg', '--max-fps', '--engine-arg', '30'] });
+  if (byFlag) {
+    assert.equal(byFlag.status, 0, byFlag.said);
+    assert.ok(byFlag.end, `the case ran to its end: ${byFlag.said}`);
+  }
+  const bySetting = await runSleepProbe(body(30), { settings: 'run/max_fps=30\n' });
+  if (bySetting) {
+    assert.equal(bySetting.status, 0, bySetting.said);
+    assert.ok(bySetting.end, `the case ran to its end: ${bySetting.said}`);
+  }
+}
+
 /**
  * An engine is sized by the most memory one holding its suites was seen to hold, kept with the
  * suite times, and the gate counts a going engine at what it has yet to take.
@@ -132876,6 +133070,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunTimesStartAndSetUpApartFromItsCases,
   testATestRunsLimitsEndAHungOrChattyEngine,
   testATestRunDealsByAndRecordsIntoTheTimesItIsGiven,
+  testATestEngineGetsTheFrameWaitItsSystemSleepsThrough,
+  testACaseWaitingOnAThreadUsesUnderAQuarterOfACore,
+  testACaseAwaitingThreeHundredFramesEndsInSeconds,
+  testASuiteNamingItsOwnFrameCapKeepsIt,
   testEachEnginesFolderNamesItsLaneAndPid,
   testEveryShareAnEngineIsHandedNamesItsLaneAndPid,
   testAHandedShareKeepsItsEnginesLane,
