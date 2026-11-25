@@ -775,6 +775,12 @@ The MCP server's own engines take them too. Each headless operation, script chec
 started with `editor_run start`, whether the server starts it or the editor plays it. The game
 keeps the slot for as long as it runs.
 
+An import takes none, and waits for none. That covers `project_import`, the import another call
+starts first, the class cache rebuild an import or an operation runs first, and the engines of
+`gdharness setup`, `runtime`, `upgrade` and `uninstall`. They are short steps every other call
+waits behind. A test run's own engines, and the import passes it hands to its suites, still take a
+slot. Inside an engine's slot (`GODOT_ENGINE_HELD`) an import runs on that slot as any engine does.
+
 ### Games and their slots
 
 A game outlives the server that started it, so its lock is handed on. It goes to the keeper holding

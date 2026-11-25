@@ -241,7 +241,6 @@ import {
   handSlotToKeeper,
   holderOf,
   inheritsSlot,
-  inOneSlot,
   keeperSlotOf,
   keptSlotsOf,
   LANES_VARIABLE,
@@ -81561,7 +81560,7 @@ async function repositoryOfAProgramsTake(
 
 /**
  * The takes the server and the commands make for a project carry the project's repository: a call's
- * slot (a game a tool starts), an engine run for a call, and the one slot of a command's steps. A
+ * slot (a game a tool starts) and an engine run for a call. A
  * take with no project carries none.
  */
 async function testATakeForAProjectCarriesItsRepositoryWhateverTakesIt(): Promise<void> {
@@ -81590,24 +81589,6 @@ async function testATakeForAProjectCarriesItsRepositoryWhateverTakesIt(): Promis
       await repositoryOfAProgramsTake(listed, `slots.inASlot(() => ${held}); await ${held};`, names),
       undefined,
       'and one for none carries none',
-    );
-    assert.equal(
-      await repositoryOfAProgramsTake(
-        listed,
-        `slots.inOneSlot(() => { slots.forTheProject(project); return slots.inASlot(() => ${held}); }); await ${held};`,
-        names,
-      ),
-      'listed-game',
-      "a command's one slot carries the repository of the project it names",
-    );
-    assert.equal(
-      await repositoryOfAProgramsTake(
-        listed,
-        `slots.inOneSlot(() => slots.inASlot(() => ${held})); await ${held};`,
-        names,
-      ),
-      undefined,
-      'and a command that names none gets none',
     );
     const run = `import { runEngine } from ${JSON.stringify(pathToFileURL(resolve('src', 'engine-run.ts')).href)};`;
     const idle = `[process.execPath, ['-e', 'setTimeout(() => undefined, 60000)']] as const`;
@@ -91990,66 +91971,240 @@ async function testAnEngineRunsAtNormalPriority(): Promise<void> {
   }
 }
 
+/** The engines of one stand-in machine whose only slot is held, and a program run on it. */
+interface FullMachine {
+  readonly directory: string;
+  readonly root: string;
+  readonly project: string;
+  readonly holder: EngineSlots;
+  readonly program: (body: string, env?: Record<string, string>) => ReturnType<typeof spawnHidden>;
+}
+
 /**
- * A command whose engines run one after another holds one slot for all of them. Each engine took a
- * slot of its own, so on a busy machine one `gdharness setup` queued three times, 24 minutes in all.
- * Two stand-in engines print the slot they were handed, and the slot stays held between them. It is
- * taken at the first engine, since setup with no Godot to find waited 522 seconds for a slot first.
+ * A slot folder whose every slot is held, and a stand-in engine, for [param body]. [param program]
+ * runs the text it is given in a process of its own on that folder, after its import of the engine
+ * modules as `run`, `slots` and `headless`, with `engine`, `project` and `directory` set.
  */
-async function testACommandOfSeveralEnginesHoldsOneSlot(): Promise<void> {
-  const own = ['-e', 'console.log("slot " + process.env.GODOT_ENGINE_HELD)'];
-  const slotOf = (ran: Awaited<ReturnType<typeof runEngine>>): string | undefined =>
-    /^slot (.+)$/m.exec(
-      ran.log
-        .everything()
-        .map((entry) => entry.text)
-        .join('\n'),
-    )?.[1];
-  const heldBy = (lock: string | undefined): number | undefined =>
-    lock === undefined || !existsSync(lock) ? undefined : holderOf(readFileSync(lock, 'utf8'))?.pid;
-  // In a process of its own on slots of its own, since the cases beside this one hold slots too.
-  const slots = mkdtempSync(join(tmpdir(), 'gdharness-one-slot-'));
+async function onAFullMachine(body: (machine: FullMachine) => Promise<void>): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-full-machine-'));
+  const directory = join(root, 'slots');
+  mkdirSync(directory);
+  const project = join(root, 'project');
+  mkdirSync(project);
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  const holder = new EngineSlots(
+    directory,
+    1,
+    { pid: process.pid, started: await ownStart() },
+    undefined,
+    () => 'tier',
+  );
+  const children: ReturnType<typeof spawnHidden>[] = [];
   try {
-    const before = spawnSyncHidden(
-      process.execPath,
-      [
-        '-e',
+    assert.equal(await holder.takeFree(), join(directory, '0.lock'), 'the one slot is held');
+    const program = (source: string, extra: Record<string, string> = {}): ReturnType<typeof spawnHidden> => {
+      const script = join(root, `program-${String(children.length)}.ts`);
+      const module = (name: string): string => JSON.stringify(pathToFileURL(resolve('src', name)).href);
+      writeFileSync(
+        script,
         [
-          "import { readdirSync } from 'node:fs';",
-          'const { inOneSlot } = await import(process.env.GDH_TEST_MODULE);',
-          `await inOneSlot(async () => console.log('held ' + readdirSync(process.env.${SLOTS_VARIABLE}).join(' ')));`,
+          `import * as run from ${module('engine-run.ts')};`,
+          `import * as slots from ${module('engine-slots.ts')};`,
+          `import * as headless from ${module('headless.ts')};`,
+          `const engine = ${JSON.stringify(memoryEngine())};`,
+          `const project = ${JSON.stringify(project)};`,
+          `const directory = ${JSON.stringify(directory)};`,
+          source,
         ].join('\n'),
-      ],
-      {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          [SLOTS_VARIABLE]: slots,
-          GDH_TEST_MODULE: pathToFileURL(resolve('src', 'engine-slots.ts')).href,
-        },
-        timeout: 60_000,
-      },
-    );
-    assert.match(
-      before.stdout,
-      /^held $/m,
-      `no slot is held before the first engine: ${before.stdout}${before.stderr}`,
-    );
+      );
+      const env: Record<string, string | undefined> = { ...process.env };
+      for (const name of SLOT_VARIABLES) {
+        delete env[name];
+      }
+      const child = spawnHidden(process.execPath, [script], {
+        env: { ...env, [SLOTS_VARIABLE]: directory, [SLOT_COUNT_VARIABLE]: '1', GDH_STAY_MS: '0', ...extra },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      children.push(child);
+      return child;
+    };
+    await body({ directory, root, project, holder, program });
   } finally {
-    sweep(slots);
+    for (const child of children) {
+      child.kill();
+    }
+    holder.releaseAll();
+    rmSync(root, { recursive: true, force: true });
   }
-  let between: number | undefined;
-  const [first, second] = await inOneSlot(async () => {
-    const one = await runEngine(process.execPath, own);
-    between = heldBy(slotOf(one));
-    const two = await runEngine(process.execPath, own);
-    return [one, two];
+}
+
+/** What [param child] has printed so far, and whether it has exited. */
+function sayingOf(child: ReturnType<typeof spawnHidden>): {
+  text: () => string;
+  exited: Promise<number | null>;
+} {
+  let said = '';
+  for (const stream of [child.stdout, child.stderr]) {
+    stream?.on('data', (chunk: Buffer) => {
+      said += chunk.toString();
+    });
+  }
+  const exited = new Promise<number | null>((done) => {
+    child.on('close', (code) => {
+      done(code);
+    });
   });
-  const lock = slotOf(first);
-  assert.notEqual(lock, undefined, howItEnded(first));
-  assert.equal(slotOf(second), lock, 'the second engine is handed the same slot');
-  assert.equal(between, process.pid, 'and this process holds the slot between the engines');
-  assert.notEqual(heldBy(lock), process.pid, 'and is given back once the command is done');
+  return { text: () => said, exited };
+}
+
+/** Settles with 'late' after [param ms]. */
+async function lateAfter(ms: number): Promise<'late'> {
+  await delay(ms);
+  return 'late';
+}
+
+/** What the program of [param machine] with [param body] printed once it ended, or null if it never did. */
+async function ranToTheEnd(machine: FullMachine, body: string): Promise<string | null> {
+  const printed = sayingOf(machine.program(body));
+  const ended = await Promise.race([printed.exited, lateAfter(40_000)]);
+  return ended === 'late' ? null : printed.text();
+}
+
+/** An import on a machine whose every slot is held answers at once, writes no lock and waits for none. */
+async function testAnImportTakesNoSlotOnAFullMachine(): Promise<void> {
+  await onAFullMachine(async (machine) => {
+    const before = folderListing(machine.directory);
+    const out = await ranToTheEnd(
+      machine,
+      "const imported = await headless.runImport(engine, project);\nconsole.log('imported ' + String(imported.ok));",
+    );
+    assert.ok(out !== null, 'the import never ended: it waited for a slot');
+    assert.match(out, /^imported true$/m, out);
+    assert.deepEqual(folderListing(machine.directory), before, 'no lock and no waiting mark was written');
+  });
+}
+
+/**
+ * A call that imports first starts its import at once on a full machine. Its own engine afterwards
+ * waits for a slot as on main. The server's import callers hand in no engine of their own.
+ */
+async function testACallThatImportsFirstStartsItsImportAtOnce(): Promise<void> {
+  await onAFullMachine(async (machine) => {
+    const printed = sayingOf(
+      machine.program(
+        [
+          'const imported = await headless.runImport(engine, project);',
+          "console.log('imported ' + String(imported.ok));",
+          "const ran = await run.runEngine(engine, ['--headless', '--path', project], { project });",
+          "console.log('engine ' + String(ran.exitCode));",
+        ].join('\n'),
+      ),
+    );
+    assert.ok(await untilTrue(() => /^imported true$/m.test(printed.text()), 40_000), printed.text());
+    assert.ok(
+      await untilTrue(() => slotWaiters(machine.directory).length > 0, 20_000),
+      `its engine made no waiting mark: ${printed.text()}`,
+    );
+    assert.doesNotMatch(printed.text(), /^engine /m, 'its own engine waits for a slot');
+    machine.holder.releaseAll();
+    assert.ok(await untilTrue(() => /^engine 0$/m.test(printed.text()), 40_000), printed.text());
+  });
+  const server = readFileSync(resolve('src', 'server.ts'), 'utf8');
+  const calls = [...server.matchAll(/runImport\(([^)]*)\)/g)].map((call) => call[1]);
+  assert.ok(calls.length >= 3, 'the server calls runImport');
+  for (const call of calls) {
+    assert.doesNotMatch(call ?? '', /engine:/, `a server import with an engine of its own: ${call ?? ''}`);
+  }
+}
+
+/** The class cache rebuild an import or an operation runs first takes no slot. */
+async function testAClassCacheRebuildTakesNoSlot(): Promise<void> {
+  await onAFullMachine(async (machine) => {
+    const before = folderListing(machine.directory);
+    const out = await ranToTheEnd(
+      machine,
+      [
+        "const outcome = await headless.runOperation({ godotPath: engine, script: 'operations.gd', debug: false }, 'refresh_class_cache', {}, project);",
+        "console.log('rebuilt ' + String(outcome.ok));",
+      ].join('\n'),
+    );
+    assert.ok(out !== null, 'the rebuild never ended: it waited for a slot');
+    assert.match(out, /^rebuilt true$/m, out);
+    assert.deepEqual(folderListing(machine.directory), before);
+  });
+}
+
+/** gdharness setup, runtime, upgrade and uninstall run their engines on a full machine with no slot. */
+async function testSetupTakesNoSlotOnAFullMachine(): Promise<void> {
+  await onAFullMachine(async (machine) => {
+    const before = folderListing(machine.directory);
+    const out = await ranToTheEnd(
+      machine,
+      [
+        'await slots.withoutASlot(async () => {',
+        "  const first = await headless.runOperation({ godotPath: engine, script: 'operations.gd', debug: false }, 'enable_plugin', { pluginName: 'x' }, project);",
+        "  const second = await run.runEngine(engine, ['--headless', '--path', project], { project });",
+        "  console.log('steps ' + String(first.ok) + ' ' + String(second.exitCode));",
+        '});',
+      ].join('\n'),
+    );
+    assert.ok(out !== null, 'the steps never ended: they waited for a slot');
+    assert.match(out, /^steps true 0$/m, out);
+    assert.deepEqual(folderListing(machine.directory), before);
+  });
+  const cli = readFileSync(resolve('src', 'cli.ts'), 'utf8');
+  assert.equal(cli.match(/withoutASlot\(/g)?.length, 4, 'setup, runtime, upgrade and uninstall');
+  assert.doesNotMatch(cli, /inOneSlot/);
+}
+
+/** A test run's engines and script_diagnostics take a slot, and wait for one on a full machine. */
+async function testATestRunsEnginesAndScriptDiagnosticsStillTakeSlots(): Promise<void> {
+  const bodies = [
+    "await run.runEngine(engine, ['--headless', '--path', project], { project });",
+    "await headless.runOperation({ godotPath: engine, script: 'operations.gd', debug: false }, 'script_diagnostics', {}, project);",
+  ];
+  for (const body of bodies) {
+    await onAFullMachine(async (machine) => {
+      const printed = sayingOf(machine.program(`${body}\nconsole.log('done');`));
+      assert.ok(
+        await untilTrue(() => slotWaiters(machine.directory).length > 0, 30_000),
+        `no waiting mark for ${body}: ${printed.text()}`,
+      );
+      assert.doesNotMatch(printed.text(), /done/, 'it waits for the held slot');
+    });
+  }
+}
+
+/** An import inside another engine's slot runs on the slot lent to that one engine, as on any engine. */
+async function testAnImportInsideAHeldSlotRunsOnIt(): Promise<void> {
+  const listed = await processTree();
+  assert.ok(listed !== undefined, whyTheProcessTreeFailed() ?? 'the process table');
+  const above = ancestorsIn(listed, process.pid, 1).find((pid) =>
+    inheritsSlot(listed, process.pid, { pid }, basename(process.execPath)),
+  );
+  assert.ok(above !== undefined, 'a process above this one on another executable');
+  await onAFullMachine(async (machine) => {
+    const lent = join(machine.root, 'lent.lock');
+    writeFileSync(lent, JSON.stringify({ pid: above, started: (await startTimesOf([above])).get(above) }));
+    const printed = sayingOf(
+      machine.program(
+        [
+          "const idle = ['-e', 'setTimeout(() => undefined, 4000)'];",
+          'const both = await Promise.all([',
+          '  run.runEngine(process.execPath, idle, { project, slotless: true }),',
+          '  run.runEngine(process.execPath, idle, { project, slotless: true }),',
+          ']);',
+          "console.log('ended ' + both.map((ran) => String(ran.exitCode)).join(' '));",
+        ].join('\n'),
+        { GODOT_ENGINE_HELD: lent },
+      ),
+    );
+    assert.ok(
+      await untilTrue(() => slotWaiters(machine.directory).length > 0, 20_000),
+      `the slot lent to one engine is lent to a second at once: ${printed.text()}`,
+    );
+    assert.doesNotMatch(printed.text(), /ended/, 'the second waits while the first runs on the lent slot');
+  });
 }
 
 /** What the stand-in slot command (test/support/slot-grant.ts) wrote about itself. */
@@ -92394,23 +92549,6 @@ async function testALiveEngineDoesNotHoldTheCommandsInputOpen(): Promise<void> {
     } finally {
       engine.kill();
     }
-  });
-}
-
-/** A command of several engines asks once and gives the slot back when it is done. */
-async function testASlotCommandIsAskedOnceForACommandOfSeveralEngines(): Promise<void> {
-  await withASlotCommand({}, async (command) => {
-    const between: string[][] = [];
-    const [first, second] = await inOneSlot(async () => {
-      const one = await runEngine(process.execPath, SLOT_PRINTER);
-      between.push(grantEvents(command));
-      const two = await runEngine(process.execPath, SLOT_PRINTER);
-      return [one, two];
-    });
-    assert.equal(printedSlot(first), command.lock);
-    assert.equal(printedSlot(second), command.lock);
-    assert.deepEqual(between, [['start']], 'held between the engines');
-    assert.deepEqual(grantEvents(command), ['start', 'eof']);
   });
 }
 
@@ -132892,7 +133030,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineCrashIsToldByItsWholeExitCode,
   testAnEngineStartedDirectlyIsToldByItsWholeExitCode,
   testAnEngineRunsAtNormalPriority,
-  testACommandOfSeveralEnginesHoldsOneSlot,
+  testAnImportTakesNoSlotOnAFullMachine,
+  testACallThatImportsFirstStartsItsImportAtOnce,
+  testAClassCacheRebuildTakesNoSlot,
+  testSetupTakesNoSlotOnAFullMachine,
+  testATestRunsEnginesAndScriptDiagnosticsStillTakeSlots,
+  testAnImportInsideAHeldSlotRunsOnIt,
   testASlotCommandGrantsTheSlotAnEngineRunsOn,
   testASlotCommandRefusalFailsTheStartWithItsReason,
   testASlotCommandThatDoesNotAnswerFailsTheStartWithTheCause,
@@ -132900,7 +133043,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACommandThatIgnoresTheEndOfItsInputIsEndedAfterAWait,
   testAKeptRunUnderASlotCommandIsHandedToItsKeeper,
   testALiveEngineDoesNotHoldTheCommandsInputOpen,
-  testASlotCommandIsAskedOnceForACommandOfSeveralEngines,
   testASlotCommandServesTheSlotsOfATestRun,
   testAWaitForAGrantIsSaidToTheCallThatWaits,
   testACancelledWaitForAGrantEndsTheCommandsInput,

@@ -480,7 +480,7 @@ function defaultImportEngine(godotPath: string, projectPath: string): ImportEngi
           join(logDir, 'engine.log'),
           ...args.filter((arg) => arg !== '--headless'),
         ],
-        { project: projectPath },
+        { project: projectPath, slotless: true },
       );
     } finally {
       discard(logDir);
@@ -625,6 +625,7 @@ async function operationOutcome(
     ran = await runEngine(engine.godotPath, args, {
       timeout: engine.ceiling ?? OPERATION_CEILING,
       project: engine.project ?? projectPath,
+      ...(operation === REFRESH_CLASS_LIST ? { slotless: true } : {}),
       ...(engine.sample === undefined ? {} : { sample: engine.sample }),
     });
     answer = answerIn(answerFile);

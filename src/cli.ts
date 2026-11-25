@@ -10,7 +10,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serverServing } from './bridge-announce.js';
 import { editorOpenOptionsOf, holdTheEditors, openTheEditor } from './editor-open.js';
-import { forTheProject, inOneSlot, nameSlotTaker, sayWaitsTo } from './engine-slots.js';
+import { nameSlotTaker, sayWaitsTo, withoutASlot } from './engine-slots.js';
 import { letWindowsReportCrashes } from './error-mode.js';
 import { EngineUsageError, Refusal } from './errors.js';
 import { GodotLocator } from './godot-path.js';
@@ -92,8 +92,6 @@ function projectArgument(at: number): string {
   if (refused !== null) {
     throw new UsageError(refused);
   }
-  // The engine steps of the command that follows run for this project.
-  forTheProject(projectPath);
   return projectPath;
 }
 
@@ -493,8 +491,7 @@ async function setup(): Promise<void> {
   // The runtime addon is per-project like everything else setup installs, so it is not something
   // to opt into: without it a third of the tools have nothing to talk to.
   const withRuntime = !args.includes('--no-runtime');
-  // The engine steps share one slot, and the harness question below holds none while it waits.
-  const godot = await inOneSlot(async () => await installIntoProject(projectPath, withRuntime));
+  const godot = await withoutASlot(async () => await installIntoProject(projectPath, withRuntime));
 
   if (!args.includes('--no-connect')) {
     await connectHarnesses(godot, projectPath);
@@ -1196,16 +1193,16 @@ async function main(): Promise<void> {
       doctorReport(projectArgument(1));
       return;
     case 'runtime':
-      await inOneSlot(runtime);
+      await withoutASlot(runtime);
       return;
     case 'classes':
       await classes();
       return;
     case 'upgrade':
-      await inOneSlot(upgrade);
+      await withoutASlot(upgrade);
       return;
     case 'uninstall':
-      await inOneSlot(uninstall);
+      await withoutASlot(uninstall);
       return;
     default: {
       if (ranPrintingCommand(command)) {
