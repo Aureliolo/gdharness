@@ -130638,6 +130638,372 @@ async function testAChildOfTheEngineCountsTowardsItsMemory(): Promise<void> {
   );
 }
 
+/**
+ * The project's one suite made one whose declaration puts its run on a window, which on Windows is
+ * the hidden desktop's. A headless suite beside it would run as a second engine.
+ */
+function addAWindowedSuite(project: string): void {
+  rmSync(join(project, 'tests', 'held_test.gd'));
+  writeFileSync(
+    join(project, 'tests', 'needs_window_test.gd'),
+    'extends GdUnitTestSuite\n\nconst GDHARNESS_NEEDS_WINDOW: bool = true\n\nfunc test_one() -> void:\n\tpass\n',
+  );
+}
+
+/**
+ * One server whose engine is the memory engine, with a memory project for each of [param projects]:
+ * its ceiling in megabytes, and a windowed suite where it is windowed. The server has a slot folder
+ * of its own, with a slot for each project whatever the suite's own count, so their runs can overlap
+ * even beside another suite. Each [param body] call of
+ * run runs project_test on one project. Each test engine writes its pid and its parent's to
+ * [param pids], one line each.
+ */
+async function withMemoryProjects(
+  holds: Record<string, string>,
+  projects: readonly { readonly ceiling: number; readonly windowed: boolean }[],
+  body: (
+    run: (which: number) => Promise<unknown>,
+    paths: readonly string[],
+    runtime: string,
+    pids: string,
+  ) => Promise<void>,
+): Promise<void> {
+  const paths = projects.map(({ ceiling, windowed }) => {
+    const project = memoryProject();
+    setTheCeilingOf(project, String(ceiling));
+    if (windowed) {
+      addAWindowedSuite(project);
+    }
+    return project;
+  });
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-runtime-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
+  const pids = join(runtime, 'engine-pids');
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: memoryEngine(),
+      GDHARNESS_RUNTIME_DIR: runtime,
+      [SLOTS_VARIABLE]: slots,
+      [SLOT_COUNT_VARIABLE]: slotCountForEngines(projects.length),
+      GDH_PID_FILE: pids,
+      ...holds,
+    },
+  });
+  try {
+    await server.initialize('regression-test');
+    await body(
+      async (which) => {
+        const response = await server.request(
+          'tools/call',
+          {
+            name: 'project_test',
+            arguments: { projectPath: paths[which], path: 'res://tests', timeoutMs: 60_000 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        const json = blocks.find((block) => block.trimStart().startsWith('{'));
+        return json === undefined ? blocks.join('\n') : (JSON.parse(json) as unknown);
+      },
+      paths,
+      runtime,
+      pids,
+    );
+  } finally {
+    await server.stop();
+    sweep(...paths, runtime, slots);
+  }
+}
+
+/** The pid and parent pid of each test engine named in [param pids] so far, in the order they started. */
+function enginesNamedIn(pids: string): { readonly engine: number; readonly parent: number }[] {
+  if (!existsSync(pids)) {
+    return [];
+  }
+  return readFileSync(pids, 'utf8')
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => {
+      const [engine = Number.NaN, parent = Number.NaN] = line.trim().split(' ').map(Number);
+      return { engine, parent };
+    });
+}
+
+/**
+ * The most test engines named in [param pids] that were alive at one reading, read every 100 ms
+ * until [param runs] settles. Each engine names itself as it starts, so a count of every engine
+ * means each started while the ones before it were still alive.
+ */
+async function enginesAliveAtOnce(pids: string, runs: Promise<unknown>): Promise<number> {
+  const state = { settled: false };
+  void runs.finally(() => {
+    state.settled = true;
+  });
+  let most = 0;
+  while (!state.settled) {
+    most = Math.max(most, enginesNamedIn(pids).filter(({ engine }) => alive(engine)).length);
+    await delay(100);
+  }
+  return most;
+}
+
+/** What each of [param runs] answered, once every engine of theirs was seen alive at once. */
+async function allAtOnce(pids: string, runs: readonly Promise<unknown>[]): Promise<unknown[]> {
+  const answers = Promise.all(runs);
+  const most = await enginesAliveAtOnce(pids, answers);
+  assert.equal(most, runs.length, `the runs' engines overlapped: ${JSON.stringify(enginesNamedIn(pids))}`);
+  return await answers;
+}
+
+/**
+ * Engines that grow to 600 MB only after the 4 s each run's engine is given to start, so a run past
+ * a 300 MB ceiling is ended while the others are alive.
+ */
+const OVERLAPPING_HOLDS = {
+  GDH_HOLD_MB: '600',
+  GDH_GROW_MB: '100',
+  GDH_GROW_AFTER_MS: '4000',
+  GDH_STAY_MS: '12000',
+};
+
+/**
+ * A windowed run past its ceiling ends only itself. On Windows one helper starts every desktop
+ * engine of a server, so a guard on the helper summed every engine and ended them all.
+ */
+async function testAWindowedRunPastItsCeilingEndsNoRunBeside(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  await withMemoryProjects(
+    OVERLAPPING_HOLDS,
+    [
+      { ceiling: 300, windowed: true },
+      { ceiling: 2000, windowed: true },
+      { ceiling: 2000, windowed: false },
+    ],
+    async (run, _paths, _runtime, pids) => {
+      const [over, besideOnTheDesktop, besideHeadless] = await allAtOnce(pids, [run(0), run(1), run(2)]);
+      assert.match(String(get(over, 'verdict')), MEMORY_END_SAID_ABOVE_300, JSON.stringify(over));
+      const peak = asNumber(get(over, 'memoryEnded', 'peakBytes'));
+      assert.ok(peak > 300 * 1024 * 1024 && peak < 1000 * 1024 * 1024, `its own engine's peak: ${peak}`);
+      for (const beside of [besideOnTheDesktop, besideHeadless]) {
+        assert.equal(get(beside, 'memoryEnded'), undefined, JSON.stringify(beside));
+        assert.equal(get(beside, 'exitCode'), 0, JSON.stringify(beside));
+        assert.doesNotMatch(String(get(beside, 'verdict')), /memory/, JSON.stringify(beside));
+      }
+    },
+  );
+}
+
+const MEMORY_END_SAID_ABOVE_300 =
+  /^ended for its memory: the engine held 0\.[3-9] GB, past the 0\.3 GB ceiling\./;
+
+/** Two windowed runs ended for memory at once each name their own engine's peak. */
+async function testTwoWindowedRunsEndedForMemoryEachReportTheirOwnPeak(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  await withMemoryProjects(
+    OVERLAPPING_HOLDS,
+    [
+      { ceiling: 300, windowed: true },
+      { ceiling: 300, windowed: true },
+    ],
+    async (run, _paths, _runtime, pids) => {
+      const ended = await allAtOnce(pids, [run(0), run(1)]);
+      const peaks = ended.map((one) => {
+        assert.match(String(get(one, 'verdict')), MEMORY_END_SAID_ABOVE_300, JSON.stringify(one));
+        return asNumber(get(one, 'memoryEnded', 'peakBytes'));
+      });
+      for (const peak of peaks) {
+        assert.ok(peak < 1000 * 1024 * 1024, `one engine's peak, not the helper's whole tree: ${peak}`);
+      }
+      assert.notEqual(peaks[0], peaks[1], `two engines cannot hold the same byte count: ${peaks.join(', ')}`);
+    },
+  );
+}
+
+/**
+ * What the memory watch was asked to guard while project_test ran a suite of the memory project on
+ * this platform, and the pid and parent pid the engine of that run named for itself.
+ */
+async function guardedWhileTestingOnTheMemoryEngine(
+  windowed: boolean,
+): Promise<{ roots: number[]; engine: number; parent: number }> {
+  const project = memoryProject();
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-runtime-'));
+  const pids = join(runtime, 'engine-pids');
+  if (windowed) {
+    addAWindowedSuite(project);
+  }
+  try {
+    const found = await inAProcessOfItsOwn(
+      [
+        'const { GodotServer } = await import(' +
+          JSON.stringify(pathToFileURL(resolve('src', 'server.ts')).href) +
+          ');',
+        'const roots = [];',
+        'const guard = memory.engineMemory.guard.bind(memory.engineMemory);',
+        'memory.engineMemory.guard = (pid, ...rest) => { roots.push(pid); return guard(pid, ...rest); };',
+        'const server = new GodotServer();',
+        `const ran = await server.handleRunTests({ projectPath: ${JSON.stringify(project)}, path: 'res://tests', timeoutMs: 60000 });`,
+        'say({ roots, text: ran.content.map((block) => block.text).join("\\n") });',
+      ],
+      {
+        GODOT_PATH: memoryEngine(),
+        GDHARNESS_RUNTIME_DIR: runtime,
+        GDH_HOLD_MB: '60',
+        GDH_STAY_MS: '4000',
+        GDH_PID_FILE: pids,
+      },
+    );
+    const named = readFileSync(pids, 'utf8').trim().split('\n').at(-1)?.split(' ') ?? [];
+    const [engine, parent] = named.map(Number);
+    assert.ok(engine !== undefined && parent !== undefined, `the engine named itself: ${named.join(' ')}`);
+    return { roots: asArray(get(found, 'roots')).map(Number), engine, parent };
+  } finally {
+    sweep(project, runtime);
+  }
+}
+
+/** On Windows the guard of a windowed run reads the engine's own pid, never the helper that started it. */
+async function testTheGuardOfAWindowedRunWatchesItsEngineNotTheHelper(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { roots, engine, parent } = await guardedWhileTestingOnTheMemoryEngine(true);
+  assert.ok(roots.includes(engine), `the engine ${engine} is guarded: ${roots.join(', ')}`);
+  assert.ok(!roots.includes(parent), `the helper ${parent} is not: ${roots.join(', ')}`);
+}
+
+/** Elsewhere a desktop run starts the engine itself, and its guard watches that process as it always did. */
+async function testTheGuardOfARunWithoutTheWindowsHelperWatchesTheEngineItself(): Promise<void> {
+  if (process.platform === 'win32') {
+    return;
+  }
+  const { roots, engine, parent } = await guardedWhileTestingOnTheMemoryEngine(true);
+  assert.ok(roots.includes(engine), `the engine ${engine} is guarded: ${roots.join(', ')}`);
+  assert.ok(!roots.includes(parent), `and not the process that started it: ${roots.join(', ')}`);
+}
+
+/**
+ * A windowed run whose helper is ended mid-run is still ended past its ceiling, with its engine's
+ * own peak. A guard on the helper was released once the helper was gone, and the engine then grew
+ * unguarded.
+ */
+async function testAWindowedRunWhoseHelperDiedIsStillEndedForItsMemory(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  await withMemoryProjects(
+    { GDH_HOLD_MB: '1500', GDH_GROW_MB: '100', GDH_GROW_AFTER_MS: '4000', GDH_STAY_MS: '12000' },
+    [{ ceiling: 1000, windowed: true }],
+    async (run, _paths, _runtime, pids) => {
+      const ran = run(0);
+      assert.ok(
+        await untilTrue(() => enginesNamedIn(pids).length > 0, 30_000),
+        'the engine named itself before it grew',
+      );
+      const [started] = enginesNamedIn(pids);
+      assert.ok(started !== undefined && started.parent !== process.pid, JSON.stringify(started));
+      process.kill(started.parent);
+      const answer = await ran;
+      assert.match(
+        String(get(answer, 'verdict')),
+        /^ended for its memory: the engine held [\d.]+ GB, past the [\d.]+ GB ceiling\./,
+        JSON.stringify(answer),
+      );
+      const peak = asNumber(get(answer, 'memoryEnded', 'peakBytes'));
+      assert.ok(
+        peak > 1000 * 1024 * 1024 && peak < 1700 * 1024 * 1024,
+        `the engine's own peak: ${String(peak)}`,
+      );
+    },
+  );
+}
+
+/**
+ * Two windowed runs of 900 MB engines at once, each project under a 4000 MB ceiling and with
+ * [param planted] kept as its project_test peak before the runs where it is given. Answers each
+ * project's kept peak once both have been written, and runs [param after] on the projects.
+ */
+async function keptPeaksOfTwoWindowedRunsAtOnce(
+  planted: number | undefined,
+  after: (paths: readonly string[], runtime: string) => Promise<void> = async () => {
+    // Nothing more to read.
+  },
+): Promise<number[]> {
+  let kept: number[] = [];
+  await withMemoryProjects(
+    { GDH_HOLD_MB: '900', GDH_GROW_MB: '100', GDH_STAY_MS: '8000' },
+    [
+      { ceiling: 4000, windowed: true },
+      { ceiling: 4000, windowed: true },
+    ],
+    async (run, paths, runtime, pids) => {
+      if (planted !== undefined) {
+        await withHoldsInTheEnvironment({ GDHARNESS_RUNTIME_DIR: runtime }, async () => {
+          for (const path of paths) {
+            await recordEnginePeak(path, 'project_test', planted);
+          }
+        });
+      }
+      const answers = await allAtOnce(pids, [run(0), run(1)]);
+      for (const answer of answers) {
+        assert.equal(get(answer, 'exitCode'), 0, JSON.stringify(answer));
+      }
+      const read = (): (number | undefined)[] =>
+        paths.map((path) => readEnginePeaks(path, runtime).project_test);
+      await untilTrue(() => read().every((bytes) => bytes !== undefined && bytes !== planted), 5000);
+      kept = read().map((bytes) => bytes ?? 0);
+      await after(paths, runtime);
+    },
+  );
+  return kept;
+}
+
+/**
+ * Two windowed runs at once each keep their own engine's peak for their project, so a later run of
+ * either is counted at what one engine held. The helper's sum, kept, refused later small runs for
+ * the memory of every engine beside them.
+ */
+async function testTwoWindowedRunsAtOnceEachKeepTheirOwnPeak(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const kept = await keptPeaksOfTwoWindowedRunsAtOnce(undefined, async (paths, runtime) => {
+    // Room for one 900 MB engine at the flat 1.5 GB, and not for two counted as one.
+    const room = (): Promise<{ bytes: number; said: string }> =>
+      Promise.resolve({ bytes: 5.6 * MEMORY_GIB, said: 'of memory free' });
+    await withHoldsInTheEnvironment({ GDHARNESS_RUNTIME_DIR: runtime }, async () => {
+      for (const path of paths) {
+        assert.equal(
+          await memoryRefusal(path, 'project_test', { bytes: 4000 * 1024 * 1024, source: 'project' }, room),
+          null,
+          `a later run of ${path} is not refused`,
+        );
+      }
+    });
+  });
+  for (const bytes of kept) {
+    assert.ok(bytes > 800 * 1024 * 1024 && bytes < 1.3 * MEMORY_GIB, `one engine's peak: ${kept.join(', ')}`);
+  }
+}
+
+/** A kept peak the helper's sum wrote is replaced by the next run's own, never kept from then on. */
+async function testAKeptPeakIsReplacedByTheNextWindowedRunsOwn(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const kept = await keptPeaksOfTwoWindowedRunsAtOnce(2 * MEMORY_GIB);
+  for (const bytes of kept) {
+    assert.ok(
+      bytes > 800 * 1024 * 1024 && bytes < 1.3 * MEMORY_GIB,
+      `the runs' own peaks: ${kept.join(', ')}`,
+    );
+  }
+}
+
 const EMPTY_THEME = '[gd_resource type="Theme" format=3]\n\n[resource]\n';
 
 /** Runs [run] against a headless server over a project holding an empty theme and a style box. */
@@ -136365,6 +136731,13 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorPastItsMemoryCeilingIsEndedForIt,
   testAnEngineUnderItsMemoryCeilingRunsToItsEnd,
   testAChildOfTheEngineCountsTowardsItsMemory,
+  testAWindowedRunPastItsCeilingEndsNoRunBeside,
+  testTwoWindowedRunsEndedForMemoryEachReportTheirOwnPeak,
+  testTheGuardOfAWindowedRunWatchesItsEngineNotTheHelper,
+  testTheGuardOfARunWithoutTheWindowsHelperWatchesTheEngineItself,
+  testAWindowedRunWhoseHelperDiedIsStillEndedForItsMemory,
+  testTwoWindowedRunsAtOnceEachKeepTheirOwnPeak,
+  testAKeptPeakIsReplacedByTheNextWindowedRunsOwn,
   testTheCeilingVariableSetsIt,
   testTheDefaultCeilingIsAQuarterOfTheMemoryAndAtLeastFourGiB,
   testAPeakIsKeptPerProjectAndToolAndCountedByTheNextStart,
