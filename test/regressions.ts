@@ -88210,8 +88210,8 @@ async function testATestEngineGetsTheFrameWaitItsSystemSleepsThrough(): Promise<
   }
 }
 
-/** A case waiting on a thread keeps its engine under a quarter of a core, where a spinning wait used most of one. */
-async function testACaseWaitingOnAThreadUsesUnderAQuarterOfACore(): Promise<void> {
+/** A case waiting on a thread keeps its engine under half a core, where a spinning wait used most of one. */
+async function testACaseWaitingOnAThreadUsesUnderHalfACore(): Promise<void> {
   const probe = await runSleepProbe(
     [
       '\tvar t: Thread = Thread.new()',
@@ -88234,8 +88234,10 @@ async function testACaseWaitingOnAThreadUsesUnderAQuarterOfACore(): Promise<void
     `the engine was read across the wait: ${JSON.stringify(probe.readings)}`,
   );
   const cores = (last.seconds - first.seconds) / (last.at - first.at);
+  // A spinning engine held 0.73 to 0.97 of a core, and a sleeping one 0.07 here and 0.25 on a
+  // shared CI runner, so half a core tells the two apart on either.
   assert.ok(
-    cores < 0.25,
+    cores < 0.5,
     `the engine used ${cores.toFixed(2)} of a core over the wait: ${JSON.stringify(probe.readings)}`,
   );
 }
@@ -133071,7 +133073,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunsLimitsEndAHungOrChattyEngine,
   testATestRunDealsByAndRecordsIntoTheTimesItIsGiven,
   testATestEngineGetsTheFrameWaitItsSystemSleepsThrough,
-  testACaseWaitingOnAThreadUsesUnderAQuarterOfACore,
+  testACaseWaitingOnAThreadUsesUnderHalfACore,
   testACaseAwaitingThreeHundredFramesEndsInSeconds,
   testASuiteNamingItsOwnFrameCapKeepsIt,
   testEachEnginesFolderNamesItsLaneAndPid,
