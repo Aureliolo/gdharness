@@ -919,7 +919,8 @@ A tool of a game's own that starts engines takes slots the same way, in the step
   slot names each holder by it, or by its pid when it is missing.
 - An optional `"memory"` says the bytes the engine on the slot may hold. gdharness writes the larger
   of 1.5 GiB and the peak kept for the engine's project and tool, at most that engine's ceiling.
-  The process holding the lock raises it, to the next 256 MiB, as its engine grows past it.
+  The process holding the lock raises it, to the next 256 MiB, as its engine grows past it. It holds
+  the take turn (step 5) from its read of the lock to its rewrite.
   A lock without it counts 1.5 GiB for each slot it stands for, which is one unless it holds a
   `"wants"` above 1, a whole number of slots held in one file.
 
@@ -1030,8 +1031,11 @@ its `kind` names.
   past the count, and one still empty, count nothing. Take the slot only if the sum stays inside
   the budget. Otherwise wait, keeping your place in line, and look again as a lock goes.
 - A take that finds no other lock live takes whatever its figure, so the machine's first engine
-  always starts. Count the locks again after taking, and give the slot back and wait when the
-  folder now holds more than the budget and yours is the newest lock.
+  always starts.
+- Hold the take turn from that count to your lock's write, and give it back at once after. The turn
+  is `<directory>/take.turn`, made as a mark is and holding what a lock does. One whose holder has
+  gone is taken over under `take.turn.steal` as in step 3. When another holds it, look again 5 ms
+  later. Never hold it across a wait. No count then runs beside another take's write or a raise.
 - The free memory a run reads before it starts an engine is a later, separate check on what the
   machine holds at that moment. No lock's figure enters it, and no engine is counted in both.
 

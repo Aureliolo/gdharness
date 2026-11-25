@@ -280,6 +280,7 @@ import {
   slotWaiters,
   slotWaitSaid,
   starvedSaid,
+  TAKE_TURN_FILE,
   UNWRITTEN_MS,
   WAITING_FOLDER,
 } from '../src/engine-slots.js';
@@ -77444,61 +77445,6 @@ async function testALockWithNoMemoryCountsOneAndAHalfGiBASlot(): Promise<void> {
   }
 }
 
-/**
- * Two takers that both counted room for one engine before either took it cannot both keep theirs:
- * the newest lock is given back and its take waits for memory.
- */
-async function testALockTakenBeyondTheBudgetByARaceIsGivenBack(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
-  try {
-    await withNoCeilingSet(async () => {
-      await recordEnginePeak(project, 'project_test', 7 * MEMORY_GIB);
-      const slots = new EngineSlots(
-        directory,
-        12,
-        { pid: process.pid, started },
-        undefined,
-        () => 'other',
-        project,
-        { memory: 64 * MEMORY_GIB },
-      );
-      for (const slot of [0, 1, 2, 3, 4]) {
-        standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
-      }
-      const read: unknown = Reflect.get(slots, 'liveMemory');
-      if (typeof read !== 'function') {
-        throw new TypeError('the count of the live locks is there to watch');
-      }
-      let looks = 0;
-      Reflect.set(slots, 'liveMemory', async (): Promise<unknown> => {
-        const live: unknown = await Reflect.apply(read, slots, []);
-        looks += 1;
-        if (looks === 1) {
-          // Another taker's lock lands, older than the one this take is about to make.
-          standInLock(directory, 5, started, { memory: 7 * MEMORY_GIB });
-          standInLock(directory, 6, started, { memory: 7 * MEMORY_GIB });
-          const past = new Date(Date.now() - 60_000);
-          utimesSync(join(directory, '5.lock'), past, past);
-          utimesSync(join(directory, '6.lock'), past, past);
-        }
-        return live;
-      });
-      assert.equal(await slots.takeFree(), null, 'the lock that passes 48 GiB is given back');
-      assert.equal(
-        readdirSync(directory).filter((name) => name.endsWith('.lock')).length,
-        7,
-        'and only the takers that came first keep theirs',
-      );
-      assert.equal(slots.drawn.short?.held, 49 * MEMORY_GIB, 'with what the others hold said');
-    });
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-    rmSync(project, { recursive: true, force: true });
-  }
-}
-
 /** Calls the private method [param name] of [param slots] with [param args]. */
 async function callPrivate(slots: EngineSlots, name: string, args: readonly unknown[]): Promise<unknown> {
   const method: unknown = Reflect.get(slots, name);
@@ -77544,12 +77490,6 @@ function meetingOf(count: number): () => Promise<void> {
   };
 }
 
-/** Whether the take that just made [param lock] gives it back for want of memory. */
-async function givenBackForMemory(slots: EngineSlots, lock: string): Promise<boolean> {
-  const given = await callPrivate(slots, 'overTheBudget', [lock, 3.5 * MEMORY_GIB, undefined]);
-  return given === true;
-}
-
 /** Takes of a windowed engine of 3.5 GiB on 3 slots of a 20 GiB machine, sharing one folder. */
 async function withWindowedTakers(
   body: (slotsOf: () => EngineSlots, directory: string) => Promise<void>,
@@ -77575,79 +77515,81 @@ async function withWindowedTakers(
   }
 }
 
+/** How long a test holds one take between its count and its write while another tries. */
+const TAKE_HELD_MS = 300;
+
+/** Waits for [param settled], or {@link TAKE_HELD_MS} where it stays pending. */
+async function heldUntil(settled: Promise<unknown>): Promise<void> {
+  await Promise.race([settled, delay(TAKE_HELD_MS)]);
+}
+
+/** A take of 3 slots on a 20 GiB machine, budget 4.5 GiB, for [param project] where one is given. */
+function takerOn(directory: string, started: number, project?: string): EngineSlots {
+  return new EngineSlots(directory, 3, { pid: process.pid, started }, undefined, () => 'other', project, {
+    memory: 20 * MEMORY_GIB,
+  });
+}
+
 /**
- * Two windowed takes that each counted room before either took: the first looks before the
- * second's lock is written, and keeps its slot. The file system dates the second's write to the
- * tick of the first's, and the second sorts in the lower slot, yet it gives its lock back.
+ * Two windowed takes at once. The second's lock stands empty, as an exclusive create leaves it, while
+ * the first may count, and is then dated to the first's tick in the lower slot. One keeps its slot.
  */
-async function testATakeWrittenAfterAnotherLookedGivesItsLockBack(): Promise<void> {
+async function testTwoWindowedTakesAtOnceNeverBothKeep(): Promise<void> {
   await withWindowedTakers(async (slotsOf, directory) => {
     const first = slotsOf();
     const second = slotsOf();
     assert.equal(first.memoryBudget, 4.5 * MEMORY_GIB, 'one window of 3.5 GiB fits, two do not');
     const placeholder = join(directory, '0.lock');
-    const made = Promise.withResolvers<undefined>();
-    const looked = Promise.withResolvers<string>();
-    let secondLock: unknown = null;
+    const holding = Promise.withResolvers<undefined>();
+    const firstDone = Promise.withResolvers<undefined>();
+    let firstLock: string | null = null;
     aroundPrivate(second, 'lockOneOf', async (call) => {
-      // The second take holds its first slot unwritten while the first take looks.
       writeFileSync(placeholder, '');
-      made.resolve(undefined);
-      const firstLock = await looked.promise;
+      holding.resolve(undefined);
+      await heldUntil(firstDone.promise);
       rmSync(placeholder);
-      secondLock = await call();
-      // The file system dates this write to the tick of the first take's.
-      const tick = statSync(firstLock).mtime;
-      if (typeof secondLock === 'string') {
-        utimesSync(secondLock, tick, tick);
+      const lock = await call();
+      if (typeof lock === 'string' && firstLock !== null) {
+        const tick = statSync(firstLock).mtime;
+        utimesSync(lock, tick, tick);
       }
-      return secondLock;
+      return lock;
     });
     const secondTake = second.takeFree(false, undefined, 'test_windowed_lane');
-    await made.promise;
-    const firstLock = await first.takeFree(false, undefined, 'test_windowed_lane');
-    assert.notEqual(firstLock, null, 'the take that looked first keeps its slot');
-    looked.resolve(firstLock ?? '');
-    assert.equal(await secondTake, null, 'the take written after the other looked gives its lock back');
-    const slotOf = (lock: unknown): number => Number(/(\d+)\.lock$/.exec(String(lock))?.[1]);
-    assert.ok(slotOf(secondLock) < slotOf(firstLock), 'the second take wrote the lower slot');
-    if (firstLock !== null) {
-      first.release(firstLock);
-    }
+    await holding.promise;
+    const firstTake = first.takeFree(false, undefined, 'test_windowed_lane').then((lock) => {
+      firstLock = lock;
+      firstDone.resolve(undefined);
+      return lock;
+    });
+    const locks = await Promise.all([firstTake, secondTake]);
+    assert.equal(locks.filter((lock) => lock !== null).length, 1, 'one take keeps its slot, the other waits');
+    assert.equal(slotLocksIn(directory).length, 1, 'and one lock is left');
+    first.releaseAll();
+    second.releaseAll();
   });
 }
 
-/** Takers that fit the budget together all keep their slots, though each looks with all written. */
+/** Takers that fit the budget together all keep their slots, though they ask at once. */
 async function testTakersThatFitTheBudgetTogetherAllKeepTheirSlots(): Promise<void> {
   const started = await ownStart();
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-fit-'));
   try {
     await withNoCeilingSet(async () => {
-      const takers = [0, 1, 2].map(
-        () =>
-          new EngineSlots(directory, 3, { pid: process.pid, started }, undefined, () => 'other', undefined, {
-            memory: 20 * MEMORY_GIB,
-            tool: 'test_lane',
-          }),
-      );
-      // Every take counts the folder before any writes, and judges once all have written.
-      const counted = meetingOf(takers.length);
-      const written = meetingOf(takers.length);
+      const takers = [0, 1, 2].map(() => takerOn(directory, started));
+      // Each take waits between its count and its write for the others to arrive there.
+      const arrived = meetingOf(takers.length);
       let givenBack = 0;
       for (const slots of takers) {
         aroundPrivate(slots, 'lockOneOf', async (call) => {
-          await counted();
-          const lock = await call();
-          await written();
-          return lock;
+          await heldUntil(arrived());
+          return await call();
         });
-        aroundPrivate(slots, 'overTheBudget', async (call) => {
-          const given = await call();
-          if (given === true) {
-            givenBack += 1;
-          }
-          return given;
-        });
+        const release = slots.release.bind(slots);
+        slots.release = (lock: string): void => {
+          givenBack += 1;
+          release(lock);
+        };
       }
       assert.equal(takers[0]?.memoryBudget, 4.5 * MEMORY_GIB, 'three engines of 1.5 GiB fit');
       const locks = await Promise.all(takers.map(async (slots) => await slots.takeFree()));
@@ -77657,51 +77599,9 @@ async function testTakersThatFitTheBudgetTogetherAllKeepTheirSlots(): Promise<vo
         [true, true, true],
         'every taker keeps its slot',
       );
-      for (const [at, lock] of locks.entries()) {
-        if (lock !== null) {
-          takers[at]?.release(lock);
-        }
+      for (const slots of takers) {
+        slots.releaseAll();
       }
-    });
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** A lock given back between the list of the folder and the read of its time counts nothing. */
-async function testALockGoneBeforeItsTimeIsReadIsLeftOut(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gone-'));
-  try {
-    await withNoCeilingSet(async () => {
-      const slots = new EngineSlots(
-        directory,
-        3,
-        { pid: process.pid, started },
-        undefined,
-        () => 'other',
-        undefined,
-        { memory: 20 * MEMORY_GIB, tool: 'test_lane' },
-      );
-      standInLock(directory, 0, started, { memory: 3.5 * MEMORY_GIB });
-      standInLock(directory, 1, started, { memory: 3.5 * MEMORY_GIB });
-      const older = new Date(Date.now() - 10_000);
-      const gone = join(directory, '0.lock');
-      const aside = join(directory, 'aside');
-      utimesSync(gone, older, older);
-      aroundPrivate(slots, 'heldLocks', async (call) => {
-        if (existsSync(aside)) {
-          renameSync(aside, gone);
-        }
-        const held = await call();
-        renameSync(gone, aside);
-        return held;
-      });
-      assert.equal(
-        await givenBackForMemory(slots, join(directory, '1.lock')),
-        false,
-        'the lock given back is not counted ahead of this one',
-      );
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -77709,70 +77609,322 @@ async function testALockGoneBeforeItsTimeIsReadIsLeftOut(): Promise<void> {
 }
 
 /**
- * Each lock keeps its slot where it fits beside the locks kept before it. In 6 GiB, A of 1.5 GiB,
- * B and C of 3.5 GiB and D of 1 GiB, written in that order: C gives back, and D fits once C has.
+ * A raise asked while a take is between its count and its write lands after the write, so the take
+ * kept its slot on what was live, and the raise answers what it wrote. A take that counts after the
+ * raise counts the raised figure.
  */
-async function testALockThatFitsOnceAnEarlierOneGivesBackKeepsItsSlot(): Promise<void> {
+async function testARaiseAskedDuringATakeLandsAfterItsWrite(): Promise<void> {
   const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-greedy-'));
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-raise-'));
   try {
     await withNoCeilingSet(async () => {
-      const slots = new EngineSlots(
-        directory,
-        4,
-        { pid: process.pid, started },
-        undefined,
-        () => 'other',
-        undefined,
-        { memory: 20 * MEMORY_GIB, tool: 'test_lane' },
-      );
-      assert.equal(slots.memoryBudget, 6 * MEMORY_GIB);
-      const now = Date.now();
-      for (const [slot, gib] of [1.5, 3.5, 3.5, 1].entries()) {
-        standInLock(directory, slot, started, { memory: gib * MEMORY_GIB });
-        const at = new Date(now - 4000 + slot * 1000);
-        utimesSync(join(directory, `${String(slot)}.lock`), at, at);
+      const slots = takerOn(directory, started);
+      standInLock(directory, 0, started, { memory: 1.5 * MEMORY_GIB });
+      standInLock(directory, 1, started, { memory: 1.5 * MEMORY_GIB });
+      const raised = join(directory, '1.lock');
+      const figure = (): number | undefined => holderOf(readFileSync(raised, 'utf8'))?.memory;
+      let raise: Promise<number | null> | undefined;
+      let atWrite: number | undefined;
+      aroundPrivate(slots, 'lockOneOf', async (call) => {
+        raise = raiseSlotMemory(raised, 3.5 * MEMORY_GIB);
+        await heldUntil(raise);
+        atWrite = figure();
+        return await call();
+      });
+      const lock = await slots.takeFree();
+      assert.notEqual(lock, null, 'the take counted 4.5 GiB with its own, which fits');
+      assert.equal(atWrite, 1.5 * MEMORY_GIB, 'the raise had not landed when the take wrote');
+      assert.equal(await raise, 3.5 * MEMORY_GIB, 'the raise then lands, and answers its figure');
+      assert.equal(figure(), 3.5 * MEMORY_GIB);
+      if (lock !== null) {
+        slots.release(lock);
       }
-      const gives: boolean[] = [];
-      for (const slot of [1, 2, 3]) {
-        gives.push(await givenBackForMemory(slots, join(directory, `${String(slot)}.lock`)));
-      }
-      assert.deepEqual(gives, [false, true, false], 'B and D keep their slots, C gives its back');
+      const after = takerOn(directory, started);
+      assert.equal(await after.takeFree(), null, 'a take after the raise counts 5 GiB live, and waits');
+      assert.equal(after.drawn.short?.held, 5 * MEMORY_GIB);
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 }
 
-/** A take that finds no other live lock looks once, with no wait for another. */
-async function testATakeWithNoOtherLiveLockLooksOnce(): Promise<void> {
+/**
+ * A windowed take that kept its slot has its engine named in its lock, which writes the lock again,
+ * while a second windowed take is under way. The two never both keep their slots in 4.5 GiB.
+ */
+async function testNamingAKeptWindowNeverLetsASecondOneKeep(): Promise<void> {
+  await withWindowedTakers(async (slotsOf, directory) => {
+    const started = await ownStart();
+    const first = slotsOf();
+    const second = slotsOf();
+    const holding = Promise.withResolvers<undefined>();
+    const firstDone = Promise.withResolvers<undefined>();
+    let firstLock: string | null = null;
+    let secondWrote = false;
+    let named = false;
+    aroundPrivate(second, 'lockOneOf', async (call) => {
+      holding.resolve(undefined);
+      await heldUntil(firstDone.promise);
+      const lock = await call();
+      secondWrote = lock !== null;
+      return lock;
+    });
+    aroundPrivate(second, 'liveMemory', async (call) => {
+      if (secondWrote && firstLock !== null && !named) {
+        named = await nameSlotEngine(firstLock, process.pid, { pid: process.pid, started });
+      }
+      return await call();
+    });
+    const secondTake = second.takeFree(false, undefined, 'test_windowed_lane');
+    await holding.promise;
+    const firstTake = first.takeFree(false, undefined, 'test_windowed_lane').then((lock) => {
+      firstLock = lock;
+      firstDone.resolve(undefined);
+      return lock;
+    });
+    const locks = await Promise.all([firstTake, secondTake]);
+    assert.equal(locks.filter((lock) => lock !== null).length, 1, 'one window keeps its slot');
+    assert.equal(slotLocksIn(directory).length, 1, 'and one lock is left');
+    first.releaseAll();
+    second.releaseAll();
+  });
+}
+
+/**
+ * Three takes of 2, 3 and 2.5 GiB in 4.5 GiB ask at once, and the first of them ends between the
+ * verdicts of the other two. The two left never hold 5.5 GiB together.
+ */
+async function testALockThatEndsBetweenTwoTakesNeverLetsBothKeep(): Promise<void> {
   const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-alone-'));
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ends-'));
+  const figures = [2, 3, 2.5];
+  const projects = figures.map(() => mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ends-project-')));
   try {
     await withNoCeilingSet(async () => {
-      const slots = new EngineSlots(
-        directory,
-        3,
-        { pid: process.pid, started },
-        undefined,
-        () => 'other',
-        undefined,
-        { memory: 20 * MEMORY_GIB, tool: 'test_lane' },
-      );
-      standInLock(directory, 0, started, { memory: 3.5 * MEMORY_GIB });
-      const older = new Date(Date.now() - 5000);
-      utimesSync(join(directory, '0.lock'), older, older);
-      let looks = 0;
-      aroundPrivate(slots, 'liveMemory', async (call) => {
-        looks += 1;
+      for (const [at, gib] of figures.entries()) {
+        await recordEnginePeak(projects[at] ?? '', 'project_test', gib * MEMORY_GIB);
+      }
+      const takers = projects.map((project) => takerOn(directory, started, project));
+      const [ending, slower, later] = takers;
+      if (ending === undefined || slower === undefined || later === undefined) {
+        throw new TypeError('three takers are made');
+      }
+      assert.equal(ending.memoryBudget, 4.5 * MEMORY_GIB);
+      const arrived = meetingOf(takers.length);
+      const written = takers.map(() => Promise.withResolvers<undefined>());
+      const ended = Promise.withResolvers<undefined>();
+      let slowerWrote = false;
+      for (const [at, slots] of takers.entries()) {
+        aroundPrivate(slots, 'lockOneOf', async (call) => {
+          // Every take counts before any writes, and they write in turn.
+          await heldUntil(arrived());
+          await heldUntil(written[at - 1]?.promise ?? Promise.resolve());
+          const lock = await call();
+          slowerWrote ||= slots === slower && lock !== null;
+          written[at]?.resolve(undefined);
+          return lock;
+        });
+      }
+      aroundPrivate(slower, 'liveMemory', async (call) => {
+        if (slowerWrote) {
+          // This take's look after its write comes once the last has decided and the first has ended.
+          await Promise.race([ended.promise, delay(5000)]);
+        }
         return await call();
       });
-      assert.equal(await givenBackForMemory(slots, join(directory, '0.lock')), false);
-      assert.equal(looks, 1, 'the folder is counted once');
+      const [endingTake, slowerTake, laterTake] = takers.map(async (slots, at) => {
+        const lock = await slots.takeFree();
+        written[at]?.resolve(undefined);
+        return lock;
+      });
+      if (endingTake === undefined || slowerTake === undefined || laterTake === undefined) {
+        throw new TypeError('three takes are made');
+      }
+      const [endingLock, laterLock] = await Promise.all([endingTake, laterTake]);
+      if (endingLock !== null) {
+        ending.release(endingLock);
+      }
+      ended.resolve(undefined);
+      const slowerLock = await slowerTake;
+      const held = [
+        [slowerLock, 3],
+        [laterLock, 2.5],
+      ] as const;
+      const together = held
+        .filter(([lock]) => typeof lock === 'string' && existsSync(lock))
+        .reduce((sum, [, gib]) => sum + gib, 0);
+      assert.ok(together <= 4.5, `the takes left hold ${String(together)} GiB in 4.5`);
+      for (const slots of takers) {
+        slots.releaseAll();
+      }
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+    for (const project of projects) {
+      rmSync(project, { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * The take turn of a holder that has gone is taken over, and a live holder's never. Two takers
+ * taking one gone holder's turn over at once leave one holder.
+ */
+async function testATakeTurnOfAGoneHolderIsTakenOverAndALiveOnesNever(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-turn-'));
+  try {
+    const turn = join(directory, TAKE_TURN_FILE);
+    const own = JSON.stringify({ pid: process.pid, started });
+    // A later process given this pid: its start is a minute away from the one the file names.
+    const gone = JSON.stringify({ pid: process.pid, started: started - 60_000 });
+    writeFileSync(turn, own);
+    const one = takerOn(directory, started);
+    assert.equal(await callPrivate(one, 'turnTaken', []), false, 'a live holder keeps the turn');
+    assert.equal(readFileSync(turn, 'utf8'), own, 'and its file is left as it was');
+    writeFileSync(turn, gone);
+    assert.equal(await callPrivate(one, 'turnTaken', []), true, "a gone holder's turn is taken over");
+    assert.equal(readFileSync(turn, 'utf8'), own, 'and names this process');
+    writeFileSync(turn, gone);
+    const both = await Promise.all(
+      [takerOn(directory, started), takerOn(directory, started)].map(
+        async (slots) => await callPrivate(slots, 'turnTaken', []),
+      ),
+    );
+    assert.equal(
+      both.filter((taken) => taken === true).length,
+      1,
+      'two taking one gone turn over at once leave one holder',
+    );
+    assert.equal(existsSync(`${turn}.steal`), false, 'and no steal file');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A taker killed while it holds the take turn holds the next take no longer than its check. */
+async function testATakerKilledHoldingTheTurnHoldsTheNextTakeNoLongerThanItsCheck(): Promise<void> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-killed-'));
+  try {
+    await withNoCeilingSet(async () => {
+      const script = join(directory, 'hold.mjs');
+      writeFileSync(script, 'setInterval(() => undefined, 1000);\n');
+      const child = spawnHidden(process.execPath, [script], { stdio: 'ignore' });
+      const pid = child.pid ?? 0;
+      const childStarted = (await startTimesOf([pid])).get(pid);
+      const turn = join(directory, TAKE_TURN_FILE);
+      writeFileSync(turn, JSON.stringify({ pid, started: childStarted }));
+      const exited = new Promise<void>((done) => {
+        child.once('exit', () => {
+          done();
+        });
+      });
+      child.kill();
+      await exited;
+      const slots = takerOn(directory, started);
+      const checkBegan = performance.now();
+      assert.equal(await callPrivate(slots, 'free', [turn]), true, "the killed taker's turn is free");
+      const checkMs = performance.now() - checkBegan;
+      const timed = async (): Promise<number> => {
+        const began = performance.now();
+        const lock = await slots.takeFree();
+        const ms = performance.now() - began;
+        assert.notEqual(lock, null, 'the take keeps its slot');
+        slots.releaseAll();
+        return ms;
+      };
+      const afterKill = await timed();
+      assert.equal(existsSync(turn), false, 'and gives the turn back');
+      const alone = await timed();
+      assert.ok(
+        afterKill <= alone + checkMs + 1000,
+        `a take after the kill took ${afterKill.toFixed(1)} ms, one alone ${alone.toFixed(1)} ms, the check ${checkMs.toFixed(1)} ms`,
+      );
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+}
+
+/** How many takes each timing of the take turn makes. */
+const TURN_TIMED_TAKES = 20;
+
+/** The middle of [param values], or the mean of the middle two. */
+function medianOf(values: readonly number[]): number {
+  const sorted = values.toSorted((a, b) => a - b);
+  const half = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? (sorted[half] ?? 0) : ((sorted[half - 1] ?? 0) + (sorted[half] ?? 0)) / 2;
+}
+
+/**
+ * What the take turn adds to each of [constant TURN_TIMED_TAKES] takes beside [param beside] live
+ * locks, in milliseconds: the time the turn's work runs in it left out.
+ */
+async function turnCosts(beside: number): Promise<number[]> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-turn-time-'));
+  try {
+    const slots = new EngineSlots(
+      directory,
+      5,
+      { pid: process.pid, started },
+      undefined,
+      () => 'other',
+      undefined,
+      {
+        memory: 20 * MEMORY_GIB,
+      },
+    );
+    const inTurn: unknown = Reflect.get(slots, 'inTakeTurn');
+    if (typeof inTurn !== 'function') {
+      throw new TypeError('the take turn is there to time');
+    }
+    const costs: number[] = [];
+    Reflect.set(
+      slots,
+      'inTakeTurn',
+      async (work: () => Promise<unknown>, missed: unknown): Promise<unknown> => {
+        let worked = 0;
+        const began = performance.now();
+        const answer: unknown = await Reflect.apply(inTurn, slots, [
+          async (): Promise<unknown> => {
+            const workBegan = performance.now();
+            const done = await work();
+            worked = performance.now() - workBegan;
+            return done;
+          },
+          missed,
+        ]);
+        costs.push(performance.now() - began - worked);
+        return answer;
+      },
+    );
+    for (let slot = 0; slot < beside; slot += 1) {
+      standInLock(directory, slot, started, { memory: 1.5 * MEMORY_GIB });
+    }
+    for (let take = 0; take < TURN_TIMED_TAKES; take += 1) {
+      assert.notEqual(await slots.takeFree(), null, 'the take keeps its slot');
+      slots.releaseAll();
+    }
+    return costs;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** The take turn adds under 10 ms to the median take, alone and beside 3 live locks. */
+async function testTheTakeTurnAddsUnderTenMillisecondsToATake(): Promise<void> {
+  await withNoCeilingSet(async () => {
+    for (const beside of [0, 3]) {
+      const costs = await turnCosts(beside);
+      assert.equal(costs.length, TURN_TIMED_TAKES, 'every take holds the turn');
+      assert.ok(
+        medianOf(costs) <= 10,
+        `beside ${String(beside)} live locks the turn added ${medianOf(costs).toFixed(1)} ms to the median take`,
+      );
+    }
+  });
 }
 
 interface TakerWindow {
@@ -77878,104 +78030,6 @@ async function testThreeProcessesTakingAWindowedSlotAtOnceNeverRunTwoPastTheBudg
     ),
   );
   assert.deepEqual(together, [], 'no two windows of 3.5 GiB ran at one time in 4.5 GiB');
-}
-
-/** Two stand-in locks held by two live processes, written at the same moment. */
-async function lockedByTwoHolders(
-  directory: string,
-  body: (slots: EngineSlots, low: number, high: number) => Promise<void>,
-): Promise<void> {
-  const script = join(directory, 'hold.mjs');
-  writeFileSync(script, 'setInterval(() => undefined, 1000);\n');
-  const child = spawnHidden(process.execPath, [script], { stdio: 'ignore' });
-  try {
-    const pid = child.pid ?? 0;
-    const starts = await startTimesOf([pid, process.pid]);
-    const low = Math.min(pid, process.pid);
-    const high = Math.max(pid, process.pid);
-    const slots = new EngineSlots(
-      directory,
-      3,
-      { pid: process.pid, started: starts.get(process.pid) ?? 0 },
-      undefined,
-      () => 'other',
-      undefined,
-      { memory: 20 * MEMORY_GIB, tool: 'test_lane' },
-    );
-    const lockOf = (slot: number, holder: number): void => {
-      writeFileSync(
-        join(directory, `${String(slot)}.lock`),
-        JSON.stringify({ pid: holder, started: starts.get(holder), memory: 3.5 * MEMORY_GIB }),
-      );
-    };
-    // The lower pid holds the higher slot, so an order by slot alone would name the other holder.
-    lockOf(0, high);
-    lockOf(1, low);
-    const same = new Date(Date.now() - 5000);
-    utimesSync(join(directory, '0.lock'), same, same);
-    utimesSync(join(directory, '1.lock'), same, same);
-    await body(slots, low, high);
-  } finally {
-    child.kill();
-  }
-}
-
-/** Two locks written at the same moment: exactly one taker gives its lock back, the later holder. */
-async function testTwoLocksWrittenAtTheSameMomentGiveBackExactlyOne(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-tied-'));
-  try {
-    await withNoCeilingSet(async () => {
-      await lockedByTwoHolders(directory, async (slots) => {
-        assert.equal(slots.memoryBudget, 4.5 * MEMORY_GIB);
-        const gives = await Promise.all(
-          ['0.lock', '1.lock'].map(async (lock) => await givenBackForMemory(slots, join(directory, lock))),
-        );
-        assert.deepEqual(
-          gives,
-          [true, false],
-          'the lock of the higher pid, in slot 0, is the one given back',
-        );
-      });
-    });
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A lock written after a take's first look, and dated before its own, is counted by the second
- * look, which the take takes because another lock is live.
- */
-async function testALockWrittenAfterTheFirstLookIsCounted(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-settled-'));
-  try {
-    await withNoCeilingSet(async () => {
-      await lockedByTwoHolders(directory, async (slots) => {
-        standInLock(directory, 2, started, { memory: MEMORY_GIB });
-        const oldest = new Date(Date.now() - 10_000);
-        utimesSync(join(directory, '2.lock'), oldest, oldest);
-        const other = join(directory, '1.lock');
-        const lockText = readFileSync(other, 'utf8');
-        const when = statSync(other).mtime;
-        rmSync(other);
-        let looks = 0;
-        aroundPrivate(slots, 'liveMemory', async (call) => {
-          looks += 1;
-          if (looks === 2) {
-            writeFileSync(other, lockText);
-            utimesSync(other, when, when);
-          }
-          return await call();
-        });
-        const given = await givenBackForMemory(slots, join(directory, '0.lock'));
-        assert.equal(given, true, 'the second look finds the lock written since the first');
-        assert.equal(looks, 2, 'a look is taken again, once');
-      });
-    });
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
 }
 
 /** The first engine on a machine with no live lock takes, however much it needs. */
@@ -136331,14 +136385,14 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASideTakeReadsTheFreeSlotsOnce,
   testEnginesTogetherStayInsideTheMachinesMemory,
   testALockWithNoMemoryCountsOneAndAHalfGiBASlot,
-  testALockTakenBeyondTheBudgetByARaceIsGivenBack,
-  testATakeWrittenAfterAnotherLookedGivesItsLockBack,
-  testTwoLocksWrittenAtTheSameMomentGiveBackExactlyOne,
-  testALockWrittenAfterTheFirstLookIsCounted,
+  testTwoWindowedTakesAtOnceNeverBothKeep,
   testTakersThatFitTheBudgetTogetherAllKeepTheirSlots,
-  testALockGoneBeforeItsTimeIsReadIsLeftOut,
-  testALockThatFitsOnceAnEarlierOneGivesBackKeepsItsSlot,
-  testATakeWithNoOtherLiveLockLooksOnce,
+  testARaiseAskedDuringATakeLandsAfterItsWrite,
+  testNamingAKeptWindowNeverLetsASecondOneKeep,
+  testALockThatEndsBetweenTwoTakesNeverLetsBothKeep,
+  testATakeTurnOfAGoneHolderIsTakenOverAndALiveOnesNever,
+  testATakerKilledHoldingTheTurnHoldsTheNextTakeNoLongerThanItsCheck,
+  testTheTakeTurnAddsUnderTenMillisecondsToATake,
   testThreeProcessesTakingAWindowedSlotAtOnceNeverRunTwoPastTheBudget,
   testTheFirstEngineOnAMachineTakesWhateverItNeeds,
   testALocksMemoryIsThePeakKeptCappedAtTheCeiling,

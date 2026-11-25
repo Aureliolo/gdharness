@@ -16,6 +16,12 @@
  * holding it. A lock numbered at or past the count, which only a taker given more slots makes, is
  * removed the same way by every take once its holder has gone.
  *
+ * A take holds `<directory>/take.turn` from its count of the live locks' memory to its own lock's
+ * write, and a raise of a lock's memory from its read of the lock to its rewrite. The file is made as a
+ * mark is, holds its holder as a lock does, and is taken over under its steal file once its holder has
+ * gone. No count then runs beside another take's write or a raise, so takers that pass the budget
+ * together never all keep their slots.
+ *
  * An engine started on a slot has the slot's lock in {@link HELD_VARIABLE}, so the programs it
  * starts run on its slot.
  *
@@ -213,14 +219,16 @@ export const START_TOLERANCE_MS = 2000;
 /** How long a lock may stay empty before its taker is taken to have died writing it. */
 export const UNWRITTEN_MS = 10_000;
 
-/** How long a take that finds other live locks waits for their stamps to land before it counts them again. */
-const LOCK_SETTLE_MS = 50;
+/** The file of a slots folder that a take or a raise holds while it counts and writes. */
+export const TAKE_TURN_FILE = 'take.turn';
+/** How often a take or a raise looks again at a take turn another holds. */
+const TAKE_TURN_LOOK_MS = 5;
+/** How long a take or a raise waits for the take turn before it gives up this look. */
+const TAKE_TURN_WAIT_MS = UNWRITTEN_MS;
 
-/** A live lock's slot, when it was written, its holder's pid and the memory it holds. */
+/** A live lock's slot and the memory it holds. */
 interface LiveMemory {
   readonly slot: number;
-  readonly at: number;
-  readonly pid: number;
   readonly bytes: number;
 }
 /**
@@ -1182,7 +1190,10 @@ export class FolderChanges {
   constructor(directory: string) {
     let watcher: FSWatcher | null = null;
     try {
-      watcher = watch(directory, () => {
+      watcher = watch(directory, (_event, name) => {
+        if (typeof name === 'string' && takeTurnChange(name)) {
+          return;
+        }
         this.changed = true;
         this.wake?.();
       });
@@ -1222,6 +1233,19 @@ export class FolderChanges {
   close(): void {
     this.watcher?.close();
   }
+}
+
+/**
+ * Whether a change to [param name] in a slots folder leaves every slot as it was: the take turn, its
+ * steal file, or a file staged for either. Every look holds the turn, so a wait woken by it would
+ * look again at once, and wake every other wait in turn.
+ */
+function takeTurnChange(name: string): boolean {
+  return (
+    name === TAKE_TURN_FILE ||
+    name === `${TAKE_TURN_FILE}.steal` ||
+    (name.startsWith(`.${TAKE_TURN_FILE}.`) && stagedWriterOf(name) !== undefined)
+  );
 }
 
 /**
@@ -1665,9 +1689,7 @@ export class EngineSlots {
 
   /** What the slot at [param lock] counts, or null where this process does not hold it. */
   private async figureHeld(lock: string): Promise<number | null> {
-    const content = await readWholeAsync(lock);
-    const holder = content === null ? null : holderOf(content);
-    return holder?.pid === process.pid ? (holder.memory ?? ENGINE_MEMORY_BYTES * (holder.wants ?? 1)) : null;
+    return await figureHeldBy(lock, process.pid);
   }
 
   /**
@@ -1960,44 +1982,55 @@ export class EngineSlots {
       taker === 'timing'
         ? { tried: this.drawn.numbers, memory: 0 }
         : await this.leftAfterThoseAhead(line ?? this.lineFor(taker, game), queued);
-    const need = line?.need ?? this.memoryNeeded(game, this.project, tool);
-    if (await this.shortOfMemory(ahead.tried, need, ahead.memory, line)) {
+    if (ahead.tried.length === 0) {
       return null;
     }
-    const lock = await this.lockOneOf(ahead.tried, game, need);
-    if (lock !== null) {
-      this.stamp(lock);
-    }
+    const need = line?.need ?? this.memoryNeeded(game, this.project, tool);
+    const lock = await this.inTakeTurn(
+      async () =>
+        (await this.shortOfMemory(ahead.tried, need, ahead.memory, line))
+          ? null
+          : await this.lockOneOf(ahead.tried, game, need),
+      null,
+    );
     if (lock !== null && typeof look?.queue === 'number' && (await this.overTheShare(lock))) {
       this.release(lock);
       this.drawn = slotsDrawnOn(this.count, taker, 'queued');
-      return null;
-    }
-    if (lock !== null && (await this.overTheBudget(lock, need, line))) {
-      this.release(lock);
       return null;
     }
     return lock;
   }
 
   /**
-   * What the held slots' locks hold, and when each was written: the slots {@link heldLocks} reads. A
-   * lock without a figure of its own counts the flat figure for each slot it stands for. One that
-   * names no holder yet counts nothing, as a lock past the count does, since neither takes a slot.
-   * One gone before its time is read was given back, and counts nothing either.
+   * Runs [param work] holding this folder's take turn, and answers what it does, or [param missed]
+   * where another holds the turn for {@link TAKE_TURN_WAIT_MS}.
+   */
+  private async inTakeTurn<T>(work: () => Promise<T>, missed: T): Promise<T> {
+    return await inTakeTurn(
+      this.directory,
+      this.holder,
+      () => this.turnTaken(),
+      work,
+      () => missed,
+    );
+  }
+
+  /** Makes this folder's take turn for this process, or takes it over from a holder that has gone. */
+  private async turnTaken(): Promise<boolean> {
+    return await takeTurnTaken(this.directory, this.holder, (path) => this.free(path));
+  }
+
+  /**
+   * What the held slots' locks hold: the slots {@link heldLocks} reads. A lock without a figure of its
+   * own counts the flat figure for each slot it stands for. One that names no holder yet counts
+   * nothing, as a lock past the count does, since neither takes a slot.
    */
   private async liveMemory(): Promise<LiveMemory[]> {
     const live: LiveMemory[] = [];
-    for (const { slot, lock, content } of await this.heldLocks()) {
+    for (const { slot, content } of await this.heldLocks()) {
       const holder = content === null ? null : holderOf(content);
-      const at = this.writtenAt(lock);
-      if (holder !== null && at !== undefined) {
-        live.push({
-          slot,
-          at,
-          pid: holder.pid,
-          bytes: holder.memory ?? ENGINE_MEMORY_BYTES * (holder.wants ?? 1),
-        });
+      if (holder !== null) {
+        live.push({ slot, bytes: holder.memory ?? ENGINE_MEMORY_BYTES * (holder.wants ?? 1) });
       }
     }
     return live;
@@ -2065,67 +2098,6 @@ export class EngineSlots {
         JSON.stringify(line.marked(this.holder)),
       );
     }
-  }
-
-  /**
-   * Stamps the lock just written at [param lock] with the clock as read after the write. A taker
-   * that missed this lock looked before it was written, and so before this stamp: it sorts after
-   * every lock whose taker missed it, whatever tick the file system gave the write.
-   */
-  private stamp(lock: string): void {
-    const now = new Date();
-    try {
-      utimesSync(lock, now, now);
-    } catch {
-      // Gone or held shut: its write time stands, and the look orders it by that.
-    }
-  }
-
-  /**
-   * Whether the lock just taken at [param lock] is one too many. The live locks are ordered by their
-   * stamps ({@link stamp}), then by holder and slot, and each in turn keeps its slot where it fits
-   * the budget beside those kept before it, the first always. Every taker orders the same locks
-   * the same way and reaches the same verdict. The look waits for the clock to pass this lock's
-   * stamp, so every lock it misses sorts after this one. A look that finds other live locks is
-   * taken again once their stamps have landed, and that second look decides.
-   */
-  private async overTheBudget(lock: string, need: number, line: SlotLine | undefined): Promise<boolean> {
-    const slot = Number(/(\d+)\.lock$/.exec(lock)?.[1]);
-    const stamped = this.writtenAt(lock) ?? 0;
-    // A clock set back since the stamp is not waited out.
-    const until = Date.now() + LOCK_SETTLE_MS;
-    while (Date.now() <= stamped && Date.now() < until) {
-      await delay(1);
-    }
-    if (!(await this.liveMemory()).some((one) => one.slot !== slot)) {
-      return false;
-    }
-    await delay(LOCK_SETTLE_MS);
-    const live = (await this.liveMemory()).toSorted(
-      (a, b) => a.at - b.at || a.pid - b.pid || a.slot - b.slot,
-    );
-    let kept = 0;
-    let first = true;
-    for (const one of live) {
-      const fits = first || kept + one.bytes <= this.memoryBudget;
-      if (one.slot === slot) {
-        if (fits) {
-          return false;
-        }
-        const held = live.reduce((sum, other) => sum + other.bytes, 0);
-        this.drawn = {
-          ...this.drawn,
-          short: { budget: this.memoryBudget, held: held - need, ahead: 0, need },
-        };
-        await this.waitsForMemory(line);
-        return true;
-      }
-      if (fits) {
-        kept += one.bytes;
-        first = false;
-      }
-    }
-    return false;
   }
 
   /**
@@ -2890,35 +2862,89 @@ export class EngineSlots {
   }
 
   private async free(lock: string): Promise<boolean> {
-    let content: string;
-    let writtenAt: number;
-    try {
-      content = readFileSync(lock, 'utf8');
-      writtenAt = statSync(lock).mtimeMs;
-    } catch {
-      // Gone since it was found there, which the next look takes.
-      return false;
-    }
-    return await this.freeAsRead(content, writtenAt);
+    return await fileFreeIn(this.starts, lock);
   }
 
   /** Whether a lock that read as [param content] and was last written at [param writtenAt] is free. */
   private async freeAsRead(content: string, writtenAt: number): Promise<boolean> {
-    const pid = holderOf(content)?.pid;
-    if (pid !== undefined && alive(pid)) {
-      await this.readStart(pid);
-    }
-    return lockIsFree(content, writtenAt, Date.now(), alive, (asked) => this.starts.get(asked)?.started);
+    return await freeAsReadIn(this.starts, content, writtenAt);
   }
+}
 
-  /** Reads when [param pid] started unless that was read lately: on Windows each read is a query. */
-  private async readStart(pid: number): Promise<void> {
-    const known = this.starts.get(pid);
-    if (known !== undefined && Date.now() - known.readAt < START_READ_MS) {
-      return;
+/** The start times read for holders, by pid, each with when it was read. */
+type StartsRead = Map<number, { started: number | undefined; readAt: number }>;
+
+/** Whether the lock or mark at [param path] is free, reading its holder's start into [param starts]. */
+async function fileFreeIn(starts: StartsRead, path: string): Promise<boolean> {
+  let content: string;
+  let writtenAt: number;
+  try {
+    content = readFileSync(path, 'utf8');
+    writtenAt = statSync(path).mtimeMs;
+  } catch {
+    // Gone since it was found there, which the next look takes.
+    return false;
+  }
+  return await freeAsReadIn(starts, content, writtenAt);
+}
+
+/** Whether a file that read as [param content] and was last written at [param writtenAt] is free. */
+async function freeAsReadIn(starts: StartsRead, content: string, writtenAt: number): Promise<boolean> {
+  const pid = holderOf(content)?.pid;
+  if (pid !== undefined && alive(pid)) {
+    await readStartInto(starts, pid);
+  }
+  return lockIsFree(content, writtenAt, Date.now(), alive, (asked) => starts.get(asked)?.started);
+}
+
+/** Reads when [param pid] started unless that was read lately: on Windows each read is a query. */
+async function readStartInto(starts: StartsRead, pid: number): Promise<void> {
+  const known = starts.get(pid);
+  if (known !== undefined && Date.now() - known.readAt < START_READ_MS) {
+    return;
+  }
+  const started = (await startTimesOf([pid])).get(pid);
+  starts.set(pid, { started, readAt: Date.now() });
+}
+
+/**
+ * Makes the take turn of the slots in [param directory] for [param holder], or takes it over under
+ * its steal file once [param gone] says its holder has gone. Answers whether it did.
+ */
+async function takeTurnTaken(
+  directory: string,
+  holder: Pick<SlotHolder, 'pid' | 'started'>,
+  gone: (path: string) => Promise<boolean>,
+): Promise<boolean> {
+  const turn = join(directory, TAKE_TURN_FILE);
+  const text = JSON.stringify({ pid: holder.pid, started: holder.started });
+  const make = (path: string): boolean => makeWhole(path, text);
+  return make(turn) || (await takenOverUnderSteal(turn, async () => await gone(turn), make));
+}
+
+/**
+ * Runs [param work] once [param taken] has made the take turn of [param directory] for
+ * [param holder], and gives the turn back after. Answers what [param work] does, or what
+ * [param missed] gives where the turn stays held for {@link TAKE_TURN_WAIT_MS}.
+ */
+async function inTakeTurn<T>(
+  directory: string,
+  holder: Pick<SlotHolder, 'pid'>,
+  taken: () => Promise<boolean>,
+  work: () => Promise<T>,
+  missed: () => T,
+): Promise<T> {
+  const until = Date.now() + TAKE_TURN_WAIT_MS;
+  while (!(await taken())) {
+    if (Date.now() >= until) {
+      return missed();
     }
-    const started = (await startTimesOf([pid])).get(pid);
-    this.starts.set(pid, { started, readAt: Date.now() });
+    await delay(TAKE_TURN_LOOK_MS);
+  }
+  try {
+    return await work();
+  } finally {
+    giveBackSlot(join(directory, TAKE_TURN_FILE), holder.pid);
   }
 }
 
@@ -3005,10 +3031,42 @@ function handedText(content: string | null, from: number, to: SlotHolder): strin
  * Answers what the lock counts after: [param bytes] once it is rewritten, and the figure it held
  * where that was as much already or the rewrite failed, as it does while a reader holds the lock
  * open. 0 where the lock could not be read, and null for a lock this process does not hold. An
- * answer below [param bytes] is a raise to ask again.
+ * answer below [param bytes] is a raise to ask again. The rewrite holds the folder's take turn, so no
+ * take counts the slots beside it, and a turn held elsewhere for {@link TAKE_TURN_WAIT_MS} leaves
+ * the figure as it was.
  */
 export async function raiseSlotMemory(lock: string, bytes: number): Promise<number | null> {
-  return await slotMemoryWritten(lock, bytes, false);
+  const held = await figureHeldBy(lock, process.pid);
+  if (held === null || held >= bytes) {
+    return held;
+  }
+  ownStarted ??= ownStart();
+  const holder = { pid: process.pid, started: await ownStarted };
+  const directory = dirname(lock);
+  return await inTakeTurn(
+    directory,
+    holder,
+    () => takeTurnTaken(directory, holder, (path) => fileFreeIn(raiseStarts, path)),
+    () => slotMemoryWritten(lock, bytes, false),
+    () => held,
+  );
+}
+
+/** When this process started, read once for the take turns its raises hold. */
+let ownStarted: Promise<number> | undefined;
+/** The start times a raise has read for the holders of the take turns it waited on. */
+const raiseStarts: StartsRead = new Map();
+
+/** What the slot at [param lock] counts, or null where [param pid] does not hold it or it cannot be read. */
+async function figureHeldBy(lock: string, pid: number): Promise<number | null> {
+  let content: string | null;
+  try {
+    content = await readWholeAsync(lock);
+  } catch {
+    return null;
+  }
+  const holder = content === null ? null : holderOf(content);
+  return holder?.pid === pid ? (holder.memory ?? ENGINE_MEMORY_BYTES * (holder.wants ?? 1)) : null;
 }
 
 /**
