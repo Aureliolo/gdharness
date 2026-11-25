@@ -54631,22 +54631,37 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
  * and a runtime that announced inside that second was found only when the editor let go. The
  * question is asked beside the looks, and the last answer is what each look reads.
  *
- * The editor here answers `playing_status` after 700 ms and the game announces 300 ms after the
- * play. The start has to find it well before the editor's first answer arrives. Run here, it is
- * found 311 to 313 ms after the play.
+ * Before the play the editor here answers `playing_status` after 700 ms. After it, the editor
+ * holds the question until the start has returned, with a cap of three seconds, and the game
+ * announces 100 ms after the play. The start has to find it with that question still open, which
+ * is before the start gives up on the answer after a second.
+ *
+ * The editor's answer is an event and not a clock reading, because the announcement and the
+ * answer are both written by timers of this process. A stall of this process on a loaded runner
+ * delays both together, so the answer then came right behind the announcement and a wait that was
+ * never held read as one the editor held.
  */
 async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
-  const answersAfterMs = 700;
-  const announcesAfterMs = 300;
+  const answersBeforeThePlayAfterMs = 700;
+  const announcesAfterMs = 100;
+  const holdsAfterThePlayForMs = 3_000;
   // Measured from the play rather than from the call: the start asks the editor what it is playing
   // before it plays anything, and that question is held for the same 700 ms.
   let playedAt = 0;
+  let startReturned = false;
+  let answeredAfterThePlay = false;
+  let release: () => void = () => undefined;
+  const released = new Promise<void>((settle) => {
+    release = settle;
+  });
+  let cap: ReturnType<typeof setTimeout> | undefined;
   const game = aPlayedStandIn();
   await withAPlayingEditor(
     ({ adapter, project, runtimeDir }) =>
       async (tool) => {
         if (tool === 'play_scene') {
           playedAt = Date.now();
+          cap = setTimeout(release, holdsAfterThePlayForMs);
           // The announcement lands a moment after the play, from a process that is alive: a dead
           // one is swept by the reader and the start would have nothing to find.
           setTimeout(() => {
@@ -54668,14 +54683,21 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
           return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
         }
         if (tool === 'playing_status') {
-          await delay(answersAfterMs);
+          if (playedAt === 0) {
+            await delay(answersBeforeThePlayAfterMs);
+          } else {
+            await released;
+            answeredAfterThePlay = !startReturned;
+          }
           return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
         }
         return { ok: true };
       },
     async ({ start, server }) => {
       const found = await start(10_000);
+      startReturned = true;
       const sincePlayMs = Date.now() - playedAt;
+      release();
       // Printed on every run, with the server's own account of the wait, so a slow one on a loaded
       // runner can be read against the passing ones and against where the time went.
       const account = server.stderr
@@ -54695,21 +54717,24 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
         `the announcement should have been found: ${JSON.stringify(found.answer)}`,
       );
       assert.equal(get(found.answer, 'runtime', 'pid'), game.pid, JSON.stringify(found.answer));
-      // The wait by the server's own clock rather than from the play: the start writes its notes
-      // between the play and the wait, and on the Windows leg one of those writes waited out a
-      // process holding the file, so a wait that ended after 1 ms without asking the editor was
-      // measured as 706 ms after the play and failed as though the editor had held it.
       const waited = account
         .map((line) => /announce wait ended after (\d+)ms: pid (\d+) announced/.exec(line))
         .find((said) => said !== null);
       assert.ok(waited !== undefined, `the server should say how its wait ended: ${account.join(' | ')}`);
       assert.equal(Number(waited[2]), game.pid, account.join(' | '));
       assert.ok(
-        Number(waited[1]) < answersAfterMs,
-        `and found before the editor's first answer arrived: the wait took ${waited[1]}ms, against ${answersAfterMs}ms, ${sincePlayMs}ms after the play; the server said: ${account.join(' | ')}`,
+        !account.some((line) => line.includes('playing_status did not answer')),
+        `the wait ended before the start stopped waiting for the editor's answer: ${account.join(' | ')}`,
+      );
+      assert.equal(
+        answeredAfterThePlay,
+        false,
+        `and found before the editor answered the question it was asked after the play: the wait took ${waited[1]}ms, ${sincePlayMs}ms after the play; the server said: ${account.join(' | ')}`,
       );
     },
   ).finally(() => {
+    clearTimeout(cap);
+    release();
     game.end();
   });
 }
