@@ -45,6 +45,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash } from 'node:crypto';
 import {
   closeSync,
   existsSync,
@@ -3351,11 +3352,51 @@ export interface CallSlot {
 const withoutSlots = new AsyncLocalStorage<true>();
 
 /**
+ * The folder under the machine's slots with one lock for each project an engine runs for without a
+ * slot. Those engines of one project run one at a time across the machine, since each writes the
+ * project's .godot, so the count running at once is bounded by the projects in use. A lock is taken
+ * and judged as a slot's is, so a dead holder's is taken over.
+ */
+export const PROJECTS_FOLDER = 'projects';
+
+/** How often an engine waiting for its project's lock looks again. */
+const PROJECT_LOOK_MS = 100;
+
+/** The lock in [param directory] that the slotless engines of [param project] take in turn. */
+export function projectLockOf(
+  project: string | undefined,
+  directory: string = machineSlotsDirectory(),
+): string {
+  const key =
+    project === undefined
+      ? 'none'
+      : createHash('sha256').update(comparable(project)).digest('hex').slice(0, 16);
+  return join(directory, PROJECTS_FOLDER, `${key}.lock`);
+}
+
+/** Runs [param body] holding [param project]'s lock, waiting while another engine of it holds it. */
+async function inTheProjectsTurn<T>(body: () => Promise<T>, project: string | undefined): Promise<T> {
+  const lock = projectLockOf(project);
+  mkdirSync(dirname(lock), { recursive: true });
+  const slots = await processSlots();
+  const signal = callSignal();
+  while (!(await slots.takeFile(lock))) {
+    signal?.throwIfAborted();
+    await delay(PROJECT_LOOK_MS);
+  }
+  try {
+    return await body();
+  } finally {
+    await giveBackSlotAsync(lock, slots.holder.pid);
+  }
+}
+
+/**
  * Runs [param body] holding one of the machine's slots for the call, handing it the slot's lock,
  * and gives it back after. [param project] is the project the call is for. With [param free], or
- * inside {@link withoutASlot}, it takes no slot and waits for none, and [param body] gets null, as
- * an editor starts. An engine started inside another engine's slot (GODOT_ENGINE_HELD) runs on
- * that slot either way.
+ * inside {@link withoutASlot}, it takes no slot and [param body] gets null. It waits only for the
+ * project's other slotless engines ({@link PROJECTS_FOLDER}). An engine started inside another
+ * engine's slot (GODOT_ENGINE_HELD) runs on that slot either way.
  */
 export async function inASlot<T>(
   body: (lock: string | null) => Promise<T>,
@@ -3363,7 +3404,7 @@ export async function inASlot<T>(
   free = false,
 ): Promise<T> {
   if ((free || withoutSlots.getStore() === true) && nonEmpty(process.env[HELD_VARIABLE]) === undefined) {
-    return await body(null);
+    return await inTheProjectsTurn(async () => await body(null), project);
   }
   const held = await slotForCall(false, project);
   try {

@@ -775,11 +775,18 @@ The MCP server's own engines take them too. Each headless operation, script chec
 started with `editor_run start`, whether the server starts it or the editor plays it. The game
 keeps the slot for as long as it runs.
 
-An import takes none, and waits for none. That covers `project_import`, the import another call
-starts first, the class cache rebuild an import or an operation runs first, and the engines of
-`gdharness setup`, `runtime`, `upgrade` and `uninstall`. They are short steps every other call
-waits behind. A test run's own engines, and the import passes it hands to its suites, still take a
-slot. Inside an engine's slot (`GODOT_ENGINE_HELD`) an import runs on that slot as any engine does.
+An import takes none. That covers every `project_import` op and its status reads, the import
+another call starts first, the class cache rebuild an import or an operation runs first, and the
+engines of `gdharness setup`, `runtime`, `upgrade` and `uninstall`. They are short steps every
+other call waits behind. A test run's own engines, and the import passes it hands to its suites,
+still take a slot. Inside an engine's slot (`GODOT_ENGINE_HELD`) an import runs on that slot as any
+engine does.
+
+These engines of one project run one at a time across the machine, since each writes the project's
+`.godot`. Each takes the project's lock, `<directory>/projects/<key>.lock`, made and judged as a
+slot's lock is, and waits while another holds it. The key is the first 16 hex digits of the SHA-256
+of the project's resolved path, lower-cased on Windows. An engine for another project does not
+wait.
 
 ### Games and their slots
 

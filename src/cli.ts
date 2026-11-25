@@ -438,7 +438,7 @@ async function rebuildClassList(godot: HeadlessEngine, projectPath: string): Pro
   }
 }
 
-/** The engine steps of setup, which share one slot. */
+/** The engine steps of setup, which take no slot. */
 async function installIntoProject(projectPath: string, withRuntime: boolean): Promise<HeadlessEngine> {
   const found = await engine(projectPath);
   for (const addon of installAddons(projectPath)) {
