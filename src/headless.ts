@@ -15,6 +15,7 @@ import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cac
 import { EXIT_LEAK, projectSelfTypedExports, selfTypedSentence } from './engine-leaks.js';
 import { memoryEndSentence } from './engine-memory.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
+import { inOneSlot } from './engine-slots.js';
 import type { Sample } from './engine-spent.js';
 import { errorMessage } from './errors.js';
 import type { GameLog, LogEntry } from './game-log.js';
@@ -410,6 +411,14 @@ export async function runImport(
     readonly forcing?: readonly string[];
     readonly engine?: ImportEngine;
   } = {},
+): Promise<ImportOutcome> {
+  return await inOneSlot(() => importInOneSlot(godotPath, projectPath, options));
+}
+
+async function importInOneSlot(
+  godotPath: string,
+  projectPath: string,
+  options: { readonly forcing?: readonly string[]; readonly engine?: ImportEngine },
 ): Promise<ImportOutcome> {
   const engine = options.engine ?? defaultImportEngine(godotPath, projectPath);
   const caches = editorCacheDirectory(godotPath);
