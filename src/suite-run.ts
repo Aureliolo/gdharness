@@ -2127,9 +2127,11 @@ export async function runShares<
     return 'again';
   };
   /**
-   * Takes the lane's slot and the memory its share needs, or throws once the run is over. A
-   * lane short of memory gives its slot back while it waits, then takes a slot again and asks memory
-   * again, so it never holds a slot while it waits for memory nor memory while it waits for a slot.
+   * Takes the lane's slot and the memory its share needs. Once the run is over it throws where it
+   * takes a slot or waits for memory, and returns null where the lane still holds its slot with no
+   * memory gate. A lane short of memory gives its slot back while it waits, then takes a slot again
+   * and asks memory again, so it never holds a slot while it waits for memory nor memory while it
+   * waits for a slot.
    */
   const waitedFor = async (held: {
     lock: string | null;

@@ -126775,6 +126775,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACountLoweredBelowTheSlotsHeldStartsNothingUntilEnoughGo,
   testALockTakenPastALoweredCountByARaceIsGivenBack,
   testLocksWrittenInOneMillisecondAreOrderedBySlot,
+  testLocksOfAMemoryRaceWrittenInOneMillisecondAreOrderedBySlot,
   testAStartIsReadAgainAfterTenSecondsAndAReusedPidFreesItsLock,
   testTheFirstEngineOnAMachineStartsWhateverMemoryReads,
   testALockWithNoMemoryOwesOneAndAHalfGiBASlot,
@@ -128185,6 +128186,66 @@ async function testLocksWrittenInOneMillisecondAreOrderedBySlot(): Promise<void>
       const readTime: unknown = Reflect.get(slots, 'writtenAt');
       assert.ok(typeof readTime === 'function');
       const lockOf = (slot: number): string => join(folder.directory, `${String(slot)}.lock`);
+      let tied = false;
+      Reflect.set(slots, 'writtenAt', (path: string): unknown => {
+        if (!tied && existsSync(lockOf(theirs)) && existsSync(lockOf(ours))) {
+          tied = true;
+          const at = Math.floor(Date.now()) / 1000;
+          utimesSync(lockOf(theirs), at, at);
+          utimesSync(lockOf(ours), at, at);
+        }
+        const answer: unknown = Reflect.apply(readTime, slots, [path]);
+        return answer;
+      });
+      const got = await slots.takeFree();
+      assert.ok(tied, 'both locks were there at once');
+      assert.equal(
+        lockNumber(got),
+        kept ? ours : null,
+        kept ? 'the lower slot is first, so it is kept' : 'the higher slot is second, so it is given back',
+      );
+      assert.equal(existsSync(lockOf(ours)), kept);
+      slots.releaseAll();
+    } finally {
+      rmSync(folder.directory, { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * Two engines racing for memory room for one, whose locks carry one millisecond, keep the lower
+ * slot's: the higher gives its slot back, so the machine never runs two on room for one.
+ */
+async function testLocksOfAMemoryRaceWrittenInOneMillisecondAreOrderedBySlot(): Promise<void> {
+  for (const { theirs, ours, kept } of [
+    { theirs: 0, ours: 1, kept: false },
+    { theirs: 1, ours: 0, kept: true },
+  ]) {
+    const folder = await gameLineFolder(4);
+    try {
+      const past = new Date(Date.now() - 60_000);
+      const lockOf = (slot: number): string => join(folder.directory, `${String(slot)}.lock`);
+      // An engine that still owes 1 GB of its peak, and room for one more beside it.
+      writeFileSync(
+        lockOf(3),
+        JSON.stringify({ ...folder.me, memory: GB, engine: { pid: 4_000_009, started: 1 } }),
+      );
+      utimesSync(lockOf(3), past, past);
+      let raced = false;
+      const slots = new EngineSlots(folder.directory, 4, folder.me, undefined, undefined, {
+        need: 1.6 * GB,
+        held: () => Promise.resolve(new Map<number, number>([[4_000_009, 0]])),
+        available: () => {
+          if (!raced) {
+            raced = true;
+            writeFileSync(lockOf(theirs), JSON.stringify({ ...folder.me, memory: 1.6 * GB }));
+          }
+          return Promise.resolve(4 * MEMORY_GIB + GB + 1.7 * GB);
+        },
+      });
+      // Once both locks are there, both are given one time, to the millisecond.
+      const readTime: unknown = Reflect.get(slots, 'writtenAt');
+      assert.ok(typeof readTime === 'function');
       let tied = false;
       Reflect.set(slots, 'writtenAt', (path: string): unknown => {
         if (!tied && existsSync(lockOf(theirs)) && existsSync(lockOf(ours))) {
