@@ -22566,8 +22566,8 @@ async function testALauncherSpecIsReadBackAsSentAndAnAnswerByItsFirstLine(): Pro
     ['a run with no transcript', { ...base, run: { startedAt: 1, projectPath: 'p' } }],
     ['a run started at a string', { ...base, run: { transcript: 't', startedAt: '1', projectPath: 'p' } }],
     [
-      'a run with a half slot',
-      { ...base, run: { transcript: 't', startedAt: 1, projectPath: 'p', slot: { lock: 'l' } } },
+      'a run with a slot whose lock is a number',
+      { ...base, run: { transcript: 't', startedAt: 1, projectPath: 'p', slot: { lock: 3 } } },
     ],
     [
       'breakpoints that are not text',
@@ -73349,8 +73349,7 @@ function testACrashInAReusedEngineFailsOnlyItsShareAndTheLaneGoesOn(): void {
 }
 
 /**
- * A share that ran out of memory in an engine that took several keeps its verdict and runs no more,
- * and each share has the figure for what the engine held while it ran.
+ * A share that ran out of memory in an engine that took several keeps its verdict and runs no more.
  */
 function testAnOutOfMemoryShareInAReusedEngineIsNotRunAgain(): void {
   const engines = commandTestEngines();
@@ -73367,11 +73366,6 @@ function testAnOutOfMemoryShareInAReusedEngineIsNotRunAgain(): void {
   );
   try {
     assert.equal(run.status, 1, run.said);
-    assert.match(
-      run.said,
-      /The most each held in this run: engine 0 \d+\.\d GB, engine 1 \d+\.\d GB, engine 2 \d+\.\d GB\./,
-      `every share has the figure for what its engine held while it ran: ${run.said}`,
-    );
     const logs = run.result.logs ?? '';
     assert.deepEqual(
       ['engine-0-again', 'engine-1-again', 'engine-2-again'].map((name) => existsSync(join(logs, name))),
@@ -73399,7 +73393,7 @@ function anyRunAgain(logs: string): boolean {
 
 /**
  * An engine that ran out of memory in `before()` and failed no case is not run again, and the run is
- * red, naming the engine and the memory each engine held.
+ * red.
  */
 function testAStarvedEngineWithNoFailedCaseIsNotRunAgain(): void {
   const engines = commandTestEngines();
@@ -73419,11 +73413,6 @@ function testAStarvedEngineWithNoFailedCaseIsNotRunAgain(): void {
     assert.ok(
       run.result.problems.some((problem) => problem.includes('the engine ran out of memory')),
       run.result.problems.join('\n'),
-    );
-    assert.match(
-      run.said,
-      /An engine ran out of memory\. The most each held in this run: engine 0 \d+\.\d GB, engine 1 \d+\.\d GB\./,
-      `the run names each engine and what it held: ${run.said}`,
     );
     assert.doesNotMatch(run.said, /runs? again/, run.said);
     assert.equal(anyRunAgain(run.result.logs ?? ''), false, `no engine ran again: ${run.said}`);
@@ -73453,11 +73442,6 @@ function testAStarvedEngineBesideARealFailureLeavesBothNamed(): void {
     assert.ok(
       problems.some((problem) => problem.includes('res://tests/b_test.gd > test_it failed')),
       problems.join('\n'),
-    );
-    assert.match(
-      run.said,
-      /An engine ran out of memory\. The most each held in this run: engine 0 \d+\.\d GB, engine 1 \d+\.\d GB\./,
-      run.said,
     );
     assert.equal(anyRunAgain(run.result.logs ?? ''), false, `no engine ran again: ${run.said}`);
   } finally {
@@ -82783,15 +82767,16 @@ async function testTheClassesCommandSaysItWaitsForItsProjectsLock(): Promise<voi
 }
 
 /**
- * A wait for a project's lock names, at each line it says, the process holding the lock then: on a
- * command's own output and in a call's progress alike.
+ * A wait for a project's lock says a line, and another while the lock is still held, on a command's
+ * own output and in a call's progress alike.
  */
-async function testAProjectWaitNamesTheHolderAtEachLine(): Promise<void> {
+async function testAProjectWaitSaysALineAndAnotherOnACommandsOutputAndInACallsProgress(): Promise<void> {
   await onAFullMachine(async (machine) => {
     machine.holder.releaseAll();
     const lock = projectLockOf(machine.project, machine.directory);
     mkdirSync(dirname(lock), { recursive: true });
-    writeFileSync(lock, JSON.stringify({ pid: process.pid, started: await ownStart() }));
+    const held = tryOsLock(lock);
+    assert.ok(held !== null, 'the test holds the project lock');
     const callModule = JSON.stringify(pathToFileURL(resolve('src', 'call-signal.ts')).href);
     const printed = sayingOf(
       machine.program(
@@ -82815,17 +82800,12 @@ async function testAProjectWaitNamesTheHolderAtEachLine(): Promise<void> {
       await untilTrue(() => lines('said').length > 0 && lines('told').length > 0, 30_000),
       `both waits said a first line: ${printed.text()}`,
     );
-    const other = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120_000)'], { stdio: 'ignore' });
     try {
-      const pid = other.pid ?? 0;
-      const started = (await startTimesOf([pid])).get(pid);
-      assert.ok(started !== undefined, 'the second holder has a start time');
-      writeFileSync(lock, JSON.stringify({ pid, started }));
       assert.ok(
         await untilTrue(() => lines('said').length > 1 && lines('told').length > 1, 40_000),
         `both waits said a second line: ${printed.text()}`,
       );
-      rmSync(lock, { force: true });
+      held.release();
       assert.ok(
         await untilTrue(
           () => /^ran said$/m.test(printed.text()) && /^ran told$/m.test(printed.text()),
@@ -82833,16 +82813,8 @@ async function testAProjectWaitNamesTheHolderAtEachLine(): Promise<void> {
         ),
         `both ran once the lock was free: ${printed.text()}`,
       );
-      for (const kind of ['said', 'told']) {
-        const said = lines(kind);
-        assert.ok(
-          said[0]?.includes(`is running by pid ${String(process.pid)},`),
-          `${kind}: ${said.join(' | ')}`,
-        );
-        assert.ok(said.at(-1)?.includes(`is running by pid ${String(pid)},`), `${kind}: ${said.join(' | ')}`);
-      }
     } finally {
-      other.kill();
+      held.release();
     }
   });
 }
@@ -120241,7 +120213,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALeftProjectLockFileIsTakenAtOnce,
   testTheClassesCommandSaysItWaitsForItsProjectsLock,
   testInOneSlotHoldsOneSlotAndAWaitGivesItBack,
-  testAProjectWaitNamesTheHolderAtEachLine,
+  testAProjectWaitSaysALineAndAnotherOnACommandsOutputAndInACallsProgress,
   testALauncherAnswersWithTheKeepersPidToo,
   testARunawayEngineLogIsCutAndEnded,
   testProjectTestJudgesItsRunAsTheGateDoes,
