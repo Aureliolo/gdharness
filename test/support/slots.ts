@@ -25,7 +25,6 @@ import {
  */
 export const SLOT_VARIABLES = [
   'GODOT_ENGINE_HELD',
-  'GODOT_ENGINE_SLOT_COMMAND',
   SLOTS_VARIABLE,
   SLOT_COUNT_VARIABLE,
   // The marker of a job the machine's queue runs, which nothing here reads but a program started

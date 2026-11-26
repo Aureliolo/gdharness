@@ -36,9 +36,6 @@
  * ({@link machineSlots}), and a file `<directory>/count` holding a whole number above 0 replaces
  * all of them, read at every take ({@link SLOT_COUNT_FILE}).
  *
- * Where `GODOT_ENGINE_SLOT_COMMAND` names a command, none of this scheme runs for a take: the
- * command grants the slot and holds it until its input ends ({@link askForSlot}).
- *
  * Other tools take slots in this directory the same way, which is the point of it: the scheme is
  * written out in docs/test-runs.md for them, and a change here is a change there.
  */
@@ -64,7 +61,7 @@ import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
 import { cacheHome } from './cache-home.js';
-import { callNotes, callProgress, callSignal, callSlotWaits, waitedUnlessAborted } from './call-signal.js';
+import { callProgress, callSignal, callSlotWaits, waitedUnlessAborted } from './call-signal.js';
 import { helperPid } from './desktop.js';
 import {
   ceilingFor,
@@ -85,13 +82,6 @@ import {
 } from './process-children.js';
 import { isRecord } from './records.js';
 import { type PeakTool, readEnginePeaks } from './run-record.js';
-import {
-  askForSlot,
-  delegateWaitedSaid,
-  delegateWaitSaid,
-  type SlotGrant,
-  slotCommandOf,
-} from './slot-delegate.js';
 import { Turns } from './turns.js';
 import {
   changeWholeAsync,
@@ -754,10 +744,6 @@ export class EngineSlots {
   private inherited: string | null = null;
   /** The last look at the inherited slot, which the next one waits for. */
   private readonly inheriting = new Turns();
-  /** The slots a delegate command granted this process and still holds, by lock: {@link slotCommandOf}. */
-  private readonly delegated = new Map<string, SlotGrant>();
-  /** When a wait for a grant was last said, so that asks waiting together say it once. */
-  private delegateSaidAt = Number.NEGATIVE_INFINITY;
   /** The slots the last look could take, in the order it tried them, and what held it to them. */
   drawn: SlotsDrawn;
   private saidAt = Number.NEGATIVE_INFINITY;
@@ -848,22 +834,7 @@ export class EngineSlots {
     blocked?: () => void,
     game = false,
     project?: string,
-    queued?: () => void,
     tool?: PeakTool,
-  ): Promise<string> {
-    const delegate = slotCommandOf();
-    return delegate === undefined
-      ? await this.takenFromFolder(signal, waiting, blocked, game, project, tool)
-      : await this.takenFromCommand(delegate, { signal, waiting, blocked, queued }, project ?? this.project);
-  }
-
-  private async takenFromFolder(
-    signal: AbortSignal | undefined,
-    waiting: ((waitedMs: number) => void) | undefined,
-    blocked: (() => void) | undefined,
-    game: boolean,
-    project: string | undefined,
-    tool: PeakTool | undefined,
   ): Promise<string> {
     mkdirSync(this.directory, { recursive: true });
     const line = new SlotLine(this.holder.pid);
@@ -900,72 +871,6 @@ export class EngineSlots {
       }
     }
   }
-  /**
-   * The slot [param command] grants, in place of a take from the slots folder, which this touches
-   * nowhere: the slot's inheritance is read as for any take, and the engine's own lock is the one
-   * the command names. [param blocked] is called when the grant took as long as a wait is first said.
-   */
-  private async takenFromCommand(
-    command: string,
-    asked: {
-      readonly signal: AbortSignal | undefined;
-      readonly waiting: ((waitedMs: number) => void) | undefined;
-      readonly blocked: (() => void) | undefined;
-      readonly queued: (() => void) | undefined;
-    },
-    project: string | undefined,
-  ): Promise<string> {
-    const { signal, waiting, blocked, queued } = asked;
-    signal?.throwIfAborted();
-    const inherited = await this.inheritedByOne();
-    if (inherited !== null) {
-      return inherited;
-    }
-    const began = Date.now();
-    const notes = callNotes();
-    const grant = await askForSlot({
-      command,
-      project,
-      signal,
-      firstNoteMs: COMMAND_WAIT_SAID_MS,
-      noteEveryMs: WAIT_SAID_MS,
-      onQueued: queued,
-      onLost: (said) => {
-        if (notes === undefined) {
-          this.say?.(said);
-        } else {
-          notes.slotNotes.add(said);
-        }
-      },
-      note: (waitedMs) => {
-        if (waiting !== undefined) {
-          waiting(waitedMs);
-        } else if (this.say !== undefined && Date.now() - this.delegateSaidAt >= WAIT_SAID_MS / 2) {
-          // Every ask outstanding notes on the same schedule, and one line says it for them all.
-          this.delegateSaidAt = Date.now();
-          this.say(delegateWaitSaid(waitedMs, command));
-        }
-      },
-    });
-    if (this.delegated.has(grant.lock)) {
-      grant.release();
-      await grant.gone;
-      throw new Error(
-        `The engine slot command \`${command}\` granted ${grant.lock}, which this process holds.`,
-      );
-    }
-    this.delegated.set(grant.lock, grant);
-    if (Date.now() - began >= COMMAND_WAIT_SAID_MS) {
-      blocked?.();
-    }
-    return grant.lock;
-  }
-
-  /** The grant the delegate command made for [param lock], when it did. */
-  grantOf(lock: string): SlotGrant | undefined {
-    return this.delegated.get(lock);
-  }
-
   /**
    * Says how long a take has waited, to its own listener or to the command's output, when one is
    * due. Answers when the listener last heard, which a take with a listener of its own keeps.
@@ -1018,10 +923,6 @@ export class EngineSlots {
    * slots the takers ahead of [param line] take first ({@link SlotLine}). One given no line came last.
    */
   async takeFree(game = false, line?: SlotLine): Promise<string | null> {
-    if (slotCommandOf() !== undefined) {
-      // A command has no free-now answer to give, so only the inherited slot is free.
-      return await this.inheritedByOne();
-    }
     mkdirSync(this.directory, { recursive: true });
     this.cap = slotCountFileOf(this.directory) ?? this.configured;
     await this.sweep();
@@ -1264,10 +1165,6 @@ export class EngineSlots {
    * names its kind as `memory`, which no take lets go first, since it takes no slot.
    */
   markWaiting(): () => void {
-    if (slotCommandOf() !== undefined) {
-      // The waiting folder is the built-in taker's.
-      return () => undefined;
-    }
     const mark = this.waitMarked({ ...this.holder, taker: MEMORY_TAKER });
     return () => {
       if (mark !== undefined) {
@@ -1385,10 +1282,6 @@ export class EngineSlots {
 
   /** Gives back every slot this process holds, as it ends. */
   releaseAll(): void {
-    for (const grant of this.delegated.values()) {
-      grant.release();
-    }
-    this.delegated.clear();
     for (const lock of this.held) {
       this.release(lock);
     }
@@ -1401,12 +1294,6 @@ export class EngineSlots {
   release(lock: string): void {
     if (lock === this.inherited) {
       this.inherited = null;
-      return;
-    }
-    const grant = this.delegated.get(lock);
-    if (grant !== undefined) {
-      this.delegated.delete(lock);
-      grant.release();
       return;
     }
     this.held.delete(lock);
@@ -1422,26 +1309,9 @@ export class EngineSlots {
   }
 
   /**
-   * Hands the slot at [param lock] to [param to], answering whether it did: see {@link handSlot}. A
-   * slot a command granted is handed through the command ({@link SlotGrant.hand}), which keeps no
-   * hold on it after, and a hand it will not make is told in the call's answer.
+   * Hands the slot at [param lock] to [param to], answering whether it did: see {@link handSlot}.
    */
   async hand(lock: string, to: SlotHolder): Promise<boolean> {
-    const grant = this.delegated.get(lock);
-    if (grant !== undefined) {
-      const notes = callNotes();
-      // The grant stays until the caller releases it, so that a failed hand ends in the command's
-      // own release and a lock file the command wrote is never touched.
-      const failed = await grant.hand(to.pid, to.started);
-      if (failed !== null) {
-        if (notes === undefined) {
-          this.say?.(failed);
-        } else {
-          notes.slotNotes.add(failed);
-        }
-      }
-      return failed === null;
-    }
     const handed = await handSlot(lock, this.holder.pid, to);
     if (handed) {
       this.held.delete(lock);
@@ -1987,8 +1857,6 @@ export async function slotForCall(game = false, project?: string, tool?: PeakToo
   const progress = callProgress();
   const waits = callSlotWaits();
   const began = Date.now();
-  // A command's grant leaves nothing in the slots folder, so there are no holders to name.
-  const command = slotCommandOf();
   let blockedBy: readonly SlotHolder[] | undefined;
   let blockedOn: SlotsDrawn | undefined;
   const lock = await slots.take(
@@ -1998,9 +1866,7 @@ export async function slotForCall(game = false, project?: string, tool?: PeakToo
       : (waitedMs) => {
           progress(
             waitedMs / 1000,
-            command === undefined
-              ? slotWaitSaid(waitedMs, slots.count, slots.directory, slots.holders(), slots.drawn)
-              : delegateWaitSaid(waitedMs, command),
+            slotWaitSaid(waitedMs, slots.count, slots.directory, slots.holders(), slots.drawn),
           );
         },
     () => {
@@ -2009,28 +1875,19 @@ export async function slotForCall(game = false, project?: string, tool?: PeakToo
     },
     game,
     project,
-    undefined,
     tool,
   );
   if (waits !== undefined && blockedBy !== undefined) {
     waits.ms += Date.now() - began;
     const heldBy = blockedBy;
     const heldOn = blockedOn;
-    waits.said ??=
-      command === undefined || slots.grantOf(lock) === undefined
-        ? (waitedMs) => slotWaitedSaid(waitedMs, slots.count, slots.directory, heldBy, heldOn)
-        : (waitedMs) => delegateWaitedSaid(waitedMs, command);
+    waits.said ??= (waitedMs) => slotWaitedSaid(waitedMs, slots.count, slots.directory, heldBy, heldOn);
   }
-  const grant = slots.grantOf(lock);
   return {
     lock,
     from: slots.holder.pid,
-    delegated: grant !== undefined,
     release: () => {
       slots.release(lock);
-    },
-    settled: async () => {
-      await grant?.gone;
     },
     handTo: async (holder) => await slots.hand(lock, holder),
     leave: () => {
@@ -2040,41 +1897,11 @@ export async function slotForCall(game = false, project?: string, tool?: PeakToo
 }
 
 /**
- * What a run's record says of its slot for the keeper that holds the run, taken from [param slot]
- * and named [param by]. A delegate command's slot is handed to the keeper through the command, so the
- * keeper has no lock file of its own to take over and the record carries none.
- */
-export function keeperSlotOf(
-  slot: Pick<CallSlot, 'lock' | 'from' | 'delegated'>,
-  by: string,
-): { slot?: { lock: string; from: number; by: string } } {
-  return slot.delegated ? {} : { slot: { lock: slot.lock, from: slot.from, by } };
-}
-
-/**
- * Hands [param slot], a delegate command's, to the keeper [param pid] that holds a game for
- * editor_run, which keeps it until the keeper has gone. The keeper outlives the game's first
- * process and follows its restarts. The slot is given back when the keeper is not known, its start
- * cannot be read or the command will not hand it on.
- */
-export async function handSlotToKeeper(
-  slot: Pick<CallSlot, 'handTo' | 'release'>,
-  pid: number | undefined,
-  projectPath: string | null,
-): Promise<void> {
-  await handedOrReleased(
-    slot,
-    pid,
-    `the keeper of a game${projectPath === null ? '' : ` of ${projectPath}`} editor_run started`,
-  );
-}
-
-/**
  * Hands [param slot] to the played game [param pid], so its lock is freed by the game ending. The
  * slot is given back when the game's start cannot be read or the lock is no longer this server's
  * to hand.
  */
-export async function handSlotToGame(
+async function handSlotToGame(
   slot: Pick<CallSlot, 'handTo' | 'release'>,
   pid: number,
   projectPath: string | null,
@@ -2137,11 +1964,7 @@ export interface CallSlot {
   readonly lock: string;
   /** The pid the lock names until it is handed on. */
   readonly from: number;
-  /** Whether a delegate command granted it, which leaves the lock file to that command alone. */
-  readonly delegated: boolean;
   readonly release: () => void;
-  /** Settles once what {@link release} gave back has gone: the delegate command's exit, at most a few seconds on. */
-  readonly settled: () => Promise<void>;
   /** Hands the slot to [param holder], which keeps it until it has gone, and answers whether it did. */
   readonly handTo: (holder: SlotHolder) => Promise<boolean>;
   /** Leaves the lock for another process to take over. It names this one until it does. */
@@ -2276,7 +2099,6 @@ export async function inASlot<T>(
     return await body(held.lock);
   } finally {
     held.release();
-    await held.settled();
   }
 }
 
@@ -2322,5 +2144,4 @@ async function givenBack(kept: { held: Promise<CallSlot> | null }): Promise<void
   // A take that failed was thrown to the engine step that asked for it, and holds nothing.
   const held = await taken?.catch(() => null);
   held?.release();
-  await held?.settled();
 }

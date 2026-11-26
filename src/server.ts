@@ -169,9 +169,7 @@ import {
 } from './engine-run.js';
 import {
   handedRunSlot,
-  handSlotToKeeper,
   inOneSlot,
-  keeperSlotOf,
   onTheSlot,
   raiseSlotMemory,
   settledRunSlot,
@@ -16395,7 +16393,7 @@ export class GodotServer {
           ...this.servedBy(),
           ...this.profileOfAKeptRun(profile, engineCalls),
           ...(debugged ? { breakpoints: this.breakpointsForAGame(projectPath) } : { debugged: false }),
-          ...keeperSlotOf(slot, `a game of ${projectPath} editor_run started`),
+          slot: { lock: slot.lock, from: slot.from, by: `a game of ${projectPath} editor_run started` },
         },
         ...(desktop === undefined ? {} : { desktop }),
       });
@@ -16407,12 +16405,7 @@ export class GodotServer {
       slot.release();
       return launched;
     }
-    if (slot.delegated) {
-      // The keeper outlives the game's first process and follows its restarts, so it holds the slot.
-      await handSlotToKeeper(slot, launched.keeperPid, projectPath);
-    } else {
-      slot.leave();
-    }
+    slot.leave();
     const startedBy = Date.now();
     await this.noteTheLatestRun({ projectPath, pid: launched.pid, startedAt });
     sweepTranscripts();

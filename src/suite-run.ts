@@ -54,7 +54,6 @@ import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE, GameLog } from './game-log.js';
 import { type ImportOutcome, runImport } from './headless.js';
 import { staleImports } from './import-freshness.js';
-import { type AskedLanes, askedLanes } from './lane-grants.js';
 import { ENGINE_ARG_SPELLING, engineFlagsRefusal, hiddenWindowFlags, wholeFlag } from './launch.js';
 import { unlistedExtensions } from './library-copies.js';
 import { cannotOpen } from './listed-reads.js';
@@ -62,7 +61,6 @@ import { prependTo, readLog } from './log-read.js';
 import { commandProjectRefusal, isGodotProject } from './paths.js';
 import { isRecord, isStringList } from './records.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
-import { slotCommandOf } from './slot-delegate.js';
 import { EVERY_FILE, type PassedSuite, reachedBySuite, SuiteInputs } from './suite-inputs.js';
 import {
   casesRan,
@@ -1226,8 +1224,6 @@ function sayWhatWasCutUp(deal: Deal, say: (line: string) => void): void {
 interface StartedLanes<P = EnginePlan> {
   readonly lanes: ReadonlyArray<ReadonlyArray<{ readonly plan: P; readonly index: number }>>;
   readonly taken: readonly string[];
-  /** Under a slot command, the slots it was asked for up front, whose late grants the lanes take. */
-  readonly granted?: AskedLanes;
   /** Whether the engines are handed shares as slots come free, rather than one lane to a slot. */
   readonly shared: boolean;
 }
@@ -1246,11 +1242,7 @@ async function slotsFreeNow(slots: Pick<EngineSlots, 'takeFree'>, most: number):
 }
 
 /**
- * Takes a slot for each lane where one is free now, and says what that leaves for the rest. Under a
- * slot command, which has no answer for a slot free now, every lane's slot is asked at once. A grant
- * the command did not queue counts as free however late it comes, and a queued one as busy: the
- * lanes left over wait for it as shares are handed out, and one that comes once the work is done is
- * given back.
+ * Takes a slot for each lane where one is free now, and says what that leaves for the rest.
  */
 export async function takenLanes<P extends { readonly lane: number }>(
   run: {
@@ -1270,11 +1262,7 @@ export async function takenLanes<P extends { readonly lane: number }>(
   // every lane starts at once. Held by memory, only the lanes memory has room for take one now.
   // The rest take theirs in the slots' queue, and give a slot back while they wait for memory.
   const startable = memoryHeld ? Math.min(byMemory.engines, lanes.length) : lanes.length;
-  const granted =
-    slotCommandOf() !== undefined && !run.ordered && lanes.length > 1
-      ? await askedLanes(run.slots, startable)
-      : null;
-  const taken: string[] = granted?.taken ?? (await slotsFreeNow(run.slots, startable));
+  const taken = await slotsFreeNow(run.slots, startable);
   if (memoryHeld) {
     say(memorySaid(byMemory.engines, lanes.length, byMemory.held ?? ''));
   }
@@ -1282,7 +1270,7 @@ export async function takenLanes<P extends { readonly lane: number }>(
   if (shared && taken.length < startable) {
     say(sharesSaid(taken.length, startable));
   }
-  return { lanes, taken, shared, ...(granted === null ? {} : { granted }) };
+  return { lanes, taken, shared };
 }
 
 /** Runs the engines of the deal, and says what each held when one ran out of memory. */
@@ -1297,27 +1285,21 @@ async function ranEngines(
   const { launch, declared } = context;
   const { units, times } = deal;
   const { lanes, taken, shared } = started;
-  let ran: EngineRan[];
-  try {
-    ran = shared
-      ? await runShares(
-          started.granted?.slots ?? launch.slots,
-          units,
-          declared,
-          lanes.length,
-          taken,
-          times,
-          (plan, index, lock, holds, reuse) => runEngine(launch, plan, index, times, lock, holds, reuse),
-          handed,
-          memory,
-        )
-      : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null, handed))))
-          .flat()
-          .toSorted((a, b) => a.index - b.index);
-  } finally {
-    // A grant that came once the work was done goes back unused.
-    started.granted?.end();
-  }
+  const ran: EngineRan[] = shared
+    ? await runShares(
+        launch.slots,
+        units,
+        declared,
+        lanes.length,
+        taken,
+        times,
+        (plan, index, lock, holds, reuse) => runEngine(launch, plan, index, times, lock, holds, reuse),
+        handed,
+        memory,
+      )
+    : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null, handed))))
+        .flat()
+        .toSorted((a, b) => a.index - b.index);
   if (ran.some((engine) => engine.verdict.starved)) {
     say(outOfMemorySaid(ran));
   }
