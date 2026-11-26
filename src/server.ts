@@ -235,6 +235,7 @@ import {
   type orphansPrinted,
   type PrintedDiff,
   parseJUnit,
+  reportedSkips,
   type ScriptError,
   SuiteDiffs,
   skippedInReport,
@@ -10783,7 +10784,46 @@ export class GodotServer {
     // A run on a quiet project took nine minutes once, with no import and two seconds of suites, and
     // nothing in the answer said which step the time went to.
     const declaredErrors = readExpected(expectedFile);
-    const casePrinted = readEngineLog(engineLog, tally.nested, declaredErrors);
+    // Read again once the run is over, so a run that ended between two looks answers as one that
+    // was stopped: whether it got through its suites first is a race, and what they said about
+    // code that did not compile is not an answer either way.
+    const notCompiled = stopped.for ?? tally.notCompiled;
+
+    const reportsDir = join(project.value.path, '.godot', ...ours.split('/'));
+    let report: TestReport | null = null;
+    let reportProblem: string | null = null;
+    let casePrinted: LogRead;
+    try {
+      try {
+        const written =
+          existsSync(reportsDir) && notCompiled === null
+            ? readdirSync(reportsDir)
+                .filter((name) => name.startsWith('report_'))
+                .toSorted((a, b) => Number(a.slice('report_'.length)) - Number(b.slice('report_'.length)))
+            : [];
+        const newest = written.at(-1);
+        if (newest !== undefined) {
+          report = parseJUnit(readFileSync(join(reportsDir, newest, 'results.xml'), 'utf8'));
+        }
+      } catch (error) {
+        reportProblem = errorMessage(error);
+      }
+      // Read after the report, which holds the skip reasons the console cannot always end, and before
+      // the folder the log is in is discarded.
+      const reported = report === null ? undefined : reportedSkips([report]);
+      casePrinted = readEngineLog(engineLog, tally.nested, declaredErrors, undefined, reported);
+    } finally {
+      discard(reportsDir, userData);
+      // The directory the runs share goes with the last report in it, so a project that has
+      // been tested is left as it was found. A run still writing beside this one keeps it full,
+      // and a removal that fails for that reason is the answer wanted.
+      try {
+        rmdirSync(dirname(reportsDir));
+      } catch {
+        // Not empty, or already gone: either way it is not this run's to take.
+      }
+    }
+
     const { started } = casePrinted;
     const tookMsBy = {
       classes: rebuiltAt - began,
@@ -10798,38 +10838,6 @@ export class GodotServer {
             engineCompile: Math.round(started.compiledSeconds * 1000),
           }),
     };
-    // Read again once the run is over, so a run that ended between two looks answers as one that
-    // was stopped: whether it got through its suites first is a race, and what they said about
-    // code that did not compile is not an answer either way.
-    const notCompiled = stopped.for ?? tally.notCompiled;
-
-    const reportsDir = join(project.value.path, '.godot', ...ours.split('/'));
-    let report: TestReport | null = null;
-    let reportProblem: string | null = null;
-    try {
-      const written =
-        existsSync(reportsDir) && notCompiled === null
-          ? readdirSync(reportsDir)
-              .filter((name) => name.startsWith('report_'))
-              .toSorted((a, b) => Number(a.slice('report_'.length)) - Number(b.slice('report_'.length)))
-          : [];
-      const newest = written.at(-1);
-      if (newest !== undefined) {
-        report = parseJUnit(readFileSync(join(reportsDir, newest, 'results.xml'), 'utf8'));
-      }
-    } catch (error) {
-      reportProblem = errorMessage(error);
-    } finally {
-      discard(reportsDir, userData);
-      // The directory the runs share goes with the last report in it, so a project that has
-      // been tested is left as it was found. A run still writing beside this one keeps it full,
-      // and a removal that fails for that reason is the answer wanted.
-      try {
-        rmdirSync(dirname(reportsDir));
-      } catch {
-        // Not empty, or already gone: either way it is not this run's to take.
-      }
-    }
 
     return await this.testJudged({
       ...ran,

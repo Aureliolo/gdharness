@@ -691,6 +691,42 @@ interface SkippedInReport {
 // It runs to the entry's last quote, as it can hold line breaks and quotes of its own.
 const REPORTED_REASON = /^\s*Reason: '([\s\S]*)'\s*$/m;
 
+/**
+ * The reasons gdUnit4 wrote under skipped cases, which the console cannot always end: a reason with
+ * a lone apostrophe, or a line ending in a quote, reads as going on or as ending early.
+ */
+export interface ReportedSkips {
+  /** A case's reasons by {@link skipKey}, in the order the report lists them. */
+  readonly cases: ReadonlyMap<string, readonly string[]>;
+  /** A suite's reasons, those of every one of its skipped cases, by the suite's script. */
+  readonly suites: ReadonlyMap<string, readonly string[]>;
+}
+
+/** The key of a case in {@link ReportedSkips}. */
+export function skipKey(suite: string, name: string): string {
+  return JSON.stringify([suite, name]);
+}
+
+/** The reasons [param reports] hold for the cases they list as skipped, where they wrote one. */
+export function reportedSkips(reports: readonly TestReport[]): ReportedSkips {
+  const cases = new Map<string, string[]>();
+  const suites = new Map<string, string[]>();
+  for (const report of reports) {
+    for (const suite of report.suites) {
+      const path = suite.path ?? suite.name;
+      for (const entry of suite.cases.filter((one) => one.status === 'skipped')) {
+        const reason = REPORTED_REASON.exec(entry.detail ?? '')?.[1];
+        if (reason !== undefined) {
+          const key = skipKey(path, entry.name);
+          cases.set(key, [...(cases.get(key) ?? []), reason]);
+          suites.set(path, [...(suites.get(path) ?? []), reason]);
+        }
+      }
+    }
+  }
+  return { cases, suites };
+}
+
 /** Every case [param report] holds as skipped. */
 export function skippedInReport(report: TestReport): SkippedInReport[] {
   return report.suites.flatMap((suite) =>

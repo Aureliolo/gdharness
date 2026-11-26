@@ -24,6 +24,8 @@ import {
   orphansPrinted,
   parseJUnit,
   RENDERED_AWAY_NOTE,
+  type ReportedSkips,
+  reportedSkips as reportedFrom,
   rowsIgnoredIn,
   SuiteDiffs,
   scriptErrorsPrinted,
@@ -2102,6 +2104,214 @@ function testAnAfterHooksLinesAreNoPartOfASkippedLastCasesReason(): void {
   }
 }
 
+/**
+ * What both tools make of one run's log. gdharness test reads the text with [param reported], the
+ * skip reasons of its report, and judges it with [param declared]. project_test reads the log file the
+ * same way and counts engine errors from the piped streams, where [param stderr] are the lines the
+ * engine wrote to stderr and the rest went to stdout, less the lines of skip reasons and what the
+ * suites declared.
+ */
+function bothToolsRead(
+  lines: readonly string[],
+  stderr: readonly string[],
+  reported: ReportedSkips | undefined,
+  declared: Expected['errors'] = {},
+  cases: readonly string[] = ['test_ok', 'test_skip'],
+): {
+  readonly skipped: readonly { readonly name: string | null; readonly reason: string }[];
+  readonly errors: readonly string[];
+  readonly engineErrors: number;
+  readonly faults: readonly string[];
+} {
+  const text = lines.join('\n');
+  const printed = readRun(text, reported);
+  const faults = judgeEngine(
+    printed,
+    { suites: [{ path: REASONS_SUITE, cases }], expected: { errors: declared, warnings: {} } },
+    { code: 0, signal: null, ended: null },
+  ).faults;
+  const log = new GameLog();
+  log.append('stdout', `${lines.filter((line) => !stderr.includes(line)).join('\r\n')}\r\n`);
+  log.append('stderr', `${stderr.join('\r\n')}\r\n`);
+  log.finish();
+  log.handOverHeld();
+  const folder = mkdtempSync(join(tmpdir(), 'gdharness-skip-report-'));
+  try {
+    const path = join(folder, 'engine.log');
+    writeFileSync(path, `${text}\n`);
+    const read = readEngineLog(path, [], { errors: declared, warnings: {} }, undefined, reported);
+    assert.deepEqual(
+      [read.skipped, read.errors.map((one) => one.text)],
+      [printed.skipped, printed.errors.map((one) => one.text)],
+      'both tools read the same skips and errors',
+    );
+    return {
+      skipped: read.skipped.map((one) => ({ name: one.name, reason: one.reason })),
+      errors: read.errors.map((one) => one.text),
+      engineErrors:
+        log.count('error') - read.declaredErrors - reasonHeadlinesOf(read.reasonHeadlines, 'error'),
+      faults,
+    };
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+/** The report gdUnit4 wrote for [param skips], as both tools read its reasons. */
+function reasonsReported(skips: readonly (readonly [name: string, reason: string])[]): ReportedSkips {
+  return reportedFrom([parseJUnit(reportedSkips(skips))]);
+}
+
+const GONE = "could not load 'res://gone.tres'";
+const STATISTICS_LINE =
+  'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans | PASSED 4ms';
+const SUMMARY_LINES = [
+  '',
+  '',
+  'Overall Summary: 2 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans |',
+  'Executed test suites: (1/1)',
+  'Executed test cases : (1/2), 1 skipped',
+];
+
+/**
+ * A reason with one apostrophe on a skipped last case closed on its first line has no end the
+ * console can show, so what after() printed under it was taken into the reason. The report ends it.
+ */
+function testAnApostropheInASkipReasonLeavesTheAfterErrorToTheEngine(): void {
+  const lines = printedSkips(
+    [['test_skip', "can't run"]],
+    ['', '', `ERROR: ${GONE}`, STATISTICS_LINE, ...SUMMARY_LINES],
+  ).split('\n');
+  const stderr = [`ERROR: ${GONE}`];
+  const skipLine = `${REASONS_SUITE} > test_skip never ran: gdUnit4 skipped it, saying "can't run"`;
+  const read = bothToolsRead(lines, stderr, reasonsReported([['test_skip', "can't run"]]));
+  assert.deepEqual(
+    [read.skipped, read.errors, read.engineErrors],
+    [[{ name: 'test_skip', reason: "can't run" }], [GONE], 1],
+    'the reading',
+  );
+  assert.deepEqual(
+    read.faults.map((fault) => fault.replace(/\. If .*/, '')),
+    [skipLine, `an engine error in ${REASONS_SUITE} > after: ${GONE}`],
+    'undeclared',
+  );
+  const declared = bothToolsRead(lines, stderr, reasonsReported([['test_skip', "can't run"]]), {
+    [REASONS_SUITE]: { after: [GONE] },
+  });
+  assert.deepEqual([declared.engineErrors, declared.faults], [0, [skipLine]], 'declared');
+}
+
+/** A reason of two lines, the first ending in a quote and the second reading as an error, is whole. */
+function testASkipReasonWhoseFirstLineEndsInAQuoteIsBothLines(): void {
+  const reason = "ab'\nERROR: cd";
+  const read = bothToolsRead(
+    printedSkips([['test_skip', reason]]).split('\n'),
+    [],
+    reasonsReported([['test_skip', reason]]),
+  );
+  assert.deepEqual(
+    [read.skipped, read.errors, read.engineErrors, read.faults],
+    [
+      [{ name: 'test_skip', reason }],
+      [],
+      0,
+      [`${REASONS_SUITE} > test_skip never ran: gdUnit4 skipped it, saying "${reason}"`],
+    ],
+  );
+}
+
+/** A reason of several lines with its quotes paired is read as the console alone reads it. */
+function testAPairedSkipReasonReadsAsTheConsoleReadsIt(): void {
+  const skips = [
+    ['test_skip', "said 'no'\n\nthen left"],
+    ['test_boom', 'boom\nWARNING: a line of the reason'],
+  ] as const;
+  const lines = printedSkips(skips).split('\n');
+  const names = ['test_ok', ...skips.map(([name]) => name)];
+  const fromReport = bothToolsRead(lines, [], reasonsReported(skips), {}, names);
+  assert.deepEqual(fromReport, bothToolsRead(lines, [], undefined, {}, names), 'report or console');
+  assert.deepEqual(
+    fromReport.skipped,
+    skips.map(([name, reason]) => ({ name, reason })),
+  );
+}
+
+/** A run with no report, or one that skips are missing from, reads each reason from the console. */
+function testARunWithNoReportReadsItsSkipReasonsFromTheConsole(): void {
+  const lines = printedSkips(
+    [['test_skip', "can't run"]],
+    ['', '', `ERROR: ${GONE}`, STATISTICS_LINE, ...SUMMARY_LINES],
+  ).split('\n');
+  const swallowed = [{ name: 'test_skip', reason: `can't run'\n\n\nERROR: ${GONE.slice(0, -1)}` }];
+  const none = bothToolsRead(lines, [`ERROR: ${GONE}`], undefined);
+  assert.deepEqual(none.skipped, swallowed, 'no report');
+  assert.deepEqual(
+    bothToolsRead(lines, [`ERROR: ${GONE}`], { cases: new Map(), suites: new Map() }),
+    none,
+    'a report with no skips',
+  );
+  assert.deepEqual(
+    bothToolsRead(lines, [`ERROR: ${GONE}`], reasonsReported([['test_other', 'elsewhere']])),
+    none,
+    'a report naming another case',
+  );
+}
+
+/** Where the report and the console disagree on a reason, the report's is read and its lines are the reason's. */
+function testAReportedSkipReasonWinsOverTheConsole(): void {
+  const reason = 'from the report\nand its second line';
+  const read = bothToolsRead(
+    printedSkips([['test_skip', "from the console\nERROR: and the engine's line"]]).split('\n'),
+    [],
+    reasonsReported([['test_skip', reason]]),
+  );
+  assert.deepEqual([read.skipped, read.errors, read.engineErrors], [[{ name: 'test_skip', reason }], [], 0]);
+}
+
+/** A skip the console never printed is left to the report's readers, and the reverse is read off the console. */
+function testASkipOnlyTheReportOrTheConsoleHoldsIsReadAsBefore(): void {
+  const lines = printedSkips([['test_skip', 'only the console']]).split('\n');
+  const reportOnly = reasonsReported([['test_ghost', 'only the report']]);
+  assert.deepEqual(
+    bothToolsRead(lines, [], reportOnly),
+    bothToolsRead(lines, [], undefined),
+    'the console only',
+  );
+  const quiet = printedSkips([]).split('\n');
+  const ghost = bothToolsRead(quiet, [], reportOnly, {}, ['test_ok']);
+  assert.deepEqual([ghost.skipped, ghost.faults], [[], []], 'the report only');
+}
+
+/** A suite skipped whole with an apostrophe in its reason is read from the report, whatever follows it. */
+function testAWholeSuiteSkipReasonReadsFromTheReport(): void {
+  const reason = "can't run";
+  const lines = [
+    `Run Test Suite: ${REASONS_SUITE}`,
+    `  ${REASONS_SUITE} > test_ok STARTED`,
+    `  ${REASONS_SUITE} > test_ok PASSED 0ms`,
+    '  Report:',
+    '  This test is skipped!',
+    "  Reason: 'Skipped from the entire test suite'",
+    `  ${REASONS_SUITE} > finalize()  Report:`,
+    '  The Entire test-suite is skipped!',
+    '  Skipped 1 tests',
+    `  Reason: '${reason}'`,
+    '',
+    `ERROR: ${GONE}`,
+    STATISTICS_LINE,
+  ];
+  const reported = reportedFrom([
+    parseJUnit(
+      reportedSkips([['test_ok', reason]]).replace(
+        '<testcase name="test_ok" classname="reasons_test" time="0.012">\n\t\t</testcase>',
+        '',
+      ),
+    ),
+  ]);
+  const read = bothToolsRead(lines, [`ERROR: ${GONE}`], reported, {}, ['test_ok']);
+  assert.deepEqual([read.skipped, read.errors, read.engineErrors], [[{ name: null, reason }], [GONE], 1]);
+}
+
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
@@ -2134,4 +2344,11 @@ testAnErrorLineInsideASkipReasonIsNoEngineError();
 testARealSkipReasonsErrorLineLeavesTheEngineEntries();
 testAnAfterHooksLinesAreNoPartOfASkippedLastCasesReason();
 testASkipReasonEndsAtTheNextCaseOrItsSuitesEnd();
+testAnApostropheInASkipReasonLeavesTheAfterErrorToTheEngine();
+testASkipReasonWhoseFirstLineEndsInAQuoteIsBothLines();
+testAPairedSkipReasonReadsAsTheConsoleReadsIt();
+testARunWithNoReportReadsItsSkipReasonsFromTheConsole();
+testAReportedSkipReasonWinsOverTheConsole();
+testASkipOnlyTheReportOrTheConsoleHoldsIsReadAsBefore();
+testAWholeSuiteSkipReasonReadsFromTheReport();
 console.log('junit reader tests passed');

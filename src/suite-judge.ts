@@ -28,7 +28,14 @@ import {
   type Severity,
   suiteOpenedBy,
 } from './game-log.js';
-import { DiscoveryRead, type OrphansLeft, orphansLeftOn, orphansLeftSaid } from './junit.js';
+import {
+  DiscoveryRead,
+  type OrphansLeft,
+  orphansLeftOn,
+  orphansLeftSaid,
+  type ReportedSkips,
+  skipKey,
+} from './junit.js';
 import { bytesAt, eachLogLine, owned } from './log-read.js';
 import { isRecord, isStringList } from './records.js';
 
@@ -267,7 +274,7 @@ function rowRuns(share: RowShare, row: number | null): boolean {
 }
 
 /** [param printed], both streams in the order they came, read into suites, cases and errors. */
-export function readRun(printed: string): RunPrinted {
+export function readRun(printed: string, reported?: ReportedSkips): RunPrinted {
   const lines = stripVTControlCharacters(printed).replaceAll('\r\n', '\n').split('\n');
   const {
     lineCount: _lineCount,
@@ -275,7 +282,7 @@ export function readRun(printed: string): RunPrinted {
     judged: _judged,
     declaredErrors: _declaredErrors,
     ...read
-  } = readRunLines(lines, Infinity);
+  } = readRunLines(lines, Infinity, undefined, reported);
   return { lines, ...read };
 }
 
@@ -352,6 +359,7 @@ function readRunLines(
   source: Iterable<string>,
   errorsKept: number,
   expected: Expected = { errors: {}, warnings: {} },
+  reported?: ReportedSkips,
 ): RunRead & Pick<LogRead, 'judged' | 'declaredErrors'> {
   const lines = new LinesAhead(source[Symbol.iterator]());
   const state: RunState = {
@@ -380,6 +388,8 @@ function readRunLines(
     reusedCompiledSeconds: null,
     reasonEnds: -1,
     reasonHeadlines: new Map(),
+    reported,
+    reportedUsed: new Map(),
   };
   const discovery = new DiscoveryRead();
   const starved = new StarvedRead();
@@ -571,6 +581,10 @@ interface RunState {
   reasonEnds: number;
   /** The lines of skip reasons read as headlines, by severity and text. */
   readonly reasonHeadlines: Map<string, ReasonHeadline>;
+  /** What the run's report holds for its skipped cases, which says where a reason ends. */
+  readonly reported: ReportedSkips | undefined;
+  /** How many of a case's or suite's reasons in the report the console's skips have taken. */
+  readonly reportedUsed: Map<string, number>;
 }
 
 /** Reads one printed line into the state, and says whether it did. */
@@ -731,9 +745,14 @@ function readSkipHeading(
     return false;
   }
   const count = whole ? SUITE_SKIPPED_COUNT.exec(state.lines.at(at + 1) ?? '')?.[1] : '1';
-  const said = count === undefined ? null : skipReasonAt(state.lines, whole ? at + 2 : at + 1);
+  const reported = reportedFor(state, suite, lastCase, whole, whole ? at + 2 : at + 1);
+  const said =
+    count === undefined ? null : skipReasonAt(state.lines, whole ? at + 2 : at + 1, reported?.reason);
   if (said === null) {
     return true;
+  }
+  if (reported !== undefined) {
+    state.reportedUsed.set(reported.key, reported.used + 1);
   }
   state.reasonEnds = said.ends;
   const cut = said.cut ? { cut: true as const } : {};
@@ -743,6 +762,50 @@ function readSkipHeading(
     state.skipped.push({ suite, name: lastCase, reason: said.reason, cases: 1, ...cut });
   }
   return true;
+}
+
+/** The reason the report holds for the skip whose reason line is at [param at], if any. */
+function reportedFor(
+  state: RunState,
+  suite: string,
+  lastCase: string,
+  whole: boolean,
+  at: number,
+): ReportedReason | undefined {
+  const first = SKIP_REASON.exec(state.lines.at(at) ?? '')?.[1]?.trimEnd();
+  if (first === `${SKIPPED_WITH_ITS_SUITE}'`) {
+    return undefined;
+  }
+  return whole ? reportedForSuite(state, suite) : reportedForCase(state, suite, lastCase);
+}
+
+interface ReportedReason {
+  readonly reason: string;
+  readonly key: string;
+  readonly used: number;
+}
+
+/** The next reason the report holds for [param name] of [param suite], which the console has not taken. */
+function reportedForCase(state: RunState, suite: string, name: string): ReportedReason | undefined {
+  const key = skipKey(suite, name);
+  const used = state.reportedUsed.get(key) ?? 0;
+  const reason = state.reported?.cases.get(key)?.[used];
+  return reason === undefined ? undefined : { reason, key, used };
+}
+
+/**
+ * The reason the report holds for a [param suite] skipped whole, when every one of its skipped cases
+ * has it. A case reads the suite's reason as {@link SKIPPED_WITH_ITS_SUITE} under it, which is no
+ * reason the suite gave.
+ */
+function reportedForSuite(state: RunState, suite: string): ReportedReason | undefined {
+  const reasons = state.reported?.suites.get(suite);
+  const [reason] = reasons ?? [];
+  if (reason === undefined || reason === SKIPPED_WITH_ITS_SUITE || reasons?.some((one) => one !== reason)) {
+    return undefined;
+  }
+  const key = JSON.stringify([suite]);
+  return { reason, key, used: state.reportedUsed.get(key) ?? 0 };
 }
 
 /**
@@ -765,16 +828,44 @@ function entryEnds(line: string): boolean {
  * quote, since a line of the reason can end in a quote with a blank line under it. With no such
  * line it is cut, and only its first line is surely the reason's: the lines after it are read as
  * they would be without it, the engine's last errors included.
+ *
+ * A [param reported] reason, the one gdUnit4's report holds for the skip, is the reason whatever
+ * the console makes of it, and covers as many lines as it has, fewer where gdUnit4's own output
+ * ends the entry sooner.
  */
 function skipReasonAt(
   lines: RunState['lines'],
   at: number,
+  reported?: string,
 ): { reason: string; ends: number; cut: boolean } | null {
   const first = lines.at(at) ?? '';
   const opened = SKIP_REASON.exec(first)?.[1];
   if (opened === undefined || UNRUNNABLE_CASE.test(first) || MISMATCHED_ROW.test(lines.at(at + 1) ?? '')) {
     return null;
   }
+  if (reported !== undefined) {
+    return { reason: reported, ends: reportedEnds(lines, at, reported), cut: false };
+  }
+  return consoleReasonAt(lines, at, opened);
+}
+
+/** The last line a [param reported] reason covers from [param at], where the entry has not ended sooner. */
+function reportedEnds(lines: RunState['lines'], at: number, reported: string): number {
+  const length = reported.split('\n').length;
+  let ends = at;
+  for (let next = lines.at(ends + 1); ends - at + 1 < length && next !== undefined && !entryEnds(next); ) {
+    ends += 1;
+    next = lines.at(ends + 1);
+  }
+  return ends;
+}
+
+/** The reason the console alone shows from [param at], whose first line after the opening quote is [param opened]. */
+function consoleReasonAt(
+  lines: RunState['lines'],
+  at: number,
+  opened: string,
+): { reason: string; ends: number; cut: boolean } {
   const alone = opened.trimEnd();
   if (alone.endsWith("'") && alone.split("'").length % 2 === 0) {
     return { reason: alone.slice(0, -1), ends: at, cut: false };
@@ -948,15 +1039,22 @@ const NESTED_ERROR = 'While attempting to print an error, another error was prin
  * is an empty run. [param nested] are the errors Godot raised while printing another, which
  * {@link nestedError} finds in the piped streams, added as {@link withNestedErrors} adds them.
  * Every error is judged against [param expected] as it is read. [param chunkBytes] is how much is
- * read at once.
+ * read at once. A skip reason [param reported] holds is the one read, whatever the log's lines make
+ * of it.
  */
 export function readEngineLog(
   path: string,
   nested: readonly string[],
   expected: Expected,
   chunkBytes?: number,
+  reported?: ReportedSkips,
 ): LogRead {
-  const read = readRunLines(existsSync(path) ? eachLogLine(path, chunkBytes) : [''], ERRORS_KEPT, expected);
+  const read = readRunLines(
+    existsSync(path) ? eachLogLine(path, chunkBytes) : [''],
+    ERRORS_KEPT,
+    expected,
+    reported,
+  );
   const added = nested.map((text) => ({
     text,
     at: read.lineCount,
