@@ -235,6 +235,7 @@ import {
   type orphansPrinted,
   type PrintedDiff,
   parseJUnit,
+  reportedSkips,
   type ScriptError,
   SuiteDiffs,
   skippedInReport,
@@ -443,9 +444,11 @@ import {
   pushErrorsFailedSentence,
   readEngineLog,
   readExpected,
+  reasonHeadlinesOf,
   SuiteCuts,
   suiteNotRunFault,
   uncollectedSaid,
+  withoutReasonHeadlines,
 } from './suite-judge.js';
 import {
   capsFrames,
@@ -5771,8 +5774,11 @@ interface TestAnswer extends TestErrorsJudged {
   declaredAs: string;
   rowsMismatched: { test: string; reason: string }[];
   casesUnrunnable: { test: string; reason: string }[];
-  /** The cases, rows and suites skipped with do_skip, and how many cases never ran for it. */
-  casesSkipped: { test: string; reason: string; cases?: number }[];
+  /**
+   * The cases, rows and suites skipped with do_skip, how many cases never ran for it, and `cut` where
+   * the reason was cut off.
+   */
+  casesSkipped: { test: string; reason: string; cases?: number; cut?: true }[];
   engineEntriesShown: ReturnType<typeof foldedRepeats>;
 }
 
@@ -10783,7 +10789,46 @@ export class GodotServer {
     // A run on a quiet project took nine minutes once, with no import and two seconds of suites, and
     // nothing in the answer said which step the time went to.
     const declaredErrors = readExpected(expectedFile);
-    const casePrinted = readEngineLog(engineLog, tally.nested, declaredErrors);
+    // Read again once the run is over, so a run that ended between two looks answers as one that
+    // was stopped: whether it got through its suites first is a race, and what they said about
+    // code that did not compile is not an answer either way.
+    const notCompiled = stopped.for ?? tally.notCompiled;
+
+    const reportsDir = join(project.value.path, '.godot', ...ours.split('/'));
+    let report: TestReport | null = null;
+    let reportProblem: string | null = null;
+    let casePrinted: LogRead;
+    try {
+      try {
+        const written =
+          existsSync(reportsDir) && notCompiled === null
+            ? readdirSync(reportsDir)
+                .filter((name) => name.startsWith('report_'))
+                .toSorted((a, b) => Number(a.slice('report_'.length)) - Number(b.slice('report_'.length)))
+            : [];
+        const newest = written.at(-1);
+        if (newest !== undefined) {
+          report = parseJUnit(readFileSync(join(reportsDir, newest, 'results.xml'), 'utf8'));
+        }
+      } catch (error) {
+        reportProblem = errorMessage(error);
+      }
+      // Read after the report, which holds the skip reasons the console cannot always end, and before
+      // the folder the log is in is discarded.
+      const reported = report === null ? undefined : reportedSkips([report]);
+      casePrinted = readEngineLog(engineLog, tally.nested, declaredErrors, undefined, reported);
+    } finally {
+      discard(reportsDir, userData);
+      // The directory the runs share goes with the last report in it, so a project that has
+      // been tested is left as it was found. A run still writing beside this one keeps it full,
+      // and a removal that fails for that reason is the answer wanted.
+      try {
+        rmdirSync(dirname(reportsDir));
+      } catch {
+        // Not empty, or already gone: either way it is not this run's to take.
+      }
+    }
+
     const { started } = casePrinted;
     const tookMsBy = {
       classes: rebuiltAt - began,
@@ -10798,38 +10843,6 @@ export class GodotServer {
             engineCompile: Math.round(started.compiledSeconds * 1000),
           }),
     };
-    // Read again once the run is over, so a run that ended between two looks answers as one that
-    // was stopped: whether it got through its suites first is a race, and what they said about
-    // code that did not compile is not an answer either way.
-    const notCompiled = stopped.for ?? tally.notCompiled;
-
-    const reportsDir = join(project.value.path, '.godot', ...ours.split('/'));
-    let report: TestReport | null = null;
-    let reportProblem: string | null = null;
-    try {
-      const written =
-        existsSync(reportsDir) && notCompiled === null
-          ? readdirSync(reportsDir)
-              .filter((name) => name.startsWith('report_'))
-              .toSorted((a, b) => Number(a.slice('report_'.length)) - Number(b.slice('report_'.length)))
-          : [];
-      const newest = written.at(-1);
-      if (newest !== undefined) {
-        report = parseJUnit(readFileSync(join(reportsDir, newest, 'results.xml'), 'utf8'));
-      }
-    } catch (error) {
-      reportProblem = errorMessage(error);
-    } finally {
-      discard(reportsDir, userData);
-      // The directory the runs share goes with the last report in it, so a project that has
-      // been tested is left as it was found. A run still writing beside this one keeps it full,
-      // and a removal that fails for that reason is the answer wanted.
-      try {
-        rmdirSync(dirname(reportsDir));
-      } catch {
-        // Not empty, or already gone: either way it is not this run's to take.
-      }
-    }
 
     return await this.testJudged({
       ...ran,
@@ -10868,12 +10881,12 @@ export class GodotServer {
 
   /** A test run's engine log and console judged: what it printed, how it exited and what the verdict is. */
   private async testJudged(read: TestReadOut): Promise<ToolResponse> {
-    const { run, asked, timedOut, capped, engine, project, notCompiled, report, tally } = read;
+    const { run, asked, timedOut, capped, engine, project, notCompiled, report, tally, casePrinted } = read;
     // An engine ended for printing too much is judged as one cut off by the limit.
     const cutOff = timedOut || capped !== null;
     // A verbose run's additions are ordinary lines, the leaked instances and the resources still in
     // use at exit among them, and they are what the flag was passed for. The tally took them so.
-    const engineEntries = tally.engine.result();
+    const engineEntries = withoutReasonHeadlines(tally.engine.result(), casePrinted.reasonHeadlines);
     const verdicts: Readonly<Record<number, string>> = {
       0: 'passed',
       100: failedVerdict(report),
@@ -11366,11 +11379,12 @@ export class GodotServer {
       casePrinted.skipped.filter((one) => one.name === null).map((one) => one.suite),
     );
     const casesSkipped = [
-      ...casePrinted.skipped.map((one) =>
-        one.name === null
+      ...casePrinted.skipped.map((one) => ({
+        ...(one.name === null
           ? { test: one.suite, reason: one.reason, cases: one.cases }
-          : { test: `${one.suite} > ${one.name}`, reason: one.reason },
-      ),
+          : { test: `${one.suite} > ${one.name}`, reason: one.reason }),
+        ...(one.cut === true ? { cut: one.cut } : {}),
+      })),
       ...skippedInReport(report)
         .filter((one) => !consoleSkipped.has(`${one.suite} > ${one.name}`) && !skippedWhole.has(one.suite))
         .map((one) => ({ test: `${one.suite} > ${one.name}`, reason: one.reason })),
@@ -11781,9 +11795,16 @@ export class GodotServer {
         time: suite.time,
       })),
       suitesPassed: report.suites.length - unclean.length,
-      // Less the ones a suite declared and printed, which are the run going as written.
-      engineErrors: Math.max(0, run.log.count('error') - declaredAndPrinted),
-      engineWarnings: run.log.count('warning'),
+      // Less the ones a suite declared and printed, which are the run going as written, and the
+      // lines of skip reasons, which gdUnit4 printed as text.
+      engineErrors: Math.max(
+        0,
+        run.log.count('error') - declaredAndPrinted - reasonHeadlinesOf(casePrinted.reasonHeadlines, 'error'),
+      ),
+      engineWarnings: Math.max(
+        0,
+        run.log.count('warning') - reasonHeadlinesOf(casePrinted.reasonHeadlines, 'warning'),
+      ),
       // An entry already under uncaughtScriptErrors is named here without its detail again: a stack
       // overflow's backtrace is most of an answer, and it was carried twice.
       engineEntries: engineEntriesShown.map((entry) =>

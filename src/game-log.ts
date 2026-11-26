@@ -155,7 +155,7 @@ const CRASH_FILLER = /^(?:=+|-- END OF .* BACKTRACE --|\[\d+\] .* - no debug inf
 export const CONTROL_SEQUENCE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;?]*[A-Za-z]`, 'g');
 
 /** The severity a headline announces, or null for a line that announces nothing. */
-function announced(line: string): { severity: Severity; text: string; byScript: boolean } | null {
+export function announced(line: string): { severity: Severity; text: string; byScript: boolean } | null {
   const match = HEADLINE.exec(line);
   if (!match) {
     return null;

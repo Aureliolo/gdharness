@@ -54,6 +54,7 @@ import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE, GameLog } from './game-log.js';
 import { type ImportOutcome, runImport } from './headless.js';
 import { staleImports } from './import-freshness.js';
+import { parseJUnit, type ReportedSkips, reportedSkips, type TestReport } from './junit.js';
 import { ENGINE_ARG_SPELLING, engineFlagsRefusal, hiddenWindowFlags, wholeFlag } from './launch.js';
 import { unlistedExtensions } from './library-copies.js';
 import { cannotOpen } from './listed-reads.js';
@@ -2325,7 +2326,6 @@ function shareArguments(plan: EnginePlan, files: EngineFiles): string[] {
     '--rows-in',
     files.rows,
     '--html-report-off',
-    '--junit-report-off',
     '--compile-together',
     '--expected-out',
     files.expected,
@@ -2511,7 +2511,8 @@ function judgedShare(launch: Launch, share: ShareRun, log: string, end: EngineEn
   if (log !== shareLog) {
     writeFileSync(shareLog, shareText(log, share.from, to));
   }
-  const printed = readRun(readLog(shareLog));
+  const { reported, read } = reportedBy(share.reports, share.reportsBefore);
+  const printed = readRun(readLog(shareLog), reported);
   const assignment: EngineAssignment = {
     suites: share.plan.suites,
     expected: readExpected(share.files.expected),
@@ -2520,7 +2521,7 @@ function judgedShare(launch: Launch, share: ShareRun, log: string, end: EngineEn
     failsOnPushErrors: launch.failsOnPushErrors,
   };
   const judged = judgeEngine(printed, assignment, end);
-  const written = reportsFault(share.reports, share.reportsBefore);
+  const written = reportsFault(share.reports, new Map([...share.reportsBefore, ...read]));
   return {
     index: share.index,
     plan: share.plan,
@@ -2535,6 +2536,34 @@ function judgedShare(launch: Launch, share: ShareRun, log: string, end: EngineEn
     priority: end.priority ?? null,
   };
 }
+
+/**
+ * The skip reasons in the JUnit reports gdUnit4 wrote into [param reports] since [param known], with
+ * the files they were read from. The reasons are undefined where it wrote none, as an engine that
+ * ended before its reports does. A report that does not parse is left out, and its skips are read
+ * from the console.
+ */
+function reportedBy(
+  reports: string,
+  known: ReadonlyMap<string, string>,
+): { readonly reported: ReportedSkips | undefined; readonly read: ReadonlyMap<string, string> } {
+  const parsed: TestReport[] = [];
+  const read = new Map<string, string>();
+  for (const [file, seen] of reportFiles(reports)) {
+    if (known.get(file) !== seen && basename(file) === JUNIT_FILE) {
+      read.set(file, seen);
+      try {
+        parsed.push(parseJUnit(readFileSync(join(reports, file), 'utf8')));
+      } catch {
+        // Not a report gdUnit4 finished writing.
+      }
+    }
+  }
+  return { reported: parsed.length === 0 ? undefined : reportedSkips(parsed), read };
+}
+
+/** The file gdUnit4 writes its JUnit report to, in a folder of its own under the reports folder. */
+const JUNIT_FILE = 'results.xml';
 
 /** The files under [param reports] by path inside it, sorted, with their size and time of change. */
 function reportFiles(reports: string): ReadonlyMap<string, string> {
@@ -2556,9 +2585,10 @@ const REPORT_FILES_NAMED = 3;
 
 /**
  * What fails an engine that wrote a file into [param reports], the folder its gdUnit4 reports go to,
- * or null when it wrote none. The runner turns off both reports by marking their session hooks, so a
- * file there means the gdUnit4 installed no longer reads that mark: every run then writes reports it
- * was told not to, and the hook the runner reads the registration of is no proof of it.
+ * or null when it wrote none. The runner turns off the HTML report by marking its session hook, so a
+ * file there means the gdUnit4 installed no longer reads that mark: every run then writes a report it
+ * was told not to, and the hook the runner reads the registration of is no proof of it. The files in
+ * [param known] are not counted, which include the JUnit reports {@link reportedBy} read.
  */
 export function reportsFault(reports: string, known: ReadonlyMap<string, string> = new Map()): string | null {
   const files = [...reportFiles(reports)]

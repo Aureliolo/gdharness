@@ -5,6 +5,10 @@
  */
 
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { type FoldedEntry, GameLog } from '../src/game-log.js';
 import {
   BOTH_SIDES_ALIKE_NOTE,
   failedCases,
@@ -20,6 +24,8 @@ import {
   orphansPrinted,
   parseJUnit,
   RENDERED_AWAY_NOTE,
+  type ReportedSkips,
+  reportedSkips as reportedFrom,
   rowsIgnoredIn,
   SuiteDiffs,
   scriptErrorsPrinted,
@@ -30,6 +36,16 @@ import {
   whyNoReport,
   withActualsPrinted,
 } from '../src/junit.js';
+import {
+  casesRan,
+  type Expected,
+  judgeEngine,
+  readEngineLog,
+  readRun,
+  reasonHeadlinesOf,
+  withoutReasonHeadlines,
+} from '../src/suite-judge.js';
+import { TestRunTally } from '../src/test-tally.js';
 
 /** What gdUnit4 printed for a run pointed at a directory that is not there, as it printed it. */
 const NOTHING_THERE = [
@@ -1550,6 +1566,796 @@ function testTheDiffsHoldNoTextOnceNoDiffIsOpen(): void {
   }
 }
 
+/**
+ * A skip reason holding line breaks and quotes, as gdUnit4 writes it in the report, is read whole:
+ * it runs to the entry's last quote.
+ */
+function testASkipReasonOverSeveralLinesIsReadWhole(): void {
+  const skipped = (name: string, line: number, reason: string): string =>
+    `\t\t<testcase name="${name}" classname="lines_skip_test" time="0.000">\n\t\t\t<skipped message="SKIPPED: res://test/lines_skip_test.gd:${String(line)}">\n<![CDATA[\nThis test is skipped!\n  Reason: '${reason}'\n]]>\n\t\t\t</skipped>\n\t\t</testcase>\n`;
+  const reasons = [
+    ['test_two_lines', 6, 'line one\nline two'],
+    ['test_ends_in_quote', 9, "it is 'done'"],
+    ['test_quote_alone', 12, "first\n'\nlast"],
+    ['test_quote_ends_line', 15, "said 'no'\nthen left"],
+  ] as const;
+  const report = parseJUnit(
+    `<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-11-23" name="report_1" tests="6" failures="0" skipped="4" flaky="0" time="0.000">
+\t<testsuite id="0" name="lines_skip_test" package="test" timestamp="2026-11-23T05:57:44" hostname="localhost" tests="6" failures="0" errors="0" skipped="4" flaky="0" time="0.448">
+\t\t<testcase name="test_ok" classname="lines_skip_test" time="0.026">
+\t\t</testcase>
+${reasons.map(([name, line, reason]) => skipped(name, line, reason)).join('')}\t\t<testcase name="test_after" classname="lines_skip_test" time="0.026">
+\t\t</testcase>
+\t</testsuite>
+</testsuites>
+`,
+  );
+  assert.deepEqual(
+    skippedInReport(report),
+    reasons.map(([name, , reason]) => ({ suite: 'res://test/lines_skip_test.gd', name, reason })),
+  );
+}
+
+const REASONS_SUITE = 'res://test/reasons_test.gd';
+
+/** What the report of a run holds when it names none of the run's skips, whose reasons only the console holds. */
+const NOT_REPORTED = reportedFrom([]);
+
+/**
+ * The console of a suite as gdUnit4 printed it: a case that ran, then each of [param skips] skipped
+ * with do_skip and its reason. [param ending] follows the last skip's reason line, gdUnit4's own end
+ * of the suite unless given.
+ */
+function printedSkips(
+  skips: readonly (readonly [name: string, reason: string])[],
+  ending?: readonly string[],
+): string {
+  const ran = 1;
+  const total = ran + skips.length;
+  const summary = `${String(total)} test cases | 0 errors | 0 failures | 0 flaky | ${String(skips.length)} skipped | 0 orphans |`;
+  return [
+    `Run Test Suite: ${REASONS_SUITE}`,
+    `  ${REASONS_SUITE} > test_ok STARTED`,
+    `  ${REASONS_SUITE} > test_ok PASSED 12ms`,
+    '',
+    ...skips.flatMap(([name, reason], at) => [
+      `  ${REASONS_SUITE} > ${name} STARTED`,
+      `  ${REASONS_SUITE} > ${name} PASSED 0ms`,
+      '  Report:',
+      '  This test is skipped!',
+      ...`  Reason: '${reason}'`.split('\n'),
+      ...(at === skips.length - 1 && ending !== undefined ? [] : ['', '']),
+    ]),
+    ...(ending ?? [
+      `Statistics: ${summary} PASSED 12ms`,
+      '',
+      '',
+      `Overall Summary: ${summary}`,
+      'Executed test suites: (1/1)',
+      `Executed test cases : (${String(ran)}/${String(total)}), ${String(skips.length)} skipped`,
+    ]),
+  ].join('\n');
+}
+
+/** What gdharness test finds in [param printed], handed the cases of {@link printedSkips}. */
+function skipFaults(printed: ReturnType<typeof readRun>, names: readonly string[]): readonly string[] {
+  return judgeEngine(
+    printed,
+    {
+      suites: [{ path: REASONS_SUITE, cases: ['test_ok', ...names] }],
+      expected: { errors: {}, warnings: {} },
+    },
+    { code: 0, signal: null, ended: null },
+  ).faults;
+}
+
+/** The fault gdharness test gives a case skipped with [param reason]. */
+function skipFault(name: string, reason: string): string {
+  return `${REASONS_SUITE} > ${name} never ran: gdUnit4 skipped it, saying "${reason}"`;
+}
+
+/**
+ * The lines of a skip reason are its text: a line of it that reads as an engine warning is no
+ * warning, and the reason is listed whole.
+ */
+function testTheLinesOfASkipReasonAreReadOnlyAsItsText(): void {
+  const reason = 'waits\nWARNING: a line of the reason';
+  const printed = readRun(printedSkips([['test_waits', reason]]), NOT_REPORTED);
+  assert.deepEqual(printed.skipped, [{ suite: REASONS_SUITE, name: 'test_waits', reason, cases: 1 }]);
+  assert.deepEqual(skipFaults(printed, ['test_waits']), [skipFault('test_waits', reason)]);
+}
+
+/** A skip reason over several lines on the last lines of the output is read whole, not cut. */
+function testASkipReasonEndingTheOutputIsReadWhole(): void {
+  const reason = 'line one\nline two';
+  const printed = readRun(printedSkips([['test_last', reason]], []), NOT_REPORTED);
+  assert.deepEqual(printed.skipped, [{ suite: REASONS_SUITE, name: 'test_last', reason, cases: 1 }]);
+  assert.equal(casesRan(printed), 1);
+  assert.deepEqual(skipFaults(printed, ['test_last']), [
+    'the run never printed its summary',
+    skipFault('test_last', reason),
+    `${REASONS_SUITE} never finished`,
+  ]);
+}
+
+/**
+ * A skip reason the output ends in before its closing quote is listed by its first line, and
+ * gdharness test says it was cut off. The lines after it are read as any others, so an error the
+ * engine printed last is still found. The case is not counted as ran.
+ */
+function testASkipReasonTheOutputCutOffIsSaidToBeCut(): void {
+  const printed = readRun(
+    [
+      `Run Test Suite: ${REASONS_SUITE}`,
+      `  ${REASONS_SUITE} > test_cut STARTED`,
+      `  ${REASONS_SUITE} > test_cut PASSED 0ms`,
+      '  Report:',
+      '  This test is skipped!',
+      "  Reason: 'line one",
+      'line tw',
+      'ERROR: the engine stopped here',
+    ].join('\n'),
+    NOT_REPORTED,
+  );
+  assert.deepEqual(
+    [printed.skipped, printed.errors.map((one) => one.text)],
+    [
+      [{ suite: REASONS_SUITE, name: 'test_cut', reason: 'line one', cases: 1, cut: true }],
+      ['the engine stopped here'],
+    ],
+  );
+  assert.equal(casesRan(printed), 0);
+  assert.deepEqual(
+    judgeEngine(
+      printed,
+      { suites: [{ path: REASONS_SUITE, cases: ['test_cut'] }], expected: { errors: {}, warnings: {} } },
+      { code: 0, signal: null, ended: null },
+    ).faults,
+    [
+      'the run never printed its summary',
+      `${REASONS_SUITE} > test_cut never ran: gdUnit4 skipped it, saying "line one" before the reason was cut off`,
+      `${REASONS_SUITE} never finished`,
+      `an engine error in ${REASONS_SUITE} > after: the engine stopped here. If the suite prints it on purpose, list its text under "after" in the suite's GDHARNESS_EXPECTED_ERRORS`,
+    ],
+  );
+}
+
+/** gdharness test says a suite skipped whole was cut off when its reason was. */
+function testAWholeSuiteSkipReasonTheOutputCutOffIsSaidToBeCut(): void {
+  const printed = readRun(
+    [
+      `Run Test Suite: ${REASONS_SUITE}`,
+      `  ${REASONS_SUITE} > test_ok STARTED`,
+      `  ${REASONS_SUITE} > test_ok PASSED 0ms`,
+      '  Report:',
+      '  This test is skipped!',
+      "  Reason: 'Skipped from the entire test suite'",
+      `  ${REASONS_SUITE} > finalize()  Report:`,
+      '  The Entire test-suite is skipped!',
+      '  Skipped 1 tests',
+      "  Reason: 'line one",
+      'line tw',
+    ].join('\n'),
+    NOT_REPORTED,
+  );
+  assert.deepEqual(printed.skipped, [
+    { suite: REASONS_SUITE, name: null, reason: 'line one', cases: 1, cut: true },
+  ]);
+  assert.ok(
+    skipFaults(printed, []).includes(
+      `${REASONS_SUITE} never ran its one case: gdUnit4 skipped the whole suite, saying "line one" before the reason was cut off`,
+    ),
+    skipFaults(printed, []).join('\n'),
+  );
+}
+
+/**
+ * gdUnit4 prints the heading of a suite skipped whole only after each of its cases, so the same
+ * lines printed before any case, as the suite's own text, are no skip.
+ */
+function testAWholeSuiteHeadingBeforeAnyCaseIsNoSkip(): void {
+  const printed = readRun(
+    printedSkips([]).replace(
+      `Run Test Suite: ${REASONS_SUITE}`,
+      [
+        `Run Test Suite: ${REASONS_SUITE}`,
+        '  The Entire test-suite is skipped!',
+        '  Skipped 1 tests',
+        "  Reason: 'printed by the suite'",
+        '',
+      ].join('\n'),
+    ),
+    NOT_REPORTED,
+  );
+  assert.deepEqual([printed.skipped, casesRan(printed), skipFaults(printed, [])], [[], 1, []]);
+}
+
+/** The report gdUnit4 writes for the cases of [param skips], each under its skip as it writes it. */
+function reportedSkips(skips: readonly (readonly [name: string, reason: string])[]): string {
+  const entries = skips.map(
+    ([name, reason]) =>
+      `\t\t<testcase name="${name}" classname="reasons_test" time="0.000">\n\t\t\t<skipped message="SKIPPED: ${REASONS_SUITE}:9">\n<![CDATA[\nThis test is skipped!\n  Reason: '${reason}'\n]]>\n\t\t\t</skipped>\n\t\t</testcase>\n`,
+  );
+  const total = String(skips.length + 1);
+  const skipped = String(skips.length);
+  return `<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-11-23" name="report_1" tests="${total}" failures="0" skipped="${skipped}" flaky="0" time="0.000">
+\t<testsuite id="0" name="reasons_test" package="test" tests="${total}" failures="0" errors="0" skipped="${skipped}" flaky="0" time="0.012">
+\t\t<testcase name="test_ok" classname="reasons_test" time="0.012">
+\t\t</testcase>
+${entries.join('')}\t</testsuite>
+</testsuites>
+`;
+}
+
+/**
+ * A reason with a line ending in a quote and a blank line under it, as do_skip(true, "said 'no'\n\nthen
+ * left") gives, is read whole off the console, as the report's reader reads it.
+ */
+function testAQuoteBeforeABlankLineInASkipReasonIsReadAsTheReportReadsIt(): void {
+  const skips = [
+    ['test_quote_blank', "said 'no'\n\nthen left"],
+    ['test_quote_alone', "first\n'\n\nlast"],
+    ['test_after', 'after'],
+  ] as const;
+  const printed = readRun(printedSkips(skips), NOT_REPORTED);
+  const listed = skips.map(([name, reason]) => ({ suite: REASONS_SUITE, name, reason }));
+  assert.deepEqual(skippedInReport(parseJUnit(reportedSkips(skips))), listed, 'the report');
+  assert.deepEqual(
+    printed.skipped,
+    listed.map((one) => ({ ...one, cases: 1 })),
+    'the console',
+  );
+  assert.deepEqual(
+    skipFaults(
+      printed,
+      skips.map(([name]) => name),
+    ),
+    skips.map(([name, reason]) => skipFault(name, reason)),
+  );
+}
+
+/**
+ * A skip reason ends at the next case and at its suite's statistics: an error ending in a quote
+ * that the next case prints, or the next suite's before(), is theirs, not a line of the reason.
+ */
+function testASkipReasonEndsAtTheNextCaseOrItsSuitesEnd(): void {
+  const missing = "could not load 'res://data/missing.tres'";
+  const nextCase = readRun(
+    printedSkips(
+      [['test_skip', 'skip']],
+      [
+        '',
+        '',
+        `  ${REASONS_SUITE} > test_next STARTED`,
+        `ERROR: ${missing}`,
+        `  ${REASONS_SUITE} > test_next PASSED 3ms`,
+      ],
+    ),
+  );
+  assert.deepEqual(
+    [nextCase.skipped, nextCase.errors.map((one) => [one.suite, one.during, one.text])],
+    [
+      [{ suite: REASONS_SUITE, name: 'test_skip', reason: 'skip', cases: 1 }],
+      [[REASONS_SUITE, 'test_next', missing]],
+    ],
+    'the next case',
+  );
+  const next = 'res://test/next_test.gd';
+  const printed = readRun(
+    printedSkips(
+      [['test_last', 'last']],
+      [
+        '',
+        '',
+        'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans | PASSED 12ms',
+        '',
+        '',
+        `Run Test Suite: ${next}`,
+        `ERROR: ${missing}`,
+        `  ${next} > test_next STARTED`,
+        `  ${next} > test_next PASSED 3ms`,
+      ],
+    ),
+  );
+  assert.deepEqual(
+    [printed.skipped, printed.errors.map((one) => [one.suite, one.during, one.text])],
+    [[{ suite: REASONS_SUITE, name: 'test_last', reason: 'last', cases: 1 }], [[next, 'before', missing]]],
+    'the next suite',
+  );
+}
+
+/** A reason line starting `ERROR:` is part of the reason, and adds no engine error. */
+function testAnErrorLineInsideASkipReasonIsNoEngineError(): void {
+  const skips = [['test_boom', 'boom\nERROR: not an engine error']] as const;
+  const printed = readRun(printedSkips(skips), NOT_REPORTED);
+  const listed = skips.map(([name, reason]) => ({ suite: REASONS_SUITE, name, reason }));
+  assert.deepEqual(skippedInReport(parseJUnit(reportedSkips(skips))), listed, 'the report');
+  assert.deepEqual(
+    [printed.skipped, printed.errors],
+    [listed.map((one) => ({ ...one, cases: 1 })), []],
+    'the console',
+  );
+  assert.deepEqual(skipFaults(printed, ['test_boom']), [
+    skipFault('test_boom', 'boom\nERROR: not an engine error'),
+  ]);
+}
+
+/** Godot 4.7.2 and gdUnit4's stdout for a case with an engine error and two skips, colours and all. */
+const REAL_SKIP_STDOUT = [
+  'gdharness timing: started 1885 ms, compiled together 0 ms',
+  '\u001b[38;2;0;206;209mRun Test Suite: \u001b[0m\u001b[38;2;250;235;215mres://tests/reasons_test.gd\u001b[0m',
+  'gdharness timing: res://tests/reasons_test.gd loaded 3 ms, before 9 ms',
+  '  \u001b[38;2;250;235;215mres://tests/reasons_test.gd\u001b[0m\u001b[38;2;128;128;128m > \u001b[0m\u001b[38;2;250;235;215mtest_runs\u001b[0m\u001b[38;2;34;139;34m STARTED\u001b[0m\u001b[38;2;128;128;128m\u001b[0m',
+  '  \u001b[38;2;250;235;215mres://tests/reasons_test.gd\u001b[0m\u001b[38;2;128;128;128m > \u001b[0m\u001b[38;2;250;235;215mtest_runs\u001b[0m\u001b[38;2;34;139;34m PASSED\u001b[0m\u001b[38;2;100;149;237m 4ms\u001b[0m',
+  '\u001b[38;2;128;128;128m\u001b[0m',
+  '  \u001b[38;2;250;235;215mres://tests/reasons_test.gd\u001b[0m\u001b[38;2;128;128;128m > \u001b[0m\u001b[38;2;250;235;215mtest_quote_blank\u001b[0m\u001b[38;2;34;139;34m STARTED\u001b[0m\u001b[38;2;128;128;128m\u001b[0m',
+  '  \u001b[38;2;250;235;215mres://tests/reasons_test.gd\u001b[0m\u001b[38;2;128;128;128m > \u001b[0m\u001b[38;2;250;235;215mtest_quote_blank\u001b[0m\u001b[38;2;34;139;34m PASSED\u001b[0m\u001b[38;2;100;149;237m 0ms\u001b[0m',
+  '  \u001b[38;2;0;206;209m\u001b[1m\u001b[4mReport:\u001b[0m',
+  '  \u001b[38;2;128;128;128m\u001b[38;2;255;69;0mThis test is skipped!\u001b[0m',
+  "  Reason: '\u001b[38;2;30;144;255msaid 'no'",
+  '',
+  "then left\u001b[0m'",
+  '\u001b[0m\u001b[38;2;128;128;128m\u001b[0m',
+  '\u001b[38;2;128;128;128m\u001b[0m',
+  '  \u001b[38;2;250;235;215mres://tests/reasons_test.gd\u001b[0m\u001b[38;2;128;128;128m > \u001b[0m\u001b[38;2;250;235;215mtest_error_line\u001b[0m\u001b[38;2;34;139;34m STARTED\u001b[0m\u001b[38;2;128;128;128m\u001b[0m',
+  '  \u001b[38;2;250;235;215mres://tests/reasons_test.gd\u001b[0m\u001b[38;2;128;128;128m > \u001b[0m\u001b[38;2;250;235;215mtest_error_line\u001b[0m\u001b[38;2;34;139;34m PASSED\u001b[0m\u001b[38;2;100;149;237m 0ms\u001b[0m',
+  '  \u001b[38;2;0;206;209m\u001b[1m\u001b[4mReport:\u001b[0m',
+  '  \u001b[38;2;128;128;128m\u001b[38;2;255;69;0mThis test is skipped!\u001b[0m',
+  "  Reason: '\u001b[38;2;30;144;255mboom",
+  "ERROR: not an engine error\u001b[0m'",
+  '\u001b[0m\u001b[38;2;128;128;128m\u001b[0m',
+  '\u001b[38;2;128;128;128m\u001b[0m',
+  '\u001b[38;2;30;144;255mStatistics:\u001b[0m\u001b[38;2;128;128;128m 3 test cases | 0 errors | 0 failures | 0 flaky | 2 skipped | 0 orphans |\u001b[0m\u001b[38;2;34;139;34m PASSED\u001b[0m\u001b[38;2;100;149;237m 26ms\u001b[0m',
+  '\u001b[38;2;128;128;128m\u001b[0m',
+  '\u001b[38;2;128;128;128m\u001b[0m',
+  '\u001b[38;2;30;144;255mOverall Summary:\u001b[0m\u001b[38;2;255;255;255m 3 test cases | 0 errors | 0 failures | 0 flaky | 2 skipped | 0 orphans |\u001b[0m',
+  '\u001b[38;2;233;150;122mExecuted test suites: (1/1)\u001b[0m',
+  '\u001b[38;2;233;150;122mExecuted test cases : (1/3), 2 skipped\u001b[0m',
+  '\u001b[38;2;233;150;122mTotal execution time: 26ms\u001b[0m',
+  '\u001b[38;2;233;150;122mExit code: 0\u001b[0m',
+  'Run dispose test resources',
+  "gdharness: the engine's shutdown began clearing scripts",
+  "gdharness: the engine's shutdown cleared every script",
+];
+
+/** The same run's stderr, its runner frame left out. */
+const REAL_SKIP_STDERR = [
+  'ERROR: a real engine error',
+  '   at: push_error (core/variant/variant_utility.cpp:1023)',
+  '   GDScript backtrace (most recent call first):',
+  '       [0] test_runs (res://tests/reasons_test.gd:5)',
+  '       [1] _execute_test_case (res://addons/gdUnit4/src/core/_TestCase.gd:79)',
+  '       [2] execute (res://addons/gdUnit4/src/core/_TestCase.gd:40)',
+  '       [3] _execute (res://addons/gdUnit4/src/core/execution/stages/single/GdUnitTestCaseSingleTestStage.gd:10)',
+  '       [4] execute (res://addons/gdUnit4/src/core/execution/stages/IGdUnitExecutionStage.gd:19)',
+  '       [5] _execute (res://addons/gdUnit4/src/core/execution/stages/single/GdUnitTestCaseSingleExecutionStage.gd:17)',
+  '       [6] execute (res://addons/gdUnit4/src/core/execution/stages/IGdUnitExecutionStage.gd:19)',
+  '       [7] _execute (res://addons/gdUnit4/src/core/execution/stages/GdUnitTestCaseExecutionStage.gd:24)',
+  '       [8] execute (res://addons/gdUnit4/src/core/execution/stages/IGdUnitExecutionStage.gd:19)',
+];
+
+/** The same run's log, which the engine writes with both streams in order and no colours. */
+const REAL_SKIP_LOG = [
+  'gdharness timing: started 1885 ms, compiled together 0 ms',
+  'Run Test Suite: res://tests/reasons_test.gd',
+  'gdharness timing: res://tests/reasons_test.gd loaded 3 ms, before 9 ms',
+  '  res://tests/reasons_test.gd > test_runs STARTED',
+  ...REAL_SKIP_STDERR,
+  '  res://tests/reasons_test.gd > test_runs PASSED 4ms',
+  '',
+  '  res://tests/reasons_test.gd > test_quote_blank STARTED',
+  '  res://tests/reasons_test.gd > test_quote_blank PASSED 0ms',
+  '  Report:',
+  '  This test is skipped!',
+  "  Reason: 'said 'no'",
+  '',
+  "then left'",
+  '',
+  '',
+  '  res://tests/reasons_test.gd > test_error_line STARTED',
+  '  res://tests/reasons_test.gd > test_error_line PASSED 0ms',
+  '  Report:',
+  '  This test is skipped!',
+  "  Reason: 'boom",
+  "ERROR: not an engine error'",
+  '',
+  '',
+  'Statistics: 3 test cases | 0 errors | 0 failures | 0 flaky | 2 skipped | 0 orphans | PASSED 26ms',
+  '',
+  '',
+  'Overall Summary: 3 test cases | 0 errors | 0 failures | 0 flaky | 2 skipped | 0 orphans |',
+  'Executed test suites: (1/1)',
+  'Executed test cases : (1/3), 2 skipped',
+  'Total execution time: 26ms',
+  'Exit code: 0',
+  'Run dispose test resources',
+];
+
+/**
+ * A real run's piped streams, read as project_test reads them with a report naming neither skip, hold an engine entry and count an
+ * error for a skip reason's `ERROR:` line, which the reading of its log takes back. The engine's own
+ * error in the case that ran stays.
+ */
+function testARealSkipReasonsErrorLineLeavesTheEngineEntries(): void {
+  const tally = new TestRunTally({
+    autoloaded: new Map(),
+    verbose: false,
+    echo: undefined,
+    shown: (entry) => entry,
+    uncaught: () => false,
+  });
+  const log = new GameLog({
+    most: 4,
+    retired: (entry, byScript) => {
+      tally.take(entry, byScript);
+    },
+  });
+  log.append('stdout', `${REAL_SKIP_STDOUT.join('\r\n')}\r\n`);
+  log.append('stderr', `${REAL_SKIP_STDERR.join('\r\n')}\r\n`);
+  log.finish();
+  log.handOverHeld();
+  const folder = mkdtempSync(join(tmpdir(), 'gdharness-skip-log-'));
+  try {
+    const path = join(folder, 'engine.log');
+    writeFileSync(path, `${REAL_SKIP_LOG.join('\n')}\n`);
+    const read = readEngineLog(path, [], { errors: {}, warnings: {} }, undefined, NOT_REPORTED);
+    const piped = (entries: readonly FoldedEntry[]): string[][] =>
+      entries.map((entry) => [entry.severity, entry.source, entry.text]);
+    assert.deepEqual(
+      [piped(tally.engine.result()), log.count('error')],
+      [
+        [
+          ['error', 'stdout', "not an engine error'"],
+          ['error', 'stderr', 'a real engine error'],
+        ],
+        2,
+      ],
+      'the piped streams',
+    );
+    assert.deepEqual(
+      [
+        piped(withoutReasonHeadlines(tally.engine.result(), read.reasonHeadlines)),
+        log.count('error') - reasonHeadlinesOf(read.reasonHeadlines, 'error'),
+        read.errors.map((error) => error.text),
+      ],
+      [[['error', 'stderr', 'a real engine error']], 1, ['a real engine error']],
+      'less the reason',
+    );
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Godot 4.7.2 and gdUnit4's log of a suite whose `after()` pushed an error ending in a quote, after
+ * a skipped last case, its runner frame left out.
+ */
+const REAL_AFTER_LOG = [
+  'gdharness timing: started 3205 ms, compiled together 0 ms',
+  'Run Test Suite: res://tests/after_error_test.gd',
+  'gdharness timing: res://tests/after_error_test.gd loaded 5 ms, before 19 ms',
+  '  res://tests/after_error_test.gd > test_ok STARTED',
+  '  res://tests/after_error_test.gd > test_ok PASSED 17ms',
+  '',
+  '  res://tests/after_error_test.gd > test_skip STARTED',
+  '  res://tests/after_error_test.gd > test_skip PASSED 0ms',
+  '  Report:',
+  '  This test is skipped!',
+  "  Reason: 'not today'",
+  '',
+  '',
+  "ERROR: could not load 'res://gone.tres'",
+  '   at: push_error (core/variant/variant_utility.cpp:1023)',
+  '   GDScript backtrace (most recent call first):',
+  '       [0] after (res://tests/after_error_test.gd:5)',
+  '       [1] _execute (res://addons/gdUnit4/src/core/execution/stages/GdUnitTestSuiteAfterStage.gd:14)',
+  '       [2] execute (res://addons/gdUnit4/src/core/execution/stages/IGdUnitExecutionStage.gd:19)',
+  '       [3] _execute (res://addons/gdUnit4/src/core/execution/stages/GdUnitTestSuiteExecutionStage.gd:47)',
+  '       [4] execute (res://addons/gdUnit4/src/core/execution/stages/IGdUnitExecutionStage.gd:19)',
+  'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans | PASSED 81ms',
+  '',
+  '',
+  'Overall Summary: 2 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans |',
+  'Executed test suites: (1/1)',
+  'Executed test cases : (1/2), 1 skipped',
+  'Total execution time: 81ms',
+  'Exit code: 0',
+  'Run dispose test resources',
+];
+
+/**
+ * gdUnit4 runs a suite's `after()` before its statistics, so what it prints follows a skipped last
+ * case's reason. A reason closed on its first line ends there: the error after it is found by both
+ * readers, settled when declared, and a print there stays out of the reason.
+ */
+function testAnAfterHooksLinesAreNoPartOfASkippedLastCasesReason(): void {
+  const suite = 'res://tests/after_error_test.gd';
+  const error = "could not load 'res://gone.tres'";
+  const skipped = [{ suite, name: 'test_skip', reason: 'not today', cases: 1 }];
+  const faultsOf = (text: string, errors: Expected['errors']): readonly string[] =>
+    judgeEngine(
+      readRun(text),
+      { suites: [{ path: suite, cases: ['test_ok', 'test_skip'] }], expected: { errors, warnings: {} } },
+      { code: 0, signal: null, ended: null },
+    ).faults;
+  const skipLine = `${suite} > test_skip never ran: gdUnit4 skipped it, saying "not today"`;
+  const errorLog = REAL_AFTER_LOG.join('\n');
+  const printed = readRun(errorLog);
+  assert.deepEqual(
+    [printed.skipped, printed.errors.map((one) => one.text)],
+    [skipped, [error]],
+    'the console',
+  );
+  assert.deepEqual(faultsOf(errorLog, {}), [
+    skipLine,
+    `an engine error in ${suite} > after: ${error}. If the suite prints it on purpose, list its text under "after" in the suite's GDHARNESS_EXPECTED_ERRORS`,
+  ]);
+  assert.deepEqual(faultsOf(errorLog, { [suite]: { after: [error] } }), [skipLine]);
+  const printLog = errorLog.replace(/^ERROR: [\s\S]*?(?=^Statistics:)/m, "cleaned 'tmp'\n");
+  assert.deepEqual([readRun(printLog).skipped, faultsOf(printLog, {})], [skipped, [skipLine]], 'a print');
+  const folder = mkdtempSync(join(tmpdir(), 'gdharness-after-log-'));
+  try {
+    const path = join(folder, 'engine.log');
+    writeFileSync(path, `${errorLog}\n`);
+    const read = readEngineLog(path, [], { errors: {}, warnings: {} });
+    assert.deepEqual(
+      [read.skipped, read.errors.map((one) => one.text), read.reasonHeadlines],
+      [skipped, [error], []],
+      'the log project_test reads',
+    );
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+/**
+ * What both tools make of one run's log. gdharness test reads the text with [param reported], the
+ * skip reasons of its report, and judges it with [param declared]. project_test reads the log file the
+ * same way and counts engine errors from the piped streams, where [param stderr] are the lines the
+ * engine wrote to stderr and the rest went to stdout, less the lines of skip reasons and what the
+ * suites declared.
+ */
+function bothToolsRead(
+  lines: readonly string[],
+  stderr: readonly string[],
+  reported: ReportedSkips | undefined,
+  declared: Expected['errors'] = {},
+  cases: readonly string[] = ['test_ok', 'test_skip'],
+): {
+  readonly skipped: readonly { readonly name: string | null; readonly reason: string }[];
+  readonly errors: readonly string[];
+  readonly engineErrors: number;
+  readonly faults: readonly string[];
+} {
+  const text = lines.join('\n');
+  const printed = readRun(text, reported);
+  const faults = judgeEngine(
+    printed,
+    { suites: [{ path: REASONS_SUITE, cases }], expected: { errors: declared, warnings: {} } },
+    { code: 0, signal: null, ended: null },
+  ).faults;
+  const log = new GameLog();
+  log.append('stdout', `${lines.filter((line) => !stderr.includes(line)).join('\r\n')}\r\n`);
+  log.append('stderr', `${stderr.join('\r\n')}\r\n`);
+  log.finish();
+  log.handOverHeld();
+  const folder = mkdtempSync(join(tmpdir(), 'gdharness-skip-report-'));
+  try {
+    const path = join(folder, 'engine.log');
+    writeFileSync(path, `${text}\n`);
+    const read = readEngineLog(path, [], { errors: declared, warnings: {} }, undefined, reported);
+    assert.deepEqual(
+      [read.skipped, read.errors.map((one) => one.text)],
+      [printed.skipped, printed.errors.map((one) => one.text)],
+      'both tools read the same skips and errors',
+    );
+    return {
+      skipped: read.skipped.map((one) => ({ name: one.name, reason: one.reason })),
+      errors: read.errors.map((one) => one.text),
+      engineErrors:
+        log.count('error') - read.declaredErrors - reasonHeadlinesOf(read.reasonHeadlines, 'error'),
+      faults,
+    };
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+/** The report gdUnit4 wrote for [param skips], as both tools read its reasons. */
+function reasonsReported(skips: readonly (readonly [name: string, reason: string])[]): ReportedSkips {
+  return reportedFrom([parseJUnit(reportedSkips(skips))]);
+}
+
+const GONE = "could not load 'res://gone.tres'";
+const STATISTICS_LINE =
+  'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans | PASSED 4ms';
+const SUMMARY_LINES = [
+  '',
+  '',
+  'Overall Summary: 2 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans |',
+  'Executed test suites: (1/1)',
+  'Executed test cases : (1/2), 1 skipped',
+];
+
+/**
+ * A reason with one apostrophe on a skipped last case closed on its first line has no end the
+ * console can show, so what after() printed under it was taken into the reason. The report ends it.
+ */
+function testAnApostropheInASkipReasonLeavesTheAfterErrorToTheEngine(): void {
+  const lines = printedSkips(
+    [['test_skip', "can't run"]],
+    ['', '', `ERROR: ${GONE}`, STATISTICS_LINE, ...SUMMARY_LINES],
+  ).split('\n');
+  const stderr = [`ERROR: ${GONE}`];
+  const skipLine = `${REASONS_SUITE} > test_skip never ran: gdUnit4 skipped it, saying "can't run"`;
+  const read = bothToolsRead(lines, stderr, reasonsReported([['test_skip', "can't run"]]));
+  assert.deepEqual(
+    [read.skipped, read.errors, read.engineErrors],
+    [[{ name: 'test_skip', reason: "can't run" }], [GONE], 1],
+    'the reading',
+  );
+  assert.deepEqual(
+    read.faults.map((fault) => fault.replace(/\. If .*/, '')),
+    [skipLine, `an engine error in ${REASONS_SUITE} > after: ${GONE}`],
+    'undeclared',
+  );
+  const declared = bothToolsRead(lines, stderr, reasonsReported([['test_skip', "can't run"]]), {
+    [REASONS_SUITE]: { after: [GONE] },
+  });
+  assert.deepEqual([declared.engineErrors, declared.faults], [0, [skipLine]], 'declared');
+}
+
+/** A reason of two lines, the first ending in a quote and the second reading as an error, is whole. */
+function testASkipReasonWhoseFirstLineEndsInAQuoteIsBothLines(): void {
+  const reason = "ab'\nERROR: cd";
+  const read = bothToolsRead(
+    printedSkips([['test_skip', reason]]).split('\n'),
+    [],
+    reasonsReported([['test_skip', reason]]),
+  );
+  assert.deepEqual(
+    [read.skipped, read.errors, read.engineErrors, read.faults],
+    [
+      [{ name: 'test_skip', reason }],
+      [],
+      0,
+      [`${REASONS_SUITE} > test_skip never ran: gdUnit4 skipped it, saying "${reason}"`],
+    ],
+  );
+}
+
+/** A reason of several lines with its quotes paired is read as the console alone reads it. */
+function testAPairedSkipReasonReadsAsTheConsoleReadsIt(): void {
+  const skips = [
+    ['test_skip', "said 'no'\n\nthen left"],
+    ['test_boom', 'boom\nWARNING: a line of the reason'],
+  ] as const;
+  const lines = printedSkips(skips).split('\n');
+  const names = ['test_ok', ...skips.map(([name]) => name)];
+  const fromReport = bothToolsRead(lines, [], reasonsReported(skips), {}, names);
+  assert.deepEqual(fromReport, bothToolsRead(lines, [], NOT_REPORTED, {}, names), 'report or console');
+  assert.deepEqual(
+    fromReport.skipped,
+    skips.map(([name, reason]) => ({ name, reason })),
+  );
+}
+
+/**
+ * A run with no report reads a reason as the line its quotes close, so the after() error below it
+ * stays the engine's. A run whose report misses the skip reads the reason on to the last quote
+ * before the entry ends.
+ */
+function testARunWithNoReportReadsItsSkipReasonsFromTheConsole(): void {
+  const lines = printedSkips(
+    [['test_skip', "can't run"]],
+    ['', '', `ERROR: ${GONE}`, STATISTICS_LINE, ...SUMMARY_LINES],
+  ).split('\n');
+  assert.deepEqual(
+    bothToolsRead(lines, [`ERROR: ${GONE}`], undefined),
+    {
+      skipped: [{ name: 'test_skip', reason: "can't run" }],
+      errors: [GONE],
+      engineErrors: 1,
+      faults: [
+        skipFault('test_skip', "can't run"),
+        `an engine error in ${REASONS_SUITE} > after: ${GONE}. If the suite prints it on purpose, list its text under "after" in the suite's GDHARNESS_EXPECTED_ERRORS`,
+      ],
+    },
+    'no report',
+  );
+  const swallowed = [{ name: 'test_skip', reason: `can't run'\n\n\nERROR: ${GONE.slice(0, -1)}` }];
+  assert.deepEqual(
+    bothToolsRead(lines, [`ERROR: ${GONE}`], NOT_REPORTED).skipped,
+    swallowed,
+    'a report with no skips',
+  );
+  assert.deepEqual(
+    bothToolsRead(lines, [`ERROR: ${GONE}`], reasonsReported([['test_other', 'elsewhere']])).skipped,
+    swallowed,
+    'a report naming another case',
+  );
+}
+
+/**
+ * gdUnit4 writes a skip reason raw into its report's CDATA, so a reason holding `]]>` ends the
+ * section early and the report loses those characters. Both tools read it whole off the console.
+ */
+function testASkipReasonHoldingTheCdataEndIsReadWhole(): void {
+  const skips = [['test_skip', "x ]]> can't"]] as const;
+  const report = parseJUnit(reportedSkips(skips));
+  assert.deepEqual(
+    [skippedInReport(report), [...reportedFrom([report]).cases.values()]],
+    [[{ suite: REASONS_SUITE, name: 'test_skip', reason: "x  can't" }], [["x  can't"]]],
+    'the report',
+  );
+  const read = bothToolsRead(printedSkips(skips).split('\n'), [], reportedFrom([report]));
+  assert.deepEqual(
+    [read.skipped, read.faults],
+    [[{ name: 'test_skip', reason: "x ]]> can't" }], [skipFault('test_skip', "x ]]> can't")]],
+    'both tools',
+  );
+}
+
+/**
+ * Where the report and the console disagree on a reason's text, the console's lines are the reason
+ * over as many lines as the report's has, and they are no engine output.
+ */
+function testAReportSaysHowManyConsoleLinesASkipReasonCovers(): void {
+  const reason = "from the console\nERROR: and the engine's line";
+  const read = bothToolsRead(
+    printedSkips([['test_skip', reason]]).split('\n'),
+    [],
+    reasonsReported([['test_skip', 'one [b]\ntwo']]),
+  );
+  assert.deepEqual([read.skipped, read.errors, read.engineErrors], [[{ name: 'test_skip', reason }], [], 0]);
+}
+
+/** A skip the console never printed is left to the report's readers, and the reverse is read off the console. */
+function testASkipOnlyTheReportOrTheConsoleHoldsIsReadAsBefore(): void {
+  const lines = printedSkips([['test_skip', 'only the console']]).split('\n');
+  const reportOnly = reasonsReported([['test_ghost', 'only the report']]);
+  assert.deepEqual(
+    bothToolsRead(lines, [], reportOnly),
+    bothToolsRead(lines, [], undefined),
+    'the console only',
+  );
+  const quiet = printedSkips([]).split('\n');
+  const ghost = bothToolsRead(quiet, [], reportOnly, {}, ['test_ok']);
+  assert.deepEqual([ghost.skipped, ghost.faults], [[], []], 'the report only');
+}
+
+/** A suite skipped whole with an apostrophe in its reason is read from the report, whatever follows it. */
+function testAWholeSuiteSkipReasonReadsFromTheReport(): void {
+  const reason = "can't run";
+  const lines = [
+    `Run Test Suite: ${REASONS_SUITE}`,
+    `  ${REASONS_SUITE} > test_ok STARTED`,
+    `  ${REASONS_SUITE} > test_ok PASSED 0ms`,
+    '  Report:',
+    '  This test is skipped!',
+    "  Reason: 'Skipped from the entire test suite'",
+    `  ${REASONS_SUITE} > finalize()  Report:`,
+    '  The Entire test-suite is skipped!',
+    '  Skipped 1 tests',
+    `  Reason: '${reason}'`,
+    '',
+    `ERROR: ${GONE}`,
+    STATISTICS_LINE,
+  ];
+  const reported = reportedFrom([
+    parseJUnit(
+      reportedSkips([['test_ok', reason]]).replace(
+        '<testcase name="test_ok" classname="reasons_test" time="0.012">\n\t\t</testcase>',
+        '',
+      ),
+    ),
+  ]);
+  const read = bothToolsRead(lines, [`ERROR: ${GONE}`], reported, {}, ['test_ok']);
+  assert.deepEqual([read.skipped, read.errors, read.engineErrors], [[{ name: null, reason }], [GONE], 1]);
+}
+
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
@@ -1571,4 +2377,23 @@ testEverySkipTheReportHoldsIsListedWithItsReason();
 testTheDiffsHoldOnlyTheSuiteBeingPrinted();
 testAThirtyTwoMegabyteValueReadsAsTheWholeTextReadsIt();
 testTheDiffsHoldNoTextOnceNoDiffIsOpen();
+testASkipReasonOverSeveralLinesIsReadWhole();
+testTheLinesOfASkipReasonAreReadOnlyAsItsText();
+testASkipReasonEndingTheOutputIsReadWhole();
+testASkipReasonTheOutputCutOffIsSaidToBeCut();
+testAWholeSuiteSkipReasonTheOutputCutOffIsSaidToBeCut();
+testAWholeSuiteHeadingBeforeAnyCaseIsNoSkip();
+testAQuoteBeforeABlankLineInASkipReasonIsReadAsTheReportReadsIt();
+testAnErrorLineInsideASkipReasonIsNoEngineError();
+testARealSkipReasonsErrorLineLeavesTheEngineEntries();
+testAnAfterHooksLinesAreNoPartOfASkippedLastCasesReason();
+testASkipReasonEndsAtTheNextCaseOrItsSuitesEnd();
+testAnApostropheInASkipReasonLeavesTheAfterErrorToTheEngine();
+testASkipReasonWhoseFirstLineEndsInAQuoteIsBothLines();
+testAPairedSkipReasonReadsAsTheConsoleReadsIt();
+testARunWithNoReportReadsItsSkipReasonsFromTheConsole();
+testASkipReasonHoldingTheCdataEndIsReadWhole();
+testAReportSaysHowManyConsoleLinesASkipReasonCovers();
+testASkipOnlyTheReportOrTheConsoleHoldsIsReadAsBefore();
+testAWholeSuiteSkipReasonReadsFromTheReport();
 console.log('junit reader tests passed');

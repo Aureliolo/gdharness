@@ -18,8 +18,24 @@ import {
   WALK_STOPPED_SENTENCE,
   walkStoppedPartWay,
 } from './engine-leaks.js';
-import { CRASH_HEADER, caseLineOf, GDUNIT_TIME, type LogEntry, suiteOpenedBy } from './game-log.js';
-import { DiscoveryRead, type OrphansLeft, orphansLeftOn, orphansLeftSaid } from './junit.js';
+import {
+  announced,
+  CRASH_HEADER,
+  caseLineOf,
+  type FoldedEntry,
+  GDUNIT_TIME,
+  type LogEntry,
+  type Severity,
+  suiteOpenedBy,
+} from './game-log.js';
+import {
+  DiscoveryRead,
+  type OrphansLeft,
+  orphansLeftOn,
+  orphansLeftSaid,
+  type ReportedSkips,
+  skipKey,
+} from './junit.js';
 import { bytesAt, eachLogLine, owned } from './log-read.js';
 import { isRecord, isStringList } from './records.js';
 
@@ -124,6 +140,11 @@ export interface RunPrinted {
   readonly unrunnable: readonly MismatchedRow[];
   /** The cases, rows and suites skipped with `do_skip`, which never ran. */
   readonly skipped: readonly SkippedRow[];
+  /**
+   * The lines of skip reasons that read as an engine's error or warning headline, as the engine's
+   * piped streams read them, which are the reason's text and nothing the engine reported.
+   */
+  readonly reasonHeadlines: readonly ReasonHeadline[];
 }
 
 /**
@@ -150,6 +171,8 @@ interface SkippedRow {
   readonly reason: string;
   /** How many cases never ran: one, or every case of a suite skipped whole. */
   readonly cases: number;
+  /** There when the output ended, or gdUnit4 went on, before a quote closed the reason. */
+  readonly cut?: true;
 }
 
 // Printed by the runner in src/godot/tests/listed.gd, TIMING there.
@@ -182,7 +205,13 @@ const UNRUNNABLE_CASE =
 const CASE_SKIPPED = /^\s*This test is skipped!\s*$/;
 const SUITE_SKIPPED = /^\s*The Entire test-suite is skipped!\s*$/;
 const SUITE_SKIPPED_COUNT = /^\s*Skipped (\d+) tests\s*$/;
-const SKIP_REASON = /^\s*Reason: '(.*)'\s*$/;
+// The first line of the reason under either heading in a run with a report. A reason holding line
+// breaks goes on over the lines below it, to the last line ending in a quote before the entry ends.
+const SKIP_REASON = /^\s*Reason: '(.*)$/;
+// The reason under either heading as a run without a report reads it: one line, to its last quote.
+const SKIP_REASON_LINE = /^\s*Reason: '(.*)'\s*$/;
+// The heading gdUnit4 prints over the reports of a case, or of a suite as `x_test > finalize()  Report:`.
+const REPORT_HEADING = /\bReport:\s*$/;
 const SKIPPED_WITH_ITS_SUITE = 'Skipped from the entire test suite';
 // The engine's first line, `Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org`.
 // A build of its own adds when it was built, `(2026-08-17 01:18:38 UTC)`, before the address.
@@ -246,8 +275,12 @@ function rowRuns(share: RowShare, row: number | null): boolean {
     : row === null || !share.besides.includes(row);
 }
 
-/** [param printed], both streams in the order they came, read into suites, cases and errors. */
-export function readRun(printed: string): RunPrinted {
+/**
+ * [param printed], both streams in the order they came, read into suites, cases and errors. A run
+ * with [param reported], what its report holds of its skips, reads each reason as the report has it.
+ * Without one, a reason is the line its quotes close.
+ */
+export function readRun(printed: string, reported?: ReportedSkips): RunPrinted {
   const lines = stripVTControlCharacters(printed).replaceAll('\r\n', '\n').split('\n');
   const {
     lineCount: _lineCount,
@@ -255,7 +288,7 @@ export function readRun(printed: string): RunPrinted {
     judged: _judged,
     declaredErrors: _declaredErrors,
     ...read
-  } = readRunLines(lines, Infinity);
+  } = readRunLines(lines, Infinity, undefined, reported);
   return { lines, ...read };
 }
 
@@ -277,6 +310,14 @@ export type LogRead = RunRead & {
   /** How many errors, not warnings, the suites declared and printed, those not kept included. */
   readonly declaredErrors: number;
 };
+
+/** A line of a skip reason read as a headline, and how many times one like it came. */
+export interface ReasonHeadline {
+  readonly severity: Exclude<Severity, 'info'>;
+  /** The headline without its severity prefix, as a piped entry's text holds it. */
+  readonly text: string;
+  readonly times: number;
+}
 
 /** The most errors a run read off a log of any size keeps. */
 export const ERRORS_KEPT = 100_000;
@@ -324,6 +365,7 @@ function readRunLines(
   source: Iterable<string>,
   errorsKept: number,
   expected: Expected = { errors: {}, warnings: {} },
+  reported?: ReportedSkips,
 ): RunRead & Pick<LogRead, 'judged' | 'declaredErrors'> {
   const lines = new LinesAhead(source[Symbol.iterator]());
   const state: RunState = {
@@ -353,6 +395,9 @@ function readRunLines(
     started: null,
     reusedCompiledSeconds: null,
     reasonEnds: -1,
+    reasonHeadlines: new Map(),
+    reported,
+    reportedUsed: new Map(),
   };
   const discovery = new DiscoveryRead();
   const starved = new StarvedRead();
@@ -375,6 +420,7 @@ function readRunLines(
     lineCount: at,
     errorsDropped: state.errorsDropped,
     declaredErrors: state.declaredErrors,
+    reasonHeadlines: [...state.reasonHeadlines.values()],
     suites: state.suites,
     errors: state.errors,
     leaks: state.leaks,
@@ -530,7 +576,10 @@ interface RunState {
   readonly mismatched: MismatchedRow[];
   readonly unrunnable: MismatchedRow[];
   readonly skipped: SkippedRow[];
-  /** The heading gdUnit4 printed over a skip's reason, which the next `Reason:` line belongs to. */
+  /**
+   * In a run without a report, the heading gdUnit4 printed over a skip's reason, which the next
+   * `Reason:` line belongs to.
+   */
   skipHeading: 'case' | 'suite' | null;
   /** How many cases the heading of a suite skipped whole said it held. */
   suiteSkipCases: number;
@@ -543,8 +592,14 @@ interface RunState {
   engineVersion: string | null;
   started: EngineStart | null;
   reusedCompiledSeconds: number | null;
-  /** The last line of a skip's reason, which no other reading of a skip looks into. */
+  /** The last line of a skip's reason, read whole where it began, which no reader looks into again. */
   reasonEnds: number;
+  /** The lines of skip reasons read as headlines, by severity and text. */
+  readonly reasonHeadlines: Map<string, ReasonHeadline>;
+  /** What the run's report holds for its skipped cases, which says where a reason ends. */
+  readonly reported: ReportedSkips | undefined;
+  /** How many of a case's or suite's reasons in the report the console's skips have taken. */
+  readonly reportedUsed: Map<string, number>;
 }
 
 /** Reads one printed line into the state, and says whether it did. */
@@ -692,10 +747,244 @@ const readStatistics: LineReader = (state, line) => {
 };
 
 /**
- * Reads the heading gdUnit4 prints over a skip, and the reason under it when the skip is one
- * `do_skip` asked for. Says whether [param line] was one of those.
+ * Reads the heading gdUnit4 prints over a skip at [param at], and keeps the skip when its reason is
+ * one `do_skip` gave. Says whether [param line] was such a heading.
  */
-function readSkipHeading(state: RunState, suite: string, lastCase: string | null, line: string): boolean {
+function readSkipHeading(
+  state: RunState,
+  suite: string,
+  lastCase: string,
+  line: string,
+  at: number,
+): boolean {
+  const whole = SUITE_SKIPPED.test(line);
+  if (!whole && !CASE_SKIPPED.test(line)) {
+    return false;
+  }
+  const count = whole ? SUITE_SKIPPED_COUNT.exec(state.lines.at(at + 1) ?? '')?.[1] : '1';
+  const reported = reportedFor(state, suite, lastCase, whole, whole ? at + 2 : at + 1);
+  const said =
+    count === undefined ? null : skipReasonAt(state.lines, whole ? at + 2 : at + 1, reported?.reason);
+  if (said === null) {
+    return true;
+  }
+  if (reported !== undefined) {
+    state.reportedUsed.set(reported.key, reported.used + 1);
+  }
+  state.reasonEnds = said.ends;
+  const cut = said.cut ? { cut: true as const } : {};
+  if (whole) {
+    state.skipped.push({ suite, name: null, reason: said.reason, cases: Number(count), ...cut });
+  } else if (said.reason !== SKIPPED_WITH_ITS_SUITE) {
+    state.skipped.push({ suite, name: lastCase, reason: said.reason, cases: 1, ...cut });
+  }
+  return true;
+}
+
+/** The reason the report holds for the skip whose reason line is at [param at], if any. */
+function reportedFor(
+  state: RunState,
+  suite: string,
+  lastCase: string,
+  whole: boolean,
+  at: number,
+): ReportedReason | undefined {
+  const first = SKIP_REASON.exec(state.lines.at(at) ?? '')?.[1]?.trimEnd();
+  if (first === `${SKIPPED_WITH_ITS_SUITE}'`) {
+    return undefined;
+  }
+  return whole ? reportedForSuite(state, suite) : reportedForCase(state, suite, lastCase);
+}
+
+interface ReportedReason {
+  readonly reason: string;
+  readonly key: string;
+  readonly used: number;
+}
+
+/** The next reason the report holds for [param name] of [param suite], which the console has not taken. */
+function reportedForCase(state: RunState, suite: string, name: string): ReportedReason | undefined {
+  const key = skipKey(suite, name);
+  const used = state.reportedUsed.get(key) ?? 0;
+  const reason = state.reported?.cases.get(key)?.[used];
+  return reason === undefined ? undefined : { reason, key, used };
+}
+
+/**
+ * The reason the report holds for a [param suite] skipped whole, when every one of its skipped cases
+ * has it. A case reads the suite's reason as {@link SKIPPED_WITH_ITS_SUITE} under it, which is no
+ * reason the suite gave.
+ */
+function reportedForSuite(state: RunState, suite: string): ReportedReason | undefined {
+  const reasons = state.reported?.suites.get(suite);
+  const [reason] = reasons ?? [];
+  if (reason === undefined || reason === SKIPPED_WITH_ITS_SUITE || reasons?.some((one) => one !== reason)) {
+    return undefined;
+  }
+  const key = JSON.stringify([suite]);
+  return { reason, key, used: state.reportedUsed.get(key) ?? 0 };
+}
+
+/**
+ * Whether gdUnit4 printed [param line] of its own after a report, which ends the report's entry:
+ * the next case, the next report's heading, or the suite's statistics.
+ */
+function entryEnds(line: string): boolean {
+  return caseLineOf(line) !== null || REPORT_HEADING.test(line) || STATISTICS.test(line);
+}
+
+/**
+ * The reason gdUnit4 printed from the line at [param at] on, and the last line of it. Null when no
+ * reason is there, or the reason is gdUnit4's own for a row whose data does not fit or a case it
+ * cannot run, which are read as those.
+ *
+ * A first line ending in a quote, with its quotes paired once the opening one is counted, is the
+ * whole reason: gdUnit4 runs the suite's `after()` before its statistics, so what that prints can
+ * follow a skipped last case and end in a quote too. Otherwise the reason runs to the last line
+ * ending in a quote before the entry ends, as the report's reader takes it to the entry's last
+ * quote, since a line of the reason can end in a quote with a blank line under it. With no such
+ * line it is cut, and only its first line is surely the reason's: the lines after it are read as
+ * they would be without it, the engine's last errors included.
+ *
+ * A [param reported] reason, the one gdUnit4's report holds for the skip, says how many lines the
+ * reason covers. Their text is the reason, since the report's writer drops what it reads as a tag,
+ * such as `[blocked]`, and the console keeps it. Where those lines do not end in a quote, or
+ * gdUnit4's own output ends the entry sooner, the report's text is the reason.
+ */
+function skipReasonAt(
+  lines: RunState['lines'],
+  at: number,
+  reported?: string,
+): { reason: string; ends: number; cut: boolean } | null {
+  const first = lines.at(at) ?? '';
+  const opened = SKIP_REASON.exec(first)?.[1];
+  if (opened === undefined || UNRUNNABLE_CASE.test(first) || MISMATCHED_ROW.test(lines.at(at + 1) ?? '')) {
+    return null;
+  }
+  if (reported !== undefined) {
+    return reportedReasonAt(lines, at, opened, reported);
+  }
+  return consoleReasonAt(lines, at, opened);
+}
+
+/**
+ * The reason printed over as many lines from [param at] as [param reported] has, whose first line
+ * after the opening quote is [param opened]. The report's text where the console's lines are fewer
+ * or the last does not close the quote.
+ */
+function reportedReasonAt(
+  lines: RunState['lines'],
+  at: number,
+  opened: string,
+  reported: string,
+): { reason: string; ends: number; cut: boolean } {
+  const ends = reportedEnds(lines, at, reported);
+  const parts = [opened];
+  for (let next = at + 1; next <= ends; next += 1) {
+    parts.push(lines.at(next) ?? '');
+  }
+  const last = (parts.at(-1) ?? '').trimEnd();
+  if (parts.length !== reported.split('\n').length || !last.endsWith("'")) {
+    return { reason: reported, ends, cut: false };
+  }
+  return { reason: [...parts.slice(0, -1), last.slice(0, -1)].join('\n'), ends, cut: false };
+}
+
+/** The last line a [param reported] reason covers from [param at], where the entry has not ended sooner. */
+function reportedEnds(lines: RunState['lines'], at: number, reported: string): number {
+  const length = reported.split('\n').length;
+  let ends = at;
+  for (let next = lines.at(ends + 1); ends - at + 1 < length && next !== undefined && !entryEnds(next); ) {
+    ends += 1;
+    next = lines.at(ends + 1);
+  }
+  return ends;
+}
+
+/** The reason the console alone shows from [param at], whose first line after the opening quote is [param opened]. */
+function consoleReasonAt(
+  lines: RunState['lines'],
+  at: number,
+  opened: string,
+): { reason: string; ends: number; cut: boolean } {
+  const alone = opened.trimEnd();
+  if (alone.endsWith("'") && alone.split("'").length % 2 === 0) {
+    return { reason: alone.slice(0, -1), ends: at, cut: false };
+  }
+  const parts: string[] = [];
+  let closes = -1;
+  for (let line: string | undefined = opened; line !== undefined; line = lines.at(at + parts.length)) {
+    if (parts.length > 0 && entryEnds(line)) {
+      break;
+    }
+    if (line.trimEnd().endsWith("'")) {
+      closes = parts.length;
+    }
+    parts.push(line);
+  }
+  if (closes < 0) {
+    return { reason: opened.trimEnd(), ends: at, cut: true };
+  }
+  const last = (parts[closes] ?? '').trimEnd().slice(0, -1);
+  return { reason: [...parts.slice(0, closes), last].join('\n'), ends: at + closes, cut: false };
+}
+
+// A row or case gdUnit4 skips for how it is declared never ran, and it calls the run passed: a
+// case taking its rows from a function returning a constant had all three skipped, and a case
+// run alone whose parameter had a typo in its name was answered passed. The reason is printed
+// under the case, so it is read while that suite is open.
+const readSkipReason: LineReader = (state, line, at) => {
+  if (state.reported === undefined) {
+    return readSkipReasonAsPrinted(state, line, at);
+  }
+  const { open, lastCase } = state;
+  if (open === null || lastCase === null) {
+    return false;
+  }
+  const declared = UNRUNNABLE_CASE.exec(line)?.[1];
+  if (declared !== undefined) {
+    state.unrunnable.push({ suite: open.path, name: lastCase, reason: declared });
+    return true;
+  }
+  if (readSkipHeading(state, open.path, lastCase, line, at)) {
+    return true;
+  }
+  return MISMATCHED_ROW.test(line) && readMismatchedRow(state, open.path, lastCase, line, at);
+};
+
+/**
+ * {@link readSkipReason} for a run without a report, where a reason is the one line its quotes
+ * close and the lines after it are read as any other.
+ */
+function readSkipReasonAsPrinted(state: RunState, line: string, at: number): boolean {
+  const { open, lastCase } = state;
+  if (open === null || at <= state.reasonEnds) {
+    return false;
+  }
+  const declared = UNRUNNABLE_CASE.exec(line)?.[1];
+  if (declared !== undefined && lastCase !== null) {
+    state.skipHeading = null;
+    state.unrunnable.push({ suite: open.path, name: lastCase, reason: declared });
+    return true;
+  }
+  if (readSkipHeadingAsPrinted(state, open.path, lastCase, line)) {
+    return true;
+  }
+  return (
+    MISMATCHED_ROW.test(line) && lastCase !== null && readMismatchedRow(state, open.path, lastCase, line, at)
+  );
+}
+
+/**
+ * Reads the heading gdUnit4 prints over a skip in a run without a report, and the reason under it
+ * when the skip is one `do_skip` asked for. Says whether [param line] was one of those.
+ */
+function readSkipHeadingAsPrinted(
+  state: RunState,
+  suite: string,
+  lastCase: string | null,
+  line: string,
+): boolean {
   if (CASE_SKIPPED.test(line)) {
     state.skipHeading = 'case';
     return true;
@@ -712,7 +1001,7 @@ function readSkipHeading(state: RunState, suite: string, lastCase: string | null
       return true;
     }
   }
-  const reason = state.skipHeading === null ? undefined : SKIP_REASON.exec(line)?.[1];
+  const reason = state.skipHeading === null ? undefined : SKIP_REASON_LINE.exec(line)?.[1];
   if (reason === undefined) {
     return false;
   }
@@ -725,27 +1014,14 @@ function readSkipHeading(state: RunState, suite: string, lastCase: string | null
   return true;
 }
 
-// A row or case gdUnit4 skips for how it is declared never ran, and it calls the run passed: a
-// case taking its rows from a function returning a constant had all three skipped, and a case
-// run alone whose parameter had a typo in its name was answered passed. The reason is printed
-// under the case, so it is read while that suite is open.
-const readSkipReason: LineReader = (state, line, at) => {
-  const { open, lastCase } = state;
-  if (open === null || at <= state.reasonEnds) {
-    return false;
-  }
-  const declared = UNRUNNABLE_CASE.exec(line)?.[1];
-  if (declared !== undefined && lastCase !== null) {
-    state.skipHeading = null;
-    state.unrunnable.push({ suite: open.path, name: lastCase, reason: declared });
-    return true;
-  }
-  if (readSkipHeading(state, open.path, lastCase, line)) {
-    return true;
-  }
-  if (!MISMATCHED_ROW.test(line) || lastCase === null) {
-    return false;
-  }
+/** Reads the reason gdUnit4 printed at [param at] for a row whose data does not fit its case. */
+function readMismatchedRow(
+  state: RunState,
+  suite: string,
+  lastCase: string,
+  line: string,
+  at: number,
+): boolean {
   state.reasonEnds = at;
   const parts = [line.trim()];
   while (!['', "'"].includes((state.lines.at(state.reasonEnds + 1) ?? '').trim())) {
@@ -753,12 +1029,12 @@ const readSkipReason: LineReader = (state, line, at) => {
     parts.push((state.lines.at(state.reasonEnds) ?? '').trim());
   }
   state.mismatched.push({
-    suite: open.path,
+    suite,
     name: lastCase,
     reason: parts.join(' ').replaceAll(/\[\/?color[^\]]*\]/g, ''),
   });
   return true;
-};
+}
 
 const readExecuted: LineReader = (state, line) => {
   const counted = EXECUTED.exec(line);
@@ -839,11 +1115,33 @@ const LINE_READERS: readonly LineReader[] = [
 
 /** Reads [param line], the one at [param at], with the first reader that takes it. */
 function readLine(state: RunState, line: string, at: number): void {
+  // A reason's lines are its text, which an `ERROR:` line inside it does not change. The piped
+  // streams count such a line as the engine's, so it is noted for them to take back. A run without
+  // a report hands every line to the readers.
+  if (state.reported !== undefined && at <= state.reasonEnds) {
+    reasonHeadlineRead(state, line);
+    return;
+  }
   for (const read of LINE_READERS) {
     if (read(state, line, at)) {
       return;
     }
   }
+}
+
+/** Notes [param line], one of a skip reason, when the piped streams read it as a headline. */
+function reasonHeadlineRead(state: RunState, line: string): void {
+  const said = announced(line);
+  if (said === null || said.severity === 'info') {
+    return;
+  }
+  const key = JSON.stringify([said.severity, said.text]);
+  const seen = state.reasonHeadlines.get(key);
+  state.reasonHeadlines.set(key, {
+    severity: said.severity,
+    text: seen?.text ?? owned(said.text),
+    times: (seen?.times ?? 0) + 1,
+  });
 }
 
 // What Godot prints before an error raised while it was printing another. It writes the pair
@@ -856,15 +1154,22 @@ const NESTED_ERROR = 'While attempting to print an error, another error was prin
  * is an empty run. [param nested] are the errors Godot raised while printing another, which
  * {@link nestedError} finds in the piped streams, added as {@link withNestedErrors} adds them.
  * Every error is judged against [param expected] as it is read. [param chunkBytes] is how much is
- * read at once.
+ * read at once. A skip reason [param reported] holds is the one read, whatever the log's lines make
+ * of it.
  */
 export function readEngineLog(
   path: string,
   nested: readonly string[],
   expected: Expected,
   chunkBytes?: number,
+  reported?: ReportedSkips,
 ): LogRead {
-  const read = readRunLines(existsSync(path) ? eachLogLine(path, chunkBytes) : [''], ERRORS_KEPT, expected);
+  const read = readRunLines(
+    existsSync(path) ? eachLogLine(path, chunkBytes) : [''],
+    ERRORS_KEPT,
+    expected,
+    reported,
+  );
   const added = nested.map((text) => ({
     text,
     at: read.lineCount,
@@ -879,6 +1184,40 @@ export function readEngineLog(
         errors: [...read.errors, ...added],
         judged: { ...read.judged, printed: [...read.judged.printed, ...added] },
       };
+}
+
+/**
+ * [param entries], read off the piped streams, less each print of a skip reason's line in
+ * [param headlines], since gdUnit4 printed those as the reason's text on stdout.
+ */
+export function withoutReasonHeadlines(
+  entries: readonly FoldedEntry[],
+  headlines: readonly ReasonHeadline[],
+): FoldedEntry[] {
+  const left = new Map(headlines.map((one) => [JSON.stringify([one.severity, one.text]), one.times]));
+  return entries.flatMap((entry) => {
+    const key = JSON.stringify([entry.severity, entry.text]);
+    const owed = entry.source === 'stdout' ? (left.get(key) ?? 0) : 0;
+    const times = entry.times ?? 1;
+    if (owed === 0) {
+      return [entry];
+    }
+    left.set(key, Math.max(0, owed - times));
+    const kept = times - Math.min(owed, times);
+    if (kept === 0) {
+      return [];
+    }
+    const { times: _times, ...printed } = entry;
+    return [kept > 1 ? { ...printed, times: kept } : printed];
+  });
+}
+
+/** How many prints of [param severity] in [param headlines] were a skip reason's lines. */
+export function reasonHeadlinesOf(
+  headlines: readonly ReasonHeadline[],
+  severity: ReasonHeadline['severity'],
+): number {
+  return headlines.reduce((sum, one) => sum + (one.severity === severity ? one.times : 0), 0);
 }
 
 /**
@@ -1451,21 +1790,25 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
 }
 
 /**
- * How many cases [param printed] says ran. gdUnit4 prints a case skipped with `do_skip` passed, so
+ * How many cases [param printed] says ran. gdUnit4 prints every case and row it skips passed, so
  * those are taken off what it printed.
  */
-export function casesRan(printed: Pick<RunPrinted, 'suites' | 'skipped'>): number {
+export function casesRan(
+  printed: Pick<RunPrinted, 'suites' | 'skipped' | 'mismatched' | 'unrunnable'>,
+): number {
   const printedCases = [...printed.suites.values()].reduce((sum, suite) => sum + suite.cases.length, 0);
-  return Math.max(0, printedCases - printed.skipped.reduce((sum, one) => sum + one.cases, 0));
+  const skipped = printed.skipped.reduce((sum, one) => sum + one.cases, 0);
+  return Math.max(0, printedCases - skipped - printed.mismatched.length - printed.unrunnable.length);
 }
 
 /** The fault for a case, row or suite skipped with `do_skip`, which never ran. */
 function skippedFault(row: SkippedRow): string {
+  const said = `saying "${row.reason}"${row.cut === true ? ' before the reason was cut off' : ''}`;
   if (row.name !== null) {
-    return `${row.suite} > ${row.name} never ran: gdUnit4 skipped it, saying "${row.reason}"`;
+    return `${row.suite} > ${row.name} never ran: gdUnit4 skipped it, ${said}`;
   }
   const held = row.cases === 1 ? 'its one case' : `all ${String(row.cases)} of its cases`;
-  return `${row.suite} never ran ${held}: gdUnit4 skipped the whole suite, saying "${row.reason}"`;
+  return `${row.suite} never ran ${held}: gdUnit4 skipped the whole suite, ${said}`;
 }
 
 /** What judging one engine's run has found so far. */
@@ -1569,8 +1912,9 @@ function summaryFault(
   if (nothingLeft || (printed.executed !== null && printed.executed !== 0)) {
     return undefined;
   }
-  // Every case that did not execute is a listed skip, which already says why nothing ran.
-  if (printed.executed === 0 && printed.skipped.length > 0 && casesRan(printed) === 0) {
+  // Every case that did not execute is listed as skipped, which already says why nothing ran.
+  const listed = printed.skipped.length + printed.mismatched.length + printed.unrunnable.length;
+  if (printed.executed === 0 && listed > 0 && casesRan(printed) === 0) {
     return undefined;
   }
   return printed.executed === null
