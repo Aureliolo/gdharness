@@ -53,7 +53,6 @@ import { GodotLSPClient, LSPTimeout, normalizeLSPError } from '../src/lsp_client
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { PendingRequests } from '../src/pending-requests.js';
 import { keepPipelineCache } from '../src/pipeline-cache.js';
-import { startTimesOf } from '../src/process-children.js';
 import { VERSION_MARKER } from '../src/project-walk.js';
 import { isRecord } from '../src/records.js';
 import { applyRewrites } from '../src/rename.js';
@@ -1160,11 +1159,7 @@ interface RunSetup {
   readonly freeGiB: number;
   /** What each suite was seen to hold, in GiB, in suite order. */
   readonly peaksGiB: readonly number[];
-  /** The lanes the run is raised by, one answer each, up to the ceiling of {@link RISE_CEILING}. */
-  readonly rises?: readonly number[];
 }
-
-const RISE_CEILING = 6;
 
 interface Ran {
   readonly index: number;
@@ -1244,29 +1239,6 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number; abo
   const gate = new MemoryGate(slots, free, 1);
   const taken = takeFreeSlots(slots, Math.min(setup.lanes, enginesByMemory(setup.freeGiB)));
   const { units, declared, times } = suitesOf(setup.suites, setup.peaksGiB);
-  // The lanes the run was last raised to, which no more engines than may go at once.
-  let lanesNow = setup.lanes;
-  const rises = [...(setup.rises ?? [])];
-  const raised =
-    setup.rises === undefined
-      ? undefined
-      : {
-          ceiling: RISE_CEILING,
-          past: async (above: number, signal: AbortSignal): Promise<number> => {
-            const by = rises.shift();
-            if (by === undefined) {
-              await new Promise<void>((_, refused) => {
-                signal.addEventListener('abort', () => {
-                  refused(new Error('the asking was ended'));
-                });
-              });
-            }
-            await s.schedule(Promise.resolve(), 'a rise is answered');
-            signal.throwIfAborted();
-            lanesNow = Math.min(RISE_CEILING, above + (by ?? 1));
-            return lanesNow;
-          },
-        };
   const run = (
     plan: { readonly suites: ReadonlyArray<{ readonly path: string }> },
     index: number,
@@ -1285,7 +1257,7 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number; abo
     const engine = { need, held: 0 };
     going.set(index, engine);
     peak.engines = Math.max(peak.engines, going.size);
-    assert.ok(going.size <= lanesNow, `${String(going.size)} engines going on ${String(lanesNow)} lanes`);
+    assert.ok(going.size <= setup.lanes, `${String(going.size)} engines going on ${String(setup.lanes)} lanes`);
     if (going.size > setup.lanes) {
       peak.above = true;
     }
@@ -1301,7 +1273,7 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number; abo
   };
   let result: Ran[] | undefined;
   let settled = false;
-  void runShares(slots, units, declared, setup.lanes, taken, times, run, undefined, gate, raised)
+  void runShares(slots, units, declared, setup.lanes, taken, times, run, undefined, gate)
     .then(
       (ran) => {
         result = ran;
@@ -1399,49 +1371,6 @@ async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
     jest.useRealTimers();
   }
   assert.ok(peak.engines >= 2, `at most ${String(peak.engines)} engine ran at once`);
-}
-
-async function noOrderOfRisesLosesASuite(): Promise<void> {
-  const peak: { engines: number; above?: boolean } = { engines: 0 };
-  jest.useFakeTimers();
-  try {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.scheduler(),
-        fc.integer({ min: 1, max: 3 }),
-        fc.integer({ min: 2, max: 3 }),
-        fc.integer({ min: 2, max: 6 }),
-        fc.constantFrom(5, 6.5, 8, 16),
-        fc.array(fc.constantFrom(0.5, 1.5, 3), { minLength: 6, maxLength: 6 }),
-        fc.array(fc.integer({ min: 1, max: 3 }), { maxLength: 3 }),
-        async (s, slotCount, lanes, suites, freeGiB, peaksGiB, rises) => {
-          const started = startRun(
-            s,
-            { slotCount, outsideHolds: false, lanes, suites, freeGiB, peaksGiB, rises },
-            peak,
-          );
-          if (!(await stepUntilEnded(s, started))) {
-            await endHungRun(started);
-            throw new Error(
-              `hung: ${String(suites)} suites over ${String(lanes)} lanes raised by ${rises.join(', ')}`,
-            );
-          }
-          await s.waitIdle();
-          assert.deepEqual(
-            (started.ran() ?? []).flatMap((engine) => engine.suites).toSorted(),
-            suitesOf(suites, peaksGiB)
-              .units.map((unit) => unit.suite)
-              .toSorted(),
-          );
-          assert.equal(started.slots.freeCount, slotCount);
-        },
-      ),
-      { numRuns: 150, seed: 42 },
-    );
-  } finally {
-    jest.useRealTimers();
-  }
-  assert.ok(peak.above === true, 'no run ever had more engines going than the lanes it began on');
 }
 
 /** A stand-in `hold` that takes the blocks named, records each ask and answers after [param turns] microtask turns. */
@@ -2532,55 +2461,38 @@ function suitesFollowTheOrder(order: RunOrder, suites: readonly string[], select
   }
 }
 
-type SlotOffer = { readonly kind: 'give' | 'lend'; readonly lock: string } | { readonly kind: 'ended' };
+type SlotOffer = { readonly kind: 'give'; readonly lock: string } | { readonly kind: 'ended' };
 
 /**
- * The compile check takes the first slot offered while it still wants one, from a lane giving back
- * or lending it. A later offer, and any offer after the check ended, is refused, and a lend settles
- * once the check has ended.
+ * The compile check takes the first slot offered while it still wants one. A later offer, and any
+ * offer after the check ended, is refused.
  */
 async function theCompileCheckTakesOnlyTheFirstSlotOffered(): Promise<void> {
   const offer: fc.Arbitrary<SlotOffer> = fc.oneof(
-    fc.record({ kind: fc.constantFrom('give', 'lend'), lock: fc.constantFrom('0.lock', '1.lock', '2.lock') }),
+    fc.record({ kind: fc.constant('give' as const), lock: fc.constantFrom('0.lock', '1.lock', '2.lock') }),
     fc.constant({ kind: 'ended' as const }),
   );
   await fc.assert(
-    fc.asyncProperty(fc.boolean(), fc.array(offer, { maxLength: 8 }), async (inALane, offers) => {
-      const handed = new HandedSlot(inALane);
+    fc.asyncProperty(fc.array(offer, { maxLength: 8 }), async (offers) => {
+      const handed = new HandedSlot();
       let first: string | undefined;
-      let firstKind: 'give' | 'lend' | undefined;
       let ended = false;
-      const lends: Promise<void>[] = [];
-      let settledLends = 0;
       for (const step of offers) {
         if (step.kind === 'ended') {
           handed.ended();
           ended = true;
           continue;
         }
-        const takes: boolean = !ended && first === undefined && (step.kind === 'give' || inALane);
-        if (step.kind === 'give') {
-          assert.equal(handed.give(step.lock), takes, 'only the first give while wanted is taken');
-        } else {
-          lends.push(
-            handed.lend(step.lock).then(() => {
-              settledLends += 1;
-            }),
-          );
-          await Promise.resolve();
-        }
+        const takes: boolean = !ended && first === undefined;
+        assert.equal(handed.give(step.lock), takes, 'only the first give while wanted is taken');
         if (takes) {
           first = step.lock;
-          firstKind = step.kind;
         }
       }
       if (first !== undefined) {
         assert.equal(await handed.lock, first, 'the lock is the first one offered');
       }
-      assert.equal(handed.lent, firstKind === 'lend', 'a lend is told it was taken');
       handed.ended();
-      await Promise.all(lends);
-      assert.equal(settledLends, lends.length, 'every lend settles once the check has ended');
     }),
     { numRuns: 200 },
   );
@@ -3408,59 +3320,6 @@ async function aLateWaitEndsAfterHalfAnHour(): Promise<void> {
     }),
     { numRuns: 16 },
   );
-}
-
-/**
- * A process's start is read once for ten seconds. A look inside that window uses the reading, and
- * the first look at or past it reads again.
- */
-async function aProcessStartIsReadAgainOnlyAfterTenSeconds(): Promise<void> {
-  const child = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
-  const pid = child.pid;
-  assert.ok(typeof pid === 'number', 'the fixture needs a live process');
-  const began = (await startTimesOf([pid])).get(pid);
-  assert.ok(began !== undefined, 'and its start');
-  const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-start-'));
-  try {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.array(fc.constantFrom(0, 1, 9999, 10_000, 10_001, 25_000), { minLength: 1, maxLength: 8 }),
-        async (gaps) => {
-          const slots = new EngineSlots(root, 2, { pid: process.pid, started: began });
-          const file = join(root, 'spare.json');
-          const real = Date.now();
-          jest.useFakeTimers();
-          try {
-            let now = real;
-            let readAt: number | undefined;
-            for (const gap of gaps) {
-              now += gap;
-              jest.setSystemTime(now);
-              writeFileSync(file, JSON.stringify({ spare: 1, pid, started: began, written: now }));
-              assert.equal(await slots.countIn(file, 'spare'), 1, 'the file is read as live');
-              if (readAt === undefined || now - readAt >= 10_000) {
-                readAt = now;
-              }
-              const starts: unknown = Reflect.get(slots, 'starts');
-              assert.ok(starts instanceof Map, 'the readings are kept');
-              const reading: unknown = starts.get(pid);
-              assert.equal(
-                isRecord(reading) ? reading['readAt'] : undefined,
-                readAt,
-                `looks ${JSON.stringify(gaps)}`,
-              );
-            }
-          } finally {
-            jest.useRealTimers();
-          }
-        },
-      ),
-      { numRuns: 25 },
-    );
-  } finally {
-    child.kill();
-    sweep(root);
-  }
 }
 
 let strangerRuns = 0;
@@ -5212,7 +5071,6 @@ logsReadTheSameInAnyPieces();
 reportsRoundTrip();
 junkIsNeverAReport();
 await noOrderOfSlotAndMemoryWaitsHangsARun();
-await noOrderOfRisesLosesASuite();
 await theWalkGivesOnlyWhatItHolds();
 await writersTakeTurnsInTheOrderTheyAsked();
 aPlanDependsOnItsUnitsAlone();
@@ -5237,7 +5095,6 @@ await aStrangerIsJudgedOnceAndForTheFileAsWritten();
 await theKeeperAnswersEachConnectionOnce();
 await noMoreThanFourConnectionsWaitForOneGame();
 await aLateWaitEndsAfterHalfAnHour();
-await aProcessStartIsReadAgainOnlyAfterTenSeconds();
 await everyBridgeRequestSettlesOnceWithItsOwnAnswer();
 await everyFramedRequestSettlesOnceWithItsOwnAnswer('lsp');
 await everyFramedRequestSettlesOnceWithItsOwnAnswer('dap');

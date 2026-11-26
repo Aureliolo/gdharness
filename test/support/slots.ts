@@ -6,7 +6,7 @@
  * Set here, on import, before any server or command is spawned: each inherits the variables. A run
  * that names its own keeps them.
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { availableParallelism, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -143,4 +143,39 @@ function livesSaid(pid: number): string {
       ? `pid ${String(pid)} has gone`
       : `pid ${String(pid)} lives`;
   }
+}
+
+/** A taker waiting for a slot, as its mark in the waiting folder names it. */
+export interface WaitingMark {
+  readonly mark: string;
+  readonly pid: number;
+  /** When it began to wait, in milliseconds since the epoch. */
+  readonly since: number;
+  /** When it last looked, in milliseconds. */
+  readonly seen: number;
+}
+
+/** The marks of the waiting folder of [param directory] that name a pid and a start, by mark name. */
+export function slotWaiters(directory: string): WaitingMark[] {
+  const marks = join(directory, WAITING_FOLDER);
+  if (!existsSync(marks)) {
+    return [];
+  }
+  return readdirSync(marks)
+    .filter((name) => name.endsWith('.json'))
+    .toSorted()
+    .flatMap((mark) => {
+      try {
+        const named: unknown = JSON.parse(readFileSync(join(marks, mark), 'utf8'));
+        const { pid, since } = named as { pid?: unknown; since?: unknown };
+        if (typeof pid !== 'number' || typeof since !== 'number') {
+          return [];
+        }
+        const note = join(marks, mark.replace(/\.json$/u, '.seen'));
+        const seen = existsSync(note) ? statSync(note).mtimeMs : statSync(join(marks, mark)).mtimeMs;
+        return [{ mark, pid, since, seen: Math.floor(seen) }];
+      } catch {
+        return [];
+      }
+    });
 }
