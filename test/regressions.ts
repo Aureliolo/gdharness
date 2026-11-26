@@ -816,7 +816,12 @@ import {
 import { withHome } from './support/cli-home.js';
 import { consoleProbe } from './support/console-probe.js';
 import { containedEngine } from './support/contained-engine.js';
-import { crashingAfterTheRealEngine, crashingEngine, ENGINE_BANNER_LINE } from './support/crashing-engine.js';
+import {
+  crashingAfterTheRealEngine,
+  crashingEngine,
+  CRASHING_ENGINE_SOURCE,
+  ENGINE_BANNER_LINE,
+} from './support/crashing-engine.js';
 import { endEnginesUnder, untilNothingRunsUnder } from './support/engines.js';
 import { FAILED_TOP_UP } from './support/failed-top-up.js';
 import { greeting } from './support/greeting.js';
@@ -73836,6 +73841,218 @@ function testAnUnreadableWorktreeGitFileListsNoWorktrees(): void {
   }
 }
 
+/** What one character inside a GDScript string adds to the argument, where the scan goes on, and whether it closed the string. */
+function takeInsideAGdscriptString(
+  source: string,
+  at: number,
+  quote: string,
+): { text: string; at: number; closed: boolean } {
+  const char = source[at] ?? '';
+  if (char === '\\') {
+    return { text: char + (source[at + 1] ?? ''), at: at + 1, closed: false };
+  }
+  return { text: char, at, closed: char === quote };
+}
+
+/** One for an opening bracket, minus one for a closing one, nothing for any other character. */
+function gdscriptBracketDepthChange(char: string): number {
+  if (char === '(' || char === '[' || char === '{') {
+    return 1;
+  }
+  return char === ')' || char === ']' || char === '}' ? -1 : 0;
+}
+
+/** Where the scan of a GDScript call's arguments stands. */
+interface GdscriptArgumentScan {
+  found: string[];
+  depth: number;
+  quote: string | null;
+  current: string;
+}
+
+/** Takes the character at [param at] into the scan and returns the last index it used, or null when the arguments close. */
+function scanOneGdscriptCharacter(scan: GdscriptArgumentScan, source: string, at: number): number | null {
+  const char = source[at] ?? '';
+  if (scan.quote !== null) {
+    const taken = takeInsideAGdscriptString(source, at, scan.quote);
+    scan.current += taken.text;
+    scan.quote = taken.closed ? null : scan.quote;
+    return taken.at;
+  }
+  if (char === '#') {
+    const end = source.indexOf('\n', at);
+    return end === -1 ? source.length : end - 1;
+  }
+  if (char === ',' && scan.depth === 0) {
+    scan.found.push(scan.current.trim());
+    scan.current = '';
+    return at;
+  }
+  if (scan.depth === 0 && gdscriptBracketDepthChange(char) < 0) {
+    return null;
+  }
+  if (char === '"' || char === "'") {
+    scan.quote = char;
+  } else {
+    scan.depth += gdscriptBracketDepthChange(char);
+  }
+  scan.current += char;
+  return at;
+}
+
+/**
+ * The top-level arguments of the call whose opening bracket is at [param open] in [param source],
+ * GDScript: brackets inside strings and comments are not counted, and neither are commas.
+ */
+function gdscriptArguments(source: string, open: number): string[] {
+  const scan: GdscriptArgumentScan = { found: [], depth: 0, quote: null, current: '' };
+  for (let at = open + 1; at < source.length; at += 1) {
+    const last = scanOneGdscriptCharacter(scan, source, at);
+    if (last === null) {
+      const final = scan.current.trim();
+      return final === '' ? scan.found : [...scan.found, final];
+    }
+    at = last;
+  }
+  return scan.found;
+}
+
+/**
+ * Nothing in the package, its scripts or its tests starts a process except through `src/spawn.ts`,
+ * whose every start passes `windowsHide`, or the prelude that does the same for a script a test
+ * hands to Node. A process with no console gives every console program it starts a window of its
+ * own on the desktop in use, and a gate run detached after a push put about twenty of them on the
+ * screen of the person at the machine. Walked rather than listed, so a file added later is covered.
+ * A stand-in started from a string counts, which is why the words are searched for and not the
+ * imports. GDScript starts through Godot's own calls, which open no console unless asked to with
+ * `open_console`, so the shipped scripts never ask.
+ */
+function testEveryProcessStartsThroughTheHiddenSpawn(): void {
+  // Built from parts, because this file is one of the files walked.
+  const starters = [
+    ['child', 'process'].join('_'),
+    ['Bun', 'spawn'].join('.'),
+    ['Bun', '$'].join('.'),
+    ['Create', 'ProcessW('].join(''),
+    ['Start', 'Process'].join('-'),
+    ['Process', 'Start'].join('.'),
+    ['Shell', 'Execute'].join(''),
+    ['new', 'Worker'].join(' '),
+  ];
+  const shell = new RegExp(['from', "'bun'"].join(' '));
+  const roots = ['src', 'scripts', 'test'];
+  const walked = roots.flatMap((root) =>
+    readdirSync(root, { recursive: true })
+      .map(String)
+      .filter((entry) => /\.[cm]?[jt]s$/.test(entry))
+      .map((entry) => join(root, entry)),
+  );
+  assert.ok(walked.length >= 110, `the sources were walked: ${walked.length}`);
+  const starting = walked
+    .filter((file) => {
+      const source = readFileSync(file, 'utf8');
+      return starters.some((word) => source.includes(word)) || shell.test(source);
+    })
+    .toSorted();
+  assert.deepEqual(
+    starting,
+    // The desktop helper is C# text that starts an engine or a game on a desktop of its own, which
+    // spawn.ts cannot do. The helper itself is started through spawnHidden. The stand-in engine is a
+    // compiled program that cannot import spawn.ts, so each start in its source is checked below.
+    [
+      join('src', 'desktop.ts'),
+      join('src', 'spawn.ts'),
+      join('test', 'support', 'crashing-engine.ts'),
+      join('test', 'support', 'hidden-spawn.ts'),
+      join('test', 'support', 'memory-engine.ts'),
+      join('test', 'support', 'renderer-less-engine.ts'),
+    ],
+    'start a process with spawnHidden, runHidden, runSyncHidden or spawnSyncHidden from src/spawn.ts, ' +
+      'spawnShown for a game somebody asked to see, or HIDDEN_SPAWN_PRELUDE in a script handed to Node',
+  );
+  const standInStarts = ['renderer-less-engine.ts', 'memory-engine.ts'].flatMap((file) =>
+    readFileSync(join('test', 'support', file), 'utf8')
+      .split(['Bun', 'spawn'].join('.'))
+      .slice(1),
+  );
+  assert.ok(standInStarts.length >= 1, 'the stand-in engine starts the engine it hands a start to');
+  assert.deepEqual(
+    standInStarts.filter((start) => !/^\w*\([^;]*windowsHide: true/.test(start)),
+    [],
+    'every start the stand-in engine makes passes windowsHide',
+  );
+  // The crashing stand-in is C# text, so its starts pass CreateNoWindow where Node's pass windowsHide.
+  const crashingStarts = CRASHING_ENGINE_SOURCE.split(['Process', 'Start('].join('.')).length - 1;
+  assert.ok(crashingStarts >= 1, 'the crashing stand-in starts the engine it hands a start to');
+  assert.equal(
+    CRASHING_ENGINE_SOURCE.split('CreateNoWindow = true;').length - 1,
+    crashingStarts,
+    'every start the crashing stand-in makes passes CreateNoWindow',
+  );
+
+  // Godot's own: `OS.create_process(path, arguments, open_console)` and
+  // `OS.execute(path, arguments, output, read_stderr, open_console)`.
+  const consoleArgument: Record<string, number> = { create_process: 2, execute: 4 };
+  // A comma and a bracket in a string, and a comment holding the argument the walk looks for: each
+  // is skipped by one line of the reading, and the shipped call has none of them.
+  const awkward = 'OS.create_process("a, (b", [\'c)\'],  # , true)\n\tfalse)';
+  assert.deepEqual(
+    gdscriptArguments(awkward, awkward.indexOf('(')),
+    ['"a, (b"', "['c)']", 'false'],
+    'the arguments are read as GDScript reads them',
+  );
+  const scripts = ['src', 'test'].flatMap((root) =>
+    readdirSync(root, { recursive: true })
+      .map(String)
+      .filter((entry) => entry.endsWith('.gd'))
+      .map((entry) => join(root, entry)),
+  );
+  const starts: string[] = [];
+  const consoles: string[] = [];
+  const unchecked: string[] = [];
+  for (const script of scripts) {
+    const source = readFileSync(script, 'utf8');
+    // The other ways to start a program or open one, which have no console argument to check.
+    for (const call of source.matchAll(
+      /\bOS\s*\.\s*(execute_with_pipe|create_instance|shell_open|shell_show_in_file_manager)\s*\(/g,
+    )) {
+      unchecked.push(`${script} ${call[1] ?? ''}`);
+    }
+    for (const call of source.matchAll(/\bOS\s*\.\s*(create_process|execute)\s*\(/g)) {
+      const name = call[1] ?? '';
+      const given = gdscriptArguments(source, call.index + call[0].length - 1);
+      starts.push(`${script} ${name}`);
+      const asked = given[consoleArgument[name] ?? Number.POSITIVE_INFINITY];
+      if (asked !== undefined && asked !== 'false') {
+        consoles.push(`${script} ${name}(${given.join(', ')})`);
+      }
+    }
+  }
+  assert.ok(starts.length >= 1, `the scripts' process starts were found: ${JSON.stringify(starts)}`);
+  assert.deepEqual(consoles, [], 'a process a script starts opens no console window');
+  assert.deepEqual(unchecked, [], 'a script starts programs through create_process or execute alone');
+}
+
+/**
+ * The helper's command, its spec and its desktop variable are made in one place. Every other start
+ * through the helper is a call to it, which a new caller writing its own would bypass.
+ */
+function testEveryDesktopStartGoesThroughOneCall(): void {
+  const files = readdirSync('src', { recursive: true })
+    .map(String)
+    .filter((entry) => entry.endsWith('.ts'))
+    .map((entry) => join('src', entry));
+  assert.ok(files.length > 50, `the sources were walked: ${files.length}`);
+  const calling = (needle: string): string[] =>
+    files.filter((file) => readFileSync(file, 'utf8').includes(needle)).toSorted();
+  assert.deepEqual(calling(['through', 'Helper('].join('')), [join('src', 'desktop.ts')], 'the spec writer');
+  assert.deepEqual(
+    calling(['[DESKTOP', 'VARIABLE]'].join('_')),
+    [join('src', 'desktop.ts')],
+    'the desktop variable is named in one place',
+  );
+}
+
 /** Writes [param files] under [param root], by path. */
 function writeTree(root: string, files: Readonly<Record<string, string>>): void {
   for (const [path, content] of Object.entries(files)) {
@@ -119906,6 +120123,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnUnreadableWorktreeGitFileListsNoWorktrees,
   testTwoStopsOfOneKeeperSignalItsGameOnce,
   testAReplacedServerAnswersEveryCallAndLetsGoOfItsPort,
+  testEveryProcessStartsThroughTheHiddenSpawn,
+  testEveryDesktopStartGoesThroughOneCall,
   testAShareHoldsNoMoreThanTwoMinutesOfWork,
   testTheLimitedRunEndsACommandThatWillNotEndAndKeepsTheCodeOfOneThatDoes,
   testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt,
