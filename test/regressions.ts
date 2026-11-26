@@ -239,6 +239,7 @@ import {
   SlotLine,
   START_TOLERANCE_MS,
   slotCountFileOf,
+  slotMemoryFree,
   slotWaitedSaid,
   slotWaitSaid,
   UNWRITTEN_MS,
@@ -123733,12 +123734,9 @@ async function testARunEndingByItselfLeavesTheOtherRunAlone(): Promise<void> {
   });
 }
 
-/**
- * A third place waits for an engine slot when games may hold two, and starts once one is freed.
- * Of three slots the last stays for a short headless call, so two are the games'.
- */
+/** A third place waits for an engine slot while two games hold both slots, and starts once one is freed. */
 async function testAThirdPlaceWaitsForAnEngineSlot(): Promise<void> {
-  await withRunsBeside({ slots: 3 }, async ({ served, trees, start, call, slots }) => {
+  await withRunsBeside({ slots: 2 }, async ({ served, trees, start, call, slots }) => {
     const first = asNumber(get(await start(trees[0], { runtimeWaitMs: 0 }), 'pid'), 'the first run');
     const second = await start(trees[1], { runtimeWaitMs: 0 });
     assert.equal(get(second, 'started'), true, JSON.stringify(second));
@@ -127834,6 +127832,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALockPastTheCountOwesItsMemory,
   testTheMemoryCheckKeepsFourGiBBack,
   testTheContractsMemoryCheckIsWhatTheCodeDoes,
+  testATakeOnMacOSIsNeverHeldForMemory,
   testTheContractsCleanupIsWhatTheCodeDoes,
   testFilesOfRemovedRulesLeftInTheFolderChangeNothing,
   testLanesOnOneFreeSlotStartOneAndTakeTheRestBehindOlderWaiters,
@@ -129019,6 +129018,36 @@ async function testTheContractsMemoryCheckIsWhatTheCodeDoes(): Promise<void> {
   }
 }
 
+/**
+ * On macOS the memory check holds no take, as item (v) says: its reading there is undefined, and a
+ * take given no reading starts though the locks held owe far more than any machine has.
+ */
+async function testATakeOnMacOSIsNeverHeldForMemory(): Promise<void> {
+  assert.ok(
+    contractItem('v').replace(/\s+/gu, ' ').includes('On macOS only the count holds a take'),
+    'item (v) says so',
+  );
+  assert.equal(await slotMemoryFree('darwin'), undefined, 'macOS gives the check no reading');
+  const read = await slotMemoryFree('linux');
+  assert.ok(typeof read === 'number' && read > 0, `elsewhere the check reads the machine: ${String(read)}`);
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-mac-memory-'));
+  try {
+    standInLock(directory, 0, started, { memory: 1024 * GB });
+    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, undefined, {
+      need: 1 * GB,
+      available: () => Promise.resolve(undefined),
+      held: plentyOfMemory.held,
+    });
+    const taken = await slots.takeFree();
+    assert.notEqual(taken, null, 'no reading starts the engine');
+    assert.equal(slots.drawn.short, undefined, 'and names no memory short');
+    slots.release(taken ?? '');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 /** (vi) A lock or mark whose pid is gone or whose start differs is removed by the next reader. */
 async function testTheContractsCleanupIsWhatTheCodeDoes(): Promise<void> {
   const contract = contractItem('vi');
@@ -129169,7 +129198,10 @@ async function testACountLoweredBelowTheSlotsHeldStartsNothingUntilEnoughGo(): P
     slotsHeld(folder, [1, 2, 3]);
     writeFileSync(join(folder.directory, SLOT_COUNT_FILE), '2');
     const slots = new EngineSlots(folder.directory, 4, folder.me, undefined, undefined, plentyOfMemory);
-    const locks = (): string[] => readdirSync(folder.directory).filter((name) => /^\d+\.lock$/u.test(name));
+    const locks = (): string[] =>
+      readdirSync(folder.directory)
+        .filter((name) => /^\d+\.lock$/u.test(name))
+        .toSorted();
     const made: string[] = [];
     const watcher = watchFolder(folder.directory, (_, name) => {
       if (name === '0.lock') {

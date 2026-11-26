@@ -20,8 +20,8 @@
  * starts run on its slot.
  *
  * Three rules decide who takes a slot. The cap: no more engines than the count run at once. The
- * memory check: an engine starts only when the machine's free memory now, less what is kept for
- * everything else, covers its need and what every running engine still owes
+ * memory check, off macOS: an engine starts only when the machine's free memory now, less what is
+ * kept for everything else, covers its need and what every running engine still owes
  * ({@link EngineSlots.memoryShort}). The line: a taker that finds every slot held keeps a mark,
  * `${directory}/waiting/<pid>-<n>.json` holding what a lock does and when it began to wait (`since`,
  * in milliseconds), until its take ends. A free slot goes to the oldest waiter that can take it, so
@@ -537,6 +537,17 @@ interface SlotsDrawn {
   readonly short?: MemoryShort;
 }
 
+/**
+ * The memory the machine can give engines now, in bytes, as the memory check reads it, or undefined
+ * on macOS, where only the count holds a take. A small macOS machine's free share, less the memory
+ * kept, leaves no room for a second engine, so the check there would hold every engine but one.
+ */
+export async function slotMemoryFree(
+  platform: NodeJS.Platform = process.platform,
+): Promise<number | undefined> {
+  return platform === 'darwin' ? undefined : (await memoryAvailable()).bytes;
+}
+
 /** The slots of [param count], all of which any take may try. */
 function slotsDrawnOn(count: number): SlotsDrawn {
   return { numbers: Array.from({ length: count }, (_, slot) => slot) };
@@ -773,8 +784,8 @@ export class EngineSlots {
   private readonly machineMemory: number;
   /** The tool whose kept peak counts an engine this process takes a slot for, where a take names none. */
   private readonly tool: PeakTool;
-  /** The memory the machine can give engines now, in bytes. */
-  private readonly available: () => Promise<number>;
+  /** The memory the machine can give engines now, in bytes, or undefined where the check holds nothing. */
+  private readonly available: () => Promise<number | undefined>;
   /** What each of [param pids] and the processes below it hold now, in bytes. */
   private readonly heldNow: (pids: readonly number[]) => Promise<Map<number, number>>;
   /** The bytes every engine this takes counts for, in place of what its project's peaks give. */
@@ -789,7 +800,7 @@ export class EngineSlots {
     machine: {
       readonly memory?: number;
       readonly tool?: PeakTool;
-      readonly available?: () => Promise<number>;
+      readonly available?: () => Promise<number | undefined>;
       readonly held?: (pids: readonly number[]) => Promise<Map<number, number>>;
       readonly need?: number;
     } = {},
@@ -802,7 +813,7 @@ export class EngineSlots {
     this.project = project;
     this.machineMemory = machine.memory ?? totalmem();
     this.tool = machine.tool ?? 'project_test';
-    this.available = machine.available ?? (async () => (await memoryAvailable()).bytes);
+    this.available = machine.available ?? slotMemoryFree;
     this.heldNow = machine.held ?? bytesHeldBy;
     this.fixedNeed = machine.need;
     this.drawn = slotsDrawnOn(count);
@@ -1001,9 +1012,9 @@ export class EngineSlots {
   /**
    * Why an engine needing [param need] may not start now: the free memory read now, less
    * {@link MEMORY_KEPT} and what the engines running still owe ({@link owedByLocks}), does not cover
-   * it. Undefined where it does, and where no other engine holds a slot, since nothing would give
-   * memory back and an engine alone on the machine starts. With [param before], only the engines
-   * ahead of that lock are counted.
+   * it. Undefined where it does, where no other engine holds a slot, since nothing would give
+   * memory back and an engine alone on the machine starts, and where the reading is undefined
+   * ({@link slotMemoryFree}). With [param before], only the engines ahead of that lock are counted.
    */
   private async memoryShort(
     need: number,
@@ -1014,6 +1025,9 @@ export class EngineSlots {
       return undefined;
     }
     const free = await this.available();
+    if (free === undefined) {
+      return undefined;
+    }
     return free - MEMORY_KEPT - owed >= need ? undefined : { free, kept: MEMORY_KEPT, owed, need };
   }
 

@@ -791,8 +791,8 @@ nothing would see it end. An editor, and a game played from it by hand, take non
 A wait for a slot is announced. A tool call that asked for progress hears it at once and every 20
 seconds after. A call that waited a second or more in all is answered with an `engine_slot_wait`
 block. It holds `waitedMs` and a note naming who held the slots when it first waited. A wait for a
-free slot that the memory check holds back says so instead, naming the free memory, the memory
-kept, what the running engines still owe and what the engine needs.
+free slot that the memory check holds back, on Windows and Linux, says so instead, naming the free
+memory, the memory kept, what the running engines still owe and what the engine needs.
 
 `gdharness test` and `gdharness spread` print a line once the wait passes 2 seconds, and again
 every 20 seconds while it lasts. It is one line however many of its engines are waiting. Every
@@ -901,7 +901,9 @@ Take in the order you began to wait.
 #### (v) The memory check
 
 Before taking a free slot, an engine of `need` bytes checks that
-`free - kept - owed >= need`.
+`free - kept - owed >= need`. gdharness makes this check on Windows and Linux only. On macOS only
+the count holds a take, since the system's free share there, less `kept`, leaves a small machine
+room for one engine.
 
 - `free` is the memory the machine can give engines now: the free physical memory as Node's
   `os.freemem()` reads it. On Windows it is the smaller of that and the commit left
