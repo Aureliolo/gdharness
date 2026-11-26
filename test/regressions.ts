@@ -371,7 +371,12 @@ import {
   whyNoReport,
   withActualsPrinted,
 } from '../src/junit.js';
-import { askTheKeepersDebugger, askTheKeeperToStop, listenForTheServer } from '../src/keeper-channel.js';
+import {
+  askTheKeepersDebugger,
+  askTheKeeperToStop,
+  endedOnce,
+  listenForTheServer,
+} from '../src/keeper-channel.js';
 import {
   editorArguments,
   engineFlags,
@@ -32209,6 +32214,49 @@ async function saidToPieces(address: string, pieces: readonly string[]): Promise
  * stop, or is a debugger request that cannot be read, is refused with why rather than ending the
  * keeper. The listener is the real one, and a stop that throws what has no text is still answered.
  */
+/**
+ * Two servers that ask one keeper to end its game are told once that it was signalled: the second is
+ * answered that it had gone, and the game is signalled once. A stop that threw is no answer, so the
+ * stop after it still ends the game.
+ */
+async function testTwoStopsOfOneKeeperSignalItsGameOnce(): Promise<void> {
+  let signals = 0;
+  let throws = true;
+  const listening = await listenForTheServer(
+    endedOnce(() => {
+      if (throws) {
+        throws = false;
+        throw new Error('not yet');
+      }
+      signals += 1;
+      return 'signalled';
+    }),
+    null,
+  );
+  assert.ok(listening !== null, 'the keeper listens');
+  try {
+    const failed = await askTheKeeperToStop(listening.address, 10_000);
+    assert.equal(
+      typeof failed,
+      'object',
+      `a stop that threw is not answered as an end: ${JSON.stringify(failed)}`,
+    );
+    const answers = await Promise.all([
+      askTheKeeperToStop(listening.address, 10_000),
+      askTheKeeperToStop(listening.address, 10_000),
+    ]);
+    assert.deepEqual(
+      ['signalled', 'gone'].map((said) => answers.filter((answer) => answer === said).length),
+      [1, 1],
+      'one of two stops at once signals the game',
+    );
+    assert.equal(signals, 1, 'and the game is signalled once');
+    assert.equal(await askTheKeeperToStop(listening.address, 10_000), 'gone', 'a later stop is told it went');
+  } finally {
+    listening.close();
+  }
+}
+
 async function testTheKeepersListenerAnswersTheFirstLineOnly(): Promise<void> {
   let stops = 0;
   const requests: unknown[] = [];
@@ -127833,6 +127881,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheMemoryCheckKeepsFourGiBBack,
   testTheContractsMemoryCheckIsWhatTheCodeDoes,
   testATakeOnMacOSIsNeverHeldForMemory,
+  testTwoStopsOfOneKeeperSignalItsGameOnce,
   testTheContractsCleanupIsWhatTheCodeDoes,
   testFilesOfRemovedRulesLeftInTheFolderChangeNothing,
   testLanesOnOneFreeSlotStartOneAndTakeTheRestBehindOlderWaiters,

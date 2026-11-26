@@ -28,6 +28,23 @@ const DEBUG_PREFIX = 'debug ';
 /** What the keeper did when asked: ended the game, or found it already gone. */
 type KeeperAnswer = 'signalled' | 'gone';
 
+/**
+ * [param end], answering `gone` to every stop after the first it answered. A child signalled a
+ * moment ago still takes a signal, so two servers ending one game at once would each be told they
+ * had ended it, and both would say so.
+ */
+export function endedOnce(end: () => KeeperAnswer): () => KeeperAnswer {
+  let answered = false;
+  return () => {
+    if (answered) {
+      return 'gone';
+    }
+    const answer = end();
+    answered = true;
+    return answer;
+  };
+}
+
 export interface KeeperListening {
   readonly address: string;
   close(): void;
