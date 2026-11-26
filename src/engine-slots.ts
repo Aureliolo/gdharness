@@ -312,7 +312,7 @@ export const SLOT_YIELD_MS = 5000;
 const MEMORY_TAKER = 'memory';
 
 /** A taker waiting for one of the machine's slots, as its mark names it. */
-interface SlotWaiter {
+export interface SlotWaiter {
   readonly mark: string;
   readonly pid: number;
   /** When it began to wait, in milliseconds since the epoch. */
@@ -1383,6 +1383,19 @@ export class EngineSlots {
    */
   async takeFile(path: string): Promise<boolean> {
     return this.made(path) || (await this.takenOver(path, this.holder));
+  }
+
+  /** The locks of live holders in the folder, the lowest slot first, each with the holder it names. */
+  async liveLocks(): Promise<{ slot: number; lock: string; holder: SlotHolder }[]> {
+    return (await this.heldLocks(true)).flatMap(({ slot, lock, content }) => {
+      const holder = content === null ? null : holderOf(content);
+      return holder === null ? [] : [{ slot, lock, holder }];
+    });
+  }
+
+  /** The live takers waiting for a slot in the folder, as their marks name them. */
+  async waiters(): Promise<SlotWaiter[]> {
+    return await slotWaitersAsync(this.directory, (content, writtenAt) => this.freeAsRead(content, writtenAt));
   }
 
   /** Who holds the slots the last look could take, in the order it tried them, leaving out a lock that cannot be read. */
