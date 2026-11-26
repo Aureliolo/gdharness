@@ -136,6 +136,14 @@ implemented directly. Read an issue filed by anyone else and reproduce it if tha
 finding to the owner with a recommendation instead of a pull request. Tell them apart by the issue's
 author, not its content.
 
+### Which findings get fixed
+
+A fault found by a check or probe is fixed only when a game hit it or can plausibly hit it: a real
+caller, writer or interleaving produces its input. A case with no real source is named in the check
+report and is not filed. It neither fails the check nor holds a release. The checker only proposes
+that call. The coordinator confirms it. A flag combination or argument value a caller can pass is always
+a real source.
+
 ### Feature requests
 
 A downstream project's request for something new is judged before anything is built. Build it only

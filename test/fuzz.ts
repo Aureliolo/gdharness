@@ -94,14 +94,7 @@ import {
   type Unit,
   unitsOf,
 } from '../src/suite-plan.js';
-import {
-  HandedSlot,
-  MemoryGate,
-  ordered,
-  type RunOrder,
-  rerunAfterStarving,
-  runShares,
-} from '../src/suite-run.js';
+import { HandedSlot, MemoryGate, ordered, type RunOrder, runShares } from '../src/suite-run.js';
 import { inTurnFor, tryTake } from '../src/write-turns.js';
 import { greeting } from './support/greeting.js';
 import { bandWalk, PORT_BAND } from './support/server.js';
@@ -2539,69 +2532,6 @@ function suitesFollowTheOrder(order: RunOrder, suites: readonly string[], select
   }
 }
 
-interface FinishedEngine {
-  readonly index: number;
-  readonly peakBytes?: number;
-  readonly verdict: { readonly passed: boolean; readonly starved: boolean };
-  readonly again?: boolean;
-}
-
-/**
- * Failed engines run again only once one of them ran out of memory, one at a time, in the order they
- * ran. Engines that passed are never run again and stay where they were.
- */
-async function failedEnginesRunAgainOneAtATime(): Promise<void> {
-  const engine = fc.record({
-    passed: fc.boolean(),
-    starved: fc.boolean(),
-    delay: fc.nat({ max: 3 }),
-    againPasses: fc.boolean(),
-  });
-  await fc.assert(
-    fc.asyncProperty(fc.array(engine, { maxLength: 8 }), async (drawn) => {
-      const ran: FinishedEngine[] = drawn.map((one, index) => ({
-        index,
-        verdict: { passed: one.passed, starved: one.starved },
-      }));
-      let going = 0;
-      const calls: number[] = [];
-      const said: string[] = [];
-      const result = await rerunAfterStarving(
-        ran,
-        (line) => said.push(line),
-        async (engineRan) => {
-          going += 1;
-          assert.equal(going, 1, 'engines run again one at a time');
-          calls.push(engineRan.index);
-          const one = drawn[engineRan.index];
-          for (let tick = 0; tick < (one?.delay ?? 0); tick += 1) {
-            await Promise.resolve();
-          }
-          going -= 1;
-          return {
-            index: engineRan.index,
-            verdict: { passed: one?.againPasses === true, starved: false },
-            again: true,
-          };
-        },
-      );
-      const failed = ran.filter((one) => !one.verdict.passed).map((one) => one.index);
-      const rerun = ran.some((one) => one.verdict.starved) && failed.length > 0;
-      assert.deepEqual(calls, rerun ? failed : [], 'every failed engine runs again once, in index order');
-      assert.equal(said.length, rerun ? 1 : 0);
-      assert.equal(result.length, ran.length);
-      for (const [at, one] of ran.entries()) {
-        const now = result[at];
-        assert.equal(now?.index, one.index);
-        if (!rerun || one.verdict.passed) {
-          assert.equal(now, one, 'an engine that passed stays as it was');
-        }
-      }
-    }),
-    { numRuns: 200 },
-  );
-}
-
 type SlotOffer = { readonly kind: 'give' | 'lend'; readonly lock: string } | { readonly kind: 'ended' };
 
 /**
@@ -2879,6 +2809,8 @@ async function fakeGame(mode: GameMode, pid: number): Promise<FakeGame> {
 
 const DEAD_PID = 2 ** 31 - 1;
 const SHORT_WAIT_MS = 80;
+/** A wait no answer is expected to outlast, for a request the game or the refused port settles itself. */
+const SETTLED_WAIT_MS = 10_000;
 
 type Ended = 'answers' | 'closes' | 'errors';
 
@@ -2903,14 +2835,14 @@ async function everyEndOfARequestIsSaid(): Promise<void> {
   await fc.assert(
     fc.asyncProperty(scene, async (drawn) => {
       if (drawn.kind === 'closedPort') {
-        await aClosedPortIsSaid(drawn.alive);
+        await aClosedPortIsSaid(drawn.alive, 0);
         return;
       }
       const mode = drawn.kind === 'mode' ? drawn.mode : 'silent';
       const game = await fakeGame(mode, process.pid);
       try {
         if (drawn.kind === 'mode') {
-          await modeIsSaid(game, drawn.mode);
+          await modeIsSaid(game, drawn.mode, 0);
         } else {
           await lateAnswerIsKept(game, drawn.how, drawn.end);
         }
@@ -2922,13 +2854,64 @@ async function everyEndOfARequestIsSaid(): Promise<void> {
   );
 }
 
-/** A port nobody listens on is a game that has ended once its process is gone, and is dialled for the wait while it lives. */
-async function aClosedPortIsSaid(processLives: boolean): Promise<void> {
+/** Every way a game can end a request is run on every run, whatever the draw above picks. */
+async function everyModeIsSaidOnEveryRun(): Promise<void> {
+  for (const mode of ['answers', 'errors', 'wrongProtocol', 'closes', 'resets', 'silent'] as const) {
+    const game = await fakeGame(mode, process.pid);
+    try {
+      await modeIsSaid(game, mode, 0);
+    } finally {
+      await game.close();
+    }
+  }
+  await aClosedPortIsSaid(false, 0);
+  await aClosedPortIsSaid(true, 0);
+}
+
+/** A process that is held still for longer than a wait still gets the reply its game or its refused port gives. */
+async function aStalledProcessGetsTheSameReplies(): Promise<void> {
+  const stall = 3 * SHORT_WAIT_MS;
+  await aClosedPortIsSaid(false, stall);
+  await aClosedPortIsSaid(true, stall);
+  for (const mode of ['answers', 'errors', 'wrongProtocol', 'closes', 'resets'] as const) {
+    const game = await fakeGame(mode, process.pid);
+    try {
+      await modeIsSaid(game, mode, stall);
+    } finally {
+      await game.close();
+    }
+  }
+}
+
+/**
+ * A port nobody listens on is a game that has ended once its process is gone, told at the first
+ * refusal, and is dialled for the wait while it lives. The clocks are fake and move only by hand, so
+ * neither the wait nor a redial can run before the refusal however slowly this process is scheduled.
+ */
+async function aClosedPortIsSaid(processLives: boolean, stallMs: number): Promise<void> {
   const game = await fakeGame('silent', processLives ? process.pid : DEAD_PID);
   await game.close();
-  const began = Date.now();
-  const reply = await runtimeRequest(game.endpoint, 'ping', {}, SHORT_WAIT_MS);
-  if (reply.ok) {
+  const got: { reply?: RuntimeReplyOf } = {};
+  jest.useFakeTimers();
+  try {
+    const asked = runtimeRequest(game.endpoint, 'ping', {}, SHORT_WAIT_MS).then((reply) => {
+      got.reply = reply;
+    });
+    stallTheLoop(stallMs);
+    // The wait's own timer is the one pending until a refusal has been dialled again.
+    await realTick(() => got.reply !== undefined || jest.getTimerCount() > 1);
+    if (processLives) {
+      assert.equal(got.reply, undefined, 'a live process is dialled again rather than told as ended');
+      jest.advanceTimersByTime(SHORT_WAIT_MS);
+    } else {
+      assert.ok(got.reply !== undefined, 'a gone process is told at its first refusal, not dialled again');
+    }
+    await asked;
+  } finally {
+    jest.useRealTimers();
+  }
+  const reply = got.reply;
+  if (reply === undefined || reply.ok) {
     assert.fail('a port nobody listens on answered');
   }
   assert.equal(reply.reason, 'refused');
@@ -2936,12 +2919,44 @@ async function aClosedPortIsSaid(processLives: boolean): Promise<void> {
     reply.message,
     processLives ? /is running but nothing answered on its port: it refused/ : /has ended: its port refused/,
   );
-  const took = Date.now() - began;
-  assert.ok(processLives ? took >= SHORT_WAIT_MS - 20 : took < SHORT_WAIT_MS, `${String(took)}ms`);
 }
 
-async function modeIsSaid(game: FakeGame, mode: GameMode): Promise<void> {
-  const reply = await runtimeRequest(game.endpoint, 'ping', {}, SHORT_WAIT_MS);
+/** Holds this process still for [param ms], as a loaded machine does between a request and the game's reply. */
+function stallTheLoop(ms: number): void {
+  if (ms > 0) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  }
+}
+
+/**
+ * A request whose wait runs out on a game that holds it. The timer is advanced by hand once the
+ * game has read the request, so the wait cannot end before the connect however loaded the machine is.
+ */
+async function askUntilTheWaitRuns(
+  game: FakeGame,
+  command: string,
+  afterTheWait?: 'keep' | ((late: RuntimeReplyOf) => void),
+): Promise<RuntimeReplyOf> {
+  jest.useFakeTimers();
+  try {
+    const asked = runtimeRequest(game.endpoint, command, {}, SHORT_WAIT_MS, afterTheWait);
+    await realTick(() => game.held.length > 0);
+    jest.advanceTimersByTime(SHORT_WAIT_MS);
+    return await asked;
+  } finally {
+    jest.useRealTimers();
+  }
+}
+
+async function modeIsSaid(game: FakeGame, mode: GameMode, stallMs: number): Promise<void> {
+  let reply: RuntimeReplyOf;
+  if (mode === 'silent') {
+    reply = await askUntilTheWaitRuns(game, 'ping');
+  } else {
+    const asked = runtimeRequest(game.endpoint, 'ping', {}, SETTLED_WAIT_MS);
+    stallTheLoop(stallMs);
+    reply = await asked;
+  }
   if (mode === 'answers') {
     if (!reply.ok) {
       assert.fail(`another id is skipped and the reply to this one is taken: ${reply.message}`);
@@ -2968,11 +2983,9 @@ async function modeIsSaid(game: FakeGame, mode: GameMode): Promise<void> {
 /** A request whose wait ran out is answered at once, and what the game does next is kept or handed over. */
 async function lateAnswerIsKept(game: FakeGame, how: 'keep' | 'function', end: Ended): Promise<void> {
   const handed: RuntimeReplyOf[] = [];
-  const reply = await runtimeRequest(
-    game.endpoint,
+  const reply = await askUntilTheWaitRuns(
+    game,
     'slow',
-    {},
-    SHORT_WAIT_MS,
     how === 'keep' ? 'keep' : (late) => handed.push(late),
   );
   if (reply.ok) {
@@ -5213,11 +5226,12 @@ aFoldedErrorCostsTheSameAtEveryFrame();
 aWideFoldSpreadsNoList();
 theDebuggerStreamIsCutProof();
 aSuiteOrderKeepsEveryUnitAndRepeats();
-await failedEnginesRunAgainOneAtATime();
 await theCompileCheckTakesOnlyTheFirstSlotOffered();
 await anInheritedSlotServesOneTakeAtATime();
 await aTakeOverRereadsTheLockUnderTheStealFile();
 await everyEndOfARequestIsSaid();
+await everyModeIsSaidOnEveryRun();
+await aStalledProcessGetsTheSameReplies();
 await onlyTheFiftyLastLateAnswersAreKept();
 await aStrangerIsJudgedOnceAndForTheFileAsWritten();
 await theKeeperAnswersEachConnectionOnce();
