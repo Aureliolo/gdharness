@@ -15003,6 +15003,7 @@ export class GodotServer {
     const probe: AnnounceProbe = {
       asking: null,
       editorAskedAt: 0,
+      editorFirstAskedAt: 0,
       editorSaysGoing: true,
       editorAsks: 0,
       holding: null,
@@ -15028,17 +15029,20 @@ export class GodotServer {
       giveUp: () => this.giveUpOnTheAnnouncement(started, probe),
     });
     // How the wait ended, for the log a slow start is read back from: what it found, how long it
-    // took, and how often the editor was asked on the way.
+    // took, how often the editor was asked on the way and how far into the wait it was first asked.
     // A run started here never asks the editor, and "last said playing" about an editor nobody
-    // asked is the closure's starting value rather than an answer.
+    // asked is the closure's starting value rather than an answer. The end is also given as wall
+    // time in epoch milliseconds, so it can be set against a file's modification time from the
+    // server's own clock rather than from when a reader got the line.
     const asked =
       probe.editorAsks === 0
         ? 'editor not asked'
-        : `editor asked ${probe.editorAsks === 1 ? 'once' : `${probe.editorAsks} times`}, last said ${probe.editorSaysGoing ? 'playing' : 'not playing'}`;
+        : `editor asked ${probe.editorAsks === 1 ? 'once' : `${probe.editorAsks} times`}, last said ${probe.editorSaysGoing ? 'playing' : 'not playing'}, first asked ${probe.editorFirstAskedAt - waitBegan}ms in`;
+    const waitEnded = Date.now();
     this.logDebug(
-      `announce wait ended after ${Date.now() - waitBegan}ms: ${
+      `announce wait ended after ${waitEnded - waitBegan}ms: ${
         fresh.length === 0 ? 'nothing announced' : `pid ${fresh.map((one) => one.pid).join(', ')} announced`
-      }, ${asked}`,
+      }, ${asked}, ended at ${waitEnded}`,
     );
     return await this.verdictOnTheAnnouncement(started, fresh, { budget, withArgs });
   }
@@ -15097,6 +15101,9 @@ export class GodotServer {
       return;
     }
     probe.editorAskedAt = Date.now();
+    if (probe.editorAsks === 0) {
+      probe.editorFirstAskedAt = probe.editorAskedAt;
+    }
     probe.editorAsks += 1;
     probe.asking = this.runStillGoing(run)
       .then((going) => {
@@ -22890,6 +22897,7 @@ function screenshotScratchFor(expectsScreenshot: boolean): {
 interface AnnounceProbe {
   asking: Promise<void> | null;
   editorAskedAt: number;
+  editorFirstAskedAt: number;
   editorSaysGoing: boolean;
   editorAsks: number;
   holding: Promise<void> | null;

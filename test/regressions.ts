@@ -54648,9 +54648,10 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
  * The editor's answer is an event and not a clock reading, because the announcement and the
  * answer are both written by timers of this process. A stall of this process on a loaded runner
  * delays both together, so the answer then came right behind the announcement and a wait that was
- * never held read as one the editor held. The two lengths that are bounded are each read between
- * two moments a stall at the write moves together: from the write to the server's line saying the
- * wait ended, and the server's whole wait less the part of it this process spent after the ask.
+ * never held read as one the editor held. The two lengths that are bounded are read from the
+ * server's clock and the file's own timestamp, so a stall of this process moves neither: how far
+ * into the wait the server first asked, and from the announcement's modification time to the wall
+ * time the server says its wait ended.
  */
 async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
   const answersBeforeThePlayAfterMs = 700;
@@ -54663,6 +54664,7 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
   let playedAt = 0;
   let askedAfterThePlayAt = 0;
   let writtenAt = 0;
+  let announcedAt = 0;
   let endSaidAt = 0;
   let startReturned = false;
   let answeredAfterThePlay = false;
@@ -54707,6 +54709,8 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
                 'utf8',
               );
               writtenAt = Date.now();
+              // The file's own timestamp, which a stall of this process after the write does not move.
+              announcedAt = statSync(join(runtimeDir, `runtime-${String(game.pid)}.json`)).mtimeMs;
             }, announcesAfterTheAskMs);
           }
           await released;
@@ -54760,7 +54764,11 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
       );
       assert.equal(get(found.answer, 'runtime', 'pid'), game.pid, JSON.stringify(found.answer));
       const waited = account
-        .map((line) => /announce wait ended after (\d+)ms: pid (\d+) announced, editor asked/.exec(line))
+        .map((line) =>
+          /announce wait ended after (\d+)ms: pid (\d+) announced, editor asked .*, first asked (\d+)ms in, ended at (\d+)$/.exec(
+            line,
+          ),
+        )
         .find((line) => line !== null);
       assert.ok(
         waited !== undefined,
@@ -54776,13 +54784,17 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
         false,
         `and found before the editor answered the question it was asked after the play: ${moments}; ${told}`,
       );
-      assert.ok(writtenAt > 0 && endSaidAt >= writtenAt, `the wait should end after the write: ${moments}`);
-      const foundMs = endSaidAt - writtenAt;
+      assert.ok(writtenAt > 0 && announcedAt > 0, `the announcement should have been written: ${moments}`);
+      const foundMs = Math.round(Number(waited[4]) - announcedAt);
+      assert.ok(
+        foundMs >= 0,
+        `the wait should end after the write: ${String(foundMs)}ms; ${moments}; ${told}`,
+      );
       assert.ok(
         foundMs <= findsWithinMs,
         `the wait ended ${String(foundMs)}ms after the announcement was written, against ${String(findsWithinMs)}ms: ${moments}; ${told}`,
       );
-      const askedMs = Number(waited[1]) - (endSaidAt - askedAfterThePlayAt);
+      const askedMs = Number(waited[3]);
       assert.ok(
         askedMs <= asksWithinMs,
         `the wait asked the editor ${String(askedMs)}ms after it began, against ${String(asksWithinMs)}ms: ${moments}; ${told}`,
