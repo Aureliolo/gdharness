@@ -817,9 +817,9 @@ import { withHome } from './support/cli-home.js';
 import { consoleProbe } from './support/console-probe.js';
 import { containedEngine } from './support/contained-engine.js';
 import {
+  CRASHING_ENGINE_SOURCE,
   crashingAfterTheRealEngine,
   crashingEngine,
-  CRASHING_ENGINE_SOURCE,
   ENGINE_BANNER_LINE,
 } from './support/crashing-engine.js';
 import { endEnginesUnder, untilNothingRunsUnder } from './support/engines.js';
