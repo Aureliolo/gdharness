@@ -1257,7 +1257,10 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number; abo
     const engine = { need, held: 0 };
     going.set(index, engine);
     peak.engines = Math.max(peak.engines, going.size);
-    assert.ok(going.size <= setup.lanes, `${String(going.size)} engines going on ${String(setup.lanes)} lanes`);
+    assert.ok(
+      going.size <= setup.lanes,
+      `${String(going.size)} engines going on ${String(setup.lanes)} lanes`,
+    );
     if (going.size > setup.lanes) {
       peak.above = true;
     }

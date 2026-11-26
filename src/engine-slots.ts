@@ -66,13 +66,32 @@ import { alive } from './alive.js';
 import { cacheHome } from './cache-home.js';
 import { callNotes, callProgress, callSignal, callSlotWaits, waitedUnlessAborted } from './call-signal.js';
 import { helperPid } from './desktop.js';
-import { ceilingFor, engineNeed, gigabytes, MEMORY_KEPT, MEMORY_PER_ENGINE, memoryAvailable } from './engine-memory.js';
-import { heldBy } from './engine-spent.js';
+import {
+  ceilingFor,
+  engineNeed,
+  gigabytes,
+  MEMORY_KEPT,
+  MEMORY_PER_ENGINE,
+  memoryAvailable,
+} from './engine-memory.js';
+import { heldBy as bytesHeldBy } from './engine-spent.js';
 import { wholeFlag } from './launch.js';
-import { ancestorsIn, type ProcessTree, processTree, readCommandLine, startTimesOf } from './process-children.js';
+import {
+  ancestorsIn,
+  type ProcessTree,
+  processTree,
+  readCommandLine,
+  startTimesOf,
+} from './process-children.js';
 import { isRecord } from './records.js';
 import { type PeakTool, readEnginePeaks } from './run-record.js';
-import { askForSlot, delegateWaitedSaid, delegateWaitSaid, type SlotGrant, slotCommandOf } from './slot-delegate.js';
+import {
+  askForSlot,
+  delegateWaitedSaid,
+  delegateWaitSaid,
+  type SlotGrant,
+  slotCommandOf,
+} from './slot-delegate.js';
 import { Turns } from './turns.js';
 import {
   changeWholeAsync,
@@ -312,7 +331,7 @@ export const SLOT_YIELD_MS = 5000;
 const MEMORY_TAKER = 'memory';
 
 /** A taker waiting for one of the machine's slots, as its mark names it. */
-export interface SlotWaiter {
+interface SlotWaiter {
   readonly mark: string;
   readonly pid: number;
   /** When it began to wait, in milliseconds since the epoch. */
@@ -392,7 +411,7 @@ function waiterOfMark(marks: string, mark: string, content: string, madeAt: numb
  * from the nanoseconds, since `mtimeMs` is a double that rounds a time ending in .9999 ms up to the
  * next millisecond.
  */
-export function fileTimeMs(stats: { readonly mtimeNs: bigint }): number {
+function fileTimeMs(stats: { readonly mtimeNs: bigint }): number {
   return Number(stats.mtimeNs / 1_000_000n);
 }
 
@@ -495,9 +514,6 @@ export class SlotLine {
   }
 }
 
-/** The TIMED variable names the slot a measurement lends the programs it runs. */
-const TIMED_VARIABLE = 'GODOT_ENGINE_TIMED';
-
 /** Why a take with a free slot waits: the machine's memory does not cover what its engine needs. */
 interface MemoryShort {
   /** The memory the machine can give engines now, in bytes. */
@@ -523,7 +539,6 @@ interface SlotsDrawn {
 function slotsDrawnOn(count: number): SlotsDrawn {
   return { numbers: Array.from({ length: count }, (_, slot) => slot) };
 }
-
 
 /** The waits this process has marked, which makes each mark's name its own. */
 let waitsMarked = 0;
@@ -737,11 +752,6 @@ export class EngineSlots {
   private readonly passedOver = new Map<string, number>();
   /** The slot of the engine that started this process while one of its engines runs on it. */
   private inherited: string | null = null;
-  /**
-   * Whether the inherited slot is one a timing or a heavy job lends, which a program inside it takes
-   * no slot beside: its engines wait for the lent one, as a job started inside a job does.
-   */
-  private jobLent = false;
   /** The last look at the inherited slot, which the next one waits for. */
   private readonly inheriting = new Turns();
   /** The slots a delegate command granted this process and still holds, by lock: {@link slotCommandOf}. */
@@ -795,7 +805,7 @@ export class EngineSlots {
     this.machineMemory = machine.memory ?? totalmem();
     this.tool = machine.tool ?? 'project_test';
     this.available = machine.available ?? (async () => (await memoryAvailable()).bytes);
-    this.heldNow = machine.held ?? heldBy;
+    this.heldNow = machine.held ?? bytesHeldBy;
     this.fixedNeed = machine.need;
     this.drawn = slotsDrawnOn(count);
   }
@@ -861,7 +871,6 @@ export class EngineSlots {
     const began = line.since;
     let said = Number.NEGATIVE_INFINITY;
     let mark: string | undefined;
-    let lentWaitSaid = false;
     let changes: FolderChanges | undefined;
     try {
       for (;;) {
@@ -870,14 +879,7 @@ export class EngineSlots {
         if (lock !== null) {
           return lock;
         }
-        if (this.waitsOnTheLentSlot()) {
-          // The wait is for the slot the job lent alone, which no other program could take, so
-          // nothing in the machine's waiting folder says it waits.
-          if (!lentWaitSaid) {
-            lentWaitSaid = true;
-            blocked?.();
-          }
-        } else if (mark === undefined) {
+        if (mark === undefined) {
           mark = await this.waitMarkedAsync(line);
           blocked?.();
         }
@@ -1027,9 +1029,6 @@ export class EngineSlots {
     if (inherited !== null) {
       return inherited;
     }
-    if (this.waitsOnTheLentSlot()) {
-      return null;
-    }
     const placed = line ?? new SlotLine(this.holder.pid);
     this.drawn = slotsDrawnOn(this.cap);
     if (placed.mark !== undefined) {
@@ -1042,7 +1041,7 @@ export class EngineSlots {
       return null;
     }
     const need = placed.need > 0 ? placed.need : this.memoryNeeded(game, this.project);
-    if (await this.shortOfMemory(need)) {
+    if (await this.memoryHoldsBack(need)) {
       return null;
     }
     const lock = await this.lockOneOf(tried, need);
@@ -1105,7 +1104,7 @@ export class EngineSlots {
   }
 
   /** Whether the engine of a take may not start now for want of memory, which it records in the draw. */
-  private async shortOfMemory(need: number): Promise<boolean> {
+  private async memoryHoldsBack(need: number): Promise<boolean> {
     const short = await this.memoryShort(need);
     if (short === undefined) {
       return false;
@@ -1162,11 +1161,6 @@ export class EngineSlots {
       }
     }
     return held;
-  }
-
-  /** Whether this process runs inside a job, whose lent slot it already holds and no take can add to. */
-  private waitsOnTheLentSlot(): boolean {
-    return this.inherited !== null && this.jobLent;
   }
 
   /** Locks the first of [param slots] that is made fresh or taken over, and answers its path. */
@@ -1242,19 +1236,7 @@ export class EngineSlots {
    * so the variable alone would put it on the editor's slot.
    */
   private async inheritedLock(): Promise<string | null> {
-    this.jobLent = false;
-    const engines = await this.engineLock();
-    if (engines !== null) {
-      return engines;
-    }
-    const lent = nonEmpty(process.env[TIMED_VARIABLE]);
-    const content = lent === undefined ? null : await readWholeAsync(lent);
-    const holder = content === null ? null : holderOf(content);
-    if (lent === undefined || holder === null || holder.pid === process.pid || (await this.free(lent))) {
-      return null;
-    }
-    this.jobLent = true;
-    return lent;
+    return await this.engineLock();
   }
 
   /** The lock of the engine above this process, which [constant HELD_VARIABLE] names, or null. */
@@ -1383,19 +1365,6 @@ export class EngineSlots {
    */
   async takeFile(path: string): Promise<boolean> {
     return this.made(path) || (await this.takenOver(path, this.holder));
-  }
-
-  /** The locks of live holders in the folder, the lowest slot first, each with the holder it names. */
-  async liveLocks(): Promise<{ slot: number; lock: string; holder: SlotHolder }[]> {
-    return (await this.heldLocks(true)).flatMap(({ slot, lock, content }) => {
-      const holder = content === null ? null : holderOf(content);
-      return holder === null ? [] : [{ slot, lock, holder }];
-    });
-  }
-
-  /** The live takers waiting for a slot in the folder, as their marks name them. */
-  async waiters(): Promise<SlotWaiter[]> {
-    return await slotWaitersAsync(this.directory, (content, writtenAt) => this.freeAsRead(content, writtenAt));
   }
 
   /** Who holds the slots the last look could take, in the order it tried them, leaving out a lock that cannot be read. */
@@ -1691,7 +1660,6 @@ function handedText(content: string | null, from: number, to: SlotHolder): strin
   });
 }
 
-
 /**
  * Raises the `memory` of the slot at [param lock] to [param bytes] where it counts less and this
  * process holds it, so the memory check counts an engine that grew past what its take counted. A figure is
@@ -1853,7 +1821,6 @@ function processSlots(): Promise<EngineSlots> {
 export function nameSlotTaker(by: string): void {
   takenBy = by;
 }
-
 
 /**
  * What waiting for a slot says, after [param waitedMs], to the client of the call that waits:

@@ -28,7 +28,6 @@ export const SLOT_VARIABLES = [
   'GODOT_ENGINE_SLOT_COMMAND',
   SLOTS_VARIABLE,
   SLOT_COUNT_VARIABLE,
-  'GODOT_ENGINE_TIMED',
   // The marker of a job the machine's queue runs, which nothing here reads but a program started
   // inside the job would.
   ['GODOT', 'TOOLS', 'JOB'].join('_'),
@@ -92,9 +91,7 @@ export function leftInSlots(slots: string): string[] {
       : [];
   };
   return [
-    ...readdirSync(slots).filter(
-      (name) => name !== WAITING_FOLDER && name !== PROJECTS_FOLDER,
-    ),
+    ...readdirSync(slots).filter((name) => name !== WAITING_FOLDER && name !== PROJECTS_FOLDER),
     ...inside(WAITING_FOLDER, (name) => !name.endsWith(ENDED_SUFFIX)),
     ...inside(PROJECTS_FOLDER, () => true),
   ].toSorted();
@@ -167,7 +164,10 @@ export function slotWaiters(directory: string): WaitingMark[] {
     .flatMap((mark) => {
       try {
         const named: unknown = JSON.parse(readFileSync(join(marks, mark), 'utf8'));
-        const { pid, since } = named as { pid?: unknown; since?: unknown };
+        const pid: unknown =
+          typeof named === 'object' && named !== null ? Reflect.get(named, 'pid') : undefined;
+        const since: unknown =
+          typeof named === 'object' && named !== null ? Reflect.get(named, 'since') : undefined;
         if (typeof pid !== 'number' || typeof since !== 'number') {
           return [];
         }

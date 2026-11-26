@@ -260,7 +260,6 @@ export function roomForAnother(available: number, owed: number, need: number): b
   return available - MEMORY_KEPT - owed >= need;
 }
 
-
 /**
  * Why an engine of [param tool] for [param project] is not started, or null: what the project's last
  * engine of that tool held (at most [param ceiling]) is more than the machine has left past what it
@@ -281,7 +280,6 @@ export async function memoryRefusal(
   const free = await room();
   return free.bytes - MEMORY_KEPT >= need.bytes ? null : startRefusedSaid(need, free, MEMORY_KEPT, ceiling);
 }
-
 
 /**
  * [param run] over every one of [param items], [param at] at most at a time, answered in their

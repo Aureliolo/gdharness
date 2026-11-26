@@ -49,11 +49,7 @@ import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
 import { memoryAvailable } from './engine-memory.js';
 import type { EngineRun } from './engine-run.js';
 import { SHARES_IN, type ShareEnded, type ShareNext, shareText } from './engine-shares.js';
-import {
-  EngineSlots,
-  machineSlots,
-  ownStart,
-} from './engine-slots.js';
+import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
 import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE, GameLog } from './game-log.js';
 import { type ImportOutcome, runImport } from './headless.js';
@@ -227,8 +223,7 @@ export interface RunResult {
    */
   readonly slowCases?: readonly SlowCase[] | undefined;
   /**
-   * The engines asked for, before the room on the machine and the slots held the run to fewer. A
-   * gate's lanes file may raise the run above it.
+   * The engines asked for, before the room on the machine and the slots held the run to fewer.
    */
   readonly enginesAsked: number;
   /** How many of the slots its lanes take were free as it began. Fewer than the lanes is a shared run. */
@@ -1418,11 +1413,7 @@ export class MemoryGate {
   /** What callers waiting for their turn were asked to do once the caller ahead of them stalls. */
   private readonly queuedWaits = new Set<() => void>();
 
-  constructor(
-    slots: Pick<EngineSlots, 'markWaiting'>,
-    read: () => Promise<number>,
-    lookMs = MEMORY_LOOK_MS,
-  ) {
+  constructor(slots: Pick<EngineSlots, 'markWaiting'>, read: () => Promise<number>, lookMs = MEMORY_LOOK_MS) {
     this.slots = slots;
     this.read = read;
     this.lookMs = lookMs;
@@ -1834,7 +1825,7 @@ function compiledPrint(
  * no slot is taken, which a `--changed-only` run with nothing to run otherwise waited for. A clean
  * check is kept only when nothing it read changed while it ran.
  */
-export async function compileUnlessUnchanged(
+async function compileUnlessUnchanged(
   launch: CheckLaunch,
   suites: readonly DeclaredSuite[],
   kept: CompileKept | null,
@@ -2135,9 +2126,9 @@ export async function runShares<
    * Answers 'again' when the lane waited for memory, which gives its slot back meanwhile and admits
    * nothing, or when a heavier share is left than the one admitted for, which is admitted again.
    */
-  const memoryHeld = async (
-    held: { lock: string | null },
-  ): Promise<{ readonly admitted: Admitted | undefined } | 'again'> => {
+  const memoryHeld = async (held: {
+    lock: string | null;
+  }): Promise<{ readonly admitted: Admitted | undefined } | 'again'> => {
     const admitted = await memory?.admit(handedOut.signal, needed, () => {
       slotGivenBack(held);
     });
@@ -2147,7 +2138,7 @@ export async function runShares<
     if (admitted === undefined || needed() <= admitted.need) {
       return { admitted };
     }
-    admitted?.ended();
+    admitted.ended();
     return 'again';
   };
   /**
@@ -2155,9 +2146,9 @@ export async function runShares<
    * lane short of memory gives its slot back while it waits, then takes a slot again and asks memory
    * again, so it never holds a slot while it waits for memory nor memory while it waits for a slot.
    */
-  const waitedFor = async (
-    held: { lock: string | null },
-  ): Promise<{ readonly lock: string; readonly admitted: Admitted | undefined } | null> => {
+  const waitedFor = async (held: {
+    lock: string | null;
+  }): Promise<{ readonly lock: string; readonly admitted: Admitted | undefined } | null> => {
     for (;;) {
       const got = await slotHeld(held);
       if (got === null) {
@@ -2240,12 +2231,7 @@ export async function runShares<
       ran.push(one);
     };
     const reuse: ShareReuse<T> = {
-      next: async () => {
-        if (empty()) {
-          return null;
-        }
-        return draw(at);
-      },
+      next: () => Promise.resolve(empty() ? null : draw(at)),
       done: noted,
     };
     try {
