@@ -29198,13 +29198,9 @@ async function assertARunFollowsTheGamesRestartIntoItsSuccessor(
   assert.equal(get(going.answer, 'pid'), one.successor, going.said);
   // The slot its keeper holds stays locked while the successor runs, so what it starts rides it.
   const successorLock = readFileSync(join(project, 'successor_lock'), 'utf8');
-  const lockIsHeld = (): boolean => {
-    const taken = tryOsLock(successorLock);
-    taken?.release();
-    return taken === null;
-  };
-  await cameTrue(lockIsHeld, 10_000);
-  assert.ok(lockIsHeld(), `the slot stays held while the successor runs: ${successorLock}`);
+  const successorHeld = (): boolean => lockIsHeld(successorLock);
+  await cameTrue(successorHeld, 10_000);
+  assert.ok(successorHeld(), `the slot stays held while the successor runs: ${successorLock}`);
   assert.deepEqual(
     asArray(get(going.answer, 'restartedFrom')).map((before) => [
       get(before, 'pid'),
@@ -74060,29 +74056,11 @@ function testAnUnreadableWorktreeGitFileListsNoWorktrees(): void {
 }
 
 /**
- * A game the server starts for a project, a test run among them, takes its slot for that project,
- * so its wait carries the project's repository. The server's start needs an engine to run, so the
- * hand-over is read from its source: every call names the project, and the slot take receives it.
+ * An export's engine runs under its project's lock, so every export names its project. The server
+ * needs an engine to run, so the names are read from its source.
  */
-function testEveryGameTheServerStartsTakesItsSlotForItsProject(): void {
+function testEveryExportNamesItsProject(): void {
   const source = readFileSync('src/server.ts', 'utf8');
-  // A call ends at the first `)` closing a statement, so one nested in a retry ends where it does.
-  const calls = [...source.matchAll(/this\.spawnGame\(([\s\S]*?)\)\s*;/g)].map(firstGroup);
-  assert.ok(calls.length >= 2, `only ${String(calls.length)} calls of spawnGame were read`);
-  for (const call of calls) {
-    assert.match(
-      call,
-      /(?:project\.value\.path|projectPath),?\s*$/,
-      `a spawnGame call names no project: ${call}`,
-    );
-  }
-  const taken = /private async spawnGame\([\s\S]*?const held = await slotForCall\(false, project, tool\);/;
-  assert.match(source, taken, 'spawnGame takes its slot for the project it is given');
-  assert.equal(
-    source.match(/slotForCall\(true, projectPath\)/g)?.length,
-    2,
-    'both takes for a game editor_run starts name the project',
-  );
   assert.match(
     source,
     /runEngine\(engine\.value, exportArgs, \{\s*timeout: [^\n]*\n\s*project: project\.value\.path,/,
@@ -74093,28 +74071,6 @@ function testEveryGameTheServerStartsTakesItsSlotForItsProject(): void {
     /editor: true,\s*project: projectPath,\s*\};\s*const outcome = await runOperation\(exporting, 'export_options'/,
     "the export options step, which runs on an empty folder, names the preset's project",
   );
-}
-
-/** A take for a project in a git work tree writes its lock as a take for none does. */
-async function testALockOfATakeForAProjectInGitIsAsThatOfATakeForNone(): Promise<void> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-lock-'));
-  try {
-    const project = join(root, 'listed-game');
-    mkdirSync(join(project, '.git'), { recursive: true });
-    const locks: string[] = [];
-    for (const forProject of [project, undefined]) {
-      const directory = join(root, forProject === undefined ? 'none' : 'git');
-      mkdirSync(directory);
-      const taker = new EngineSlots(directory, 1);
-      const lock = await taker.take();
-      locks.push(readFileSync(lock, 'utf8'));
-      taker.release(lock);
-    }
-    assert.equal(locks[0], locks[1], 'the two locks are the same bytes');
-    assert.ok(!locks[0]?.includes('repository'), 'and name no repository');
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
 }
 
 /** Writes [param files] under [param root], by path. */
@@ -82512,10 +82468,19 @@ function slotEntries(directory: string): string[] {
   return (folderListing(directory) ?? []).filter((entry) => !entry.startsWith(PROJECTS_FOLDER));
 }
 
-/** The project locks left in [param directory]. */
+/** The project locks of [param directory] still held by some process. A lock file stays once it is free. */
 function projectLocksIn(directory: string): string[] {
   const folder = join(directory, PROJECTS_FOLDER);
-  return existsSync(folder) ? readdirSync(folder).filter((name) => name.endsWith('.lock')) : [];
+  return existsSync(folder)
+    ? readdirSync(folder).filter((name) => name.endsWith('.lock') && lockIsHeld(join(folder, name)))
+    : [];
+}
+
+/** Whether a process holds the OS lock on [param path]. */
+function lockIsHeld(path: string): boolean {
+  const taken = tryOsLock(path);
+  taken?.release();
+  return taken === null;
 }
 
 /** Servers on the memory engine whose machine has one slot, held by this process. */
@@ -82749,24 +82714,17 @@ async function testAWaitForTheProjectsLockIsToldAsASlotWait(): Promise<void> {
     );
     const behind = await asked('behind');
     await firstImport;
-    const holder = `(pid ${String(first.child.pid)})`;
     assert.ok(
       behind.told.length > 0 &&
-        behind.told.every(
-          (message) =>
-            message.includes(`another engine of the project ${project}`) && message.includes(holder),
-        ),
-      `the call behind is told which process holds its project: ${JSON.stringify(behind.told)}`,
+        behind.told.every((message) => message.includes(`another engine of the project ${project}`)),
+      `the call behind is told which project it waits for: ${JSON.stringify(behind.told)}`,
     );
     const waits = (contentOf(behind.answered) ?? []).map(slotWaitOf).filter((block) => block !== null);
     assert.equal(waits.length, 1, JSON.stringify(behind.answered));
     assert.ok(asNumber(get(waits[0], 'waitedMs')) >= 1000, JSON.stringify(waits));
     assert.match(
       text(get(waits[0], 'note')),
-      new RegExp(
-        `^This call waited \\d+ s for another engine of the project .+ in all\\. When it first waited, that engine was run by .+\\(pid ${String(first.child.pid)}\\)\\.$`,
-        'u',
-      ),
+      /^This call waited \d+ s for another engine of the project .+ in all\.$/u,
       JSON.stringify(waits),
     );
     const alone = await asked('alone');
@@ -82780,8 +82738,8 @@ async function testAWaitForTheProjectsLockIsToldAsASlotWait(): Promise<void> {
   });
 }
 
-/** A project lock whose holder has gone is taken over at once, and named for the new holder. */
-async function testADeadHoldersProjectLockIsTakenOver(): Promise<void> {
+/** A project lock file a dead process left behind, whatever it holds, is taken at once and given back. */
+async function testALeftProjectLockFileIsTakenAtOnce(): Promise<void> {
   await onAFullMachine(async (machine) => {
     const gone = spawnSyncHidden(process.execPath, ['-e', ''], { timeout: 30_000 });
     assert.ok(!alive(gone.pid), 'a pid whose process has gone');
@@ -82798,17 +82756,8 @@ async function testADeadHoldersProjectLockIsTakenOver(): Promise<void> {
         { GDH_STAY_MS: '3000' },
       ),
     );
-    const named = (): boolean => {
-      const pid = /^pid (\d+)$/m.exec(printed.text())?.[1];
-      try {
-        return pid !== undefined && holderOf(readFileSync(lock, 'utf8'))?.pid === Number(pid);
-      } catch {
-        return false;
-      }
-    };
-    assert.ok(await untilTrue(named, 30_000), `the lock names the import's process: ${printed.text()}`);
     assert.ok(await untilTrue(() => /^imported true$/m.test(printed.text()), 40_000), printed.text());
-    assert.ok(await untilTrue(() => !existsSync(lock), 10_000), 'the lock is given back');
+    assert.ok(await untilTrue(() => !lockIsHeld(lock), 10_000), 'the lock is given back');
   });
 }
 
@@ -82841,15 +82790,8 @@ async function testTheClassesCommandSaysItWaitsForItsProjectsLock(): Promise<voi
     const lock = projectLockOf(machine.project, machine.directory);
     const holding = machine.program('await headless.runImport(engine, project);', { GDH_STAY_MS: '12000' });
     const holder = sayingOf(holding);
-    const held = (): boolean => {
-      try {
-        return holderOf(readFileSync(lock, 'utf8'))?.pid === holding.pid;
-      } catch {
-        return false;
-      }
-    };
     assert.ok(
-      await untilTrue(held, 30_000),
+      await untilTrue(() => lockIsHeld(lock), 30_000),
       `the stand-in engine holds the project's lock: ${holder.text()}`,
     );
     const waiting = await classesIn();
@@ -82861,7 +82803,7 @@ async function testTheClassesCommandSaysItWaitsForItsProjectsLock(): Promise<voi
     assert.deepEqual(
       told,
       [
-        `gdharness: Waiting N s so far for an engine: another engine of the project ${machine.project} is running by pid ${String(holding.pid)}, and this one starts when it ends.`,
+        `gdharness: Waiting N s so far for an engine: another engine of the project ${machine.project} is running, and this one starts when it ends.`,
       ],
       waiting.said,
     );
@@ -82944,20 +82886,21 @@ async function testInOneSlotHoldsOneSlotAndAWaitGivesItBack(): Promise<void> {
     const out = await ranToTheEnd(
       machine,
       [
-        "const fs = await import('node:fs');",
+        `const { tryOsLock } = await import(${JSON.stringify(OS_LOCK_URL)});`,
         'const slot = directory + "/0.lock";',
+        'const held = () => { const taken = tryOsLock(slot); taken?.release(); return taken === null; };',
         'const locks = [];',
         'await slots.inOneSlot(async () => {',
         '  await slots.inASlot(async (lock) => { locks.push(lock); });',
-        "  console.log('between ' + fs.existsSync(slot));",
+        "  console.log('between ' + held());",
         '  await slots.inASlot(async (lock) => { locks.push(lock); });',
         '  await slots.withTheSlotFree(async () => {',
-        "    console.log('waiting ' + fs.existsSync(slot));",
+        "    console.log('waiting ' + held());",
         '  });',
-        "  console.log('after ' + fs.existsSync(slot));",
+        "  console.log('after ' + held());",
         '  await slots.inASlot(async (lock) => { locks.push(lock); });',
         '});',
-        "console.log('end ' + fs.existsSync(slot) + ' ' + new Set(locks.map((lock) => String(lock).replaceAll('\\\\', '/'))).size);",
+        "console.log('end ' + held() + ' ' + new Set(locks.map((lock) => String(lock).replaceAll('\\\\', '/'))).size);",
       ].join('\n'),
     );
     assert.ok(out !== null, 'the program never ended');
@@ -122975,8 +122918,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnExtensionListHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testSuitePassesKeyAlikeInEveryCheckout,
   testARepositoryIsNamedByTheFolderHoldingItsSharedGitFolder,
-  testALockOfATakeForAProjectInGitIsAsThatOfATakeForNone,
-  testEveryGameTheServerStartsTakesItsSlotForItsProject,
+  testEveryExportNamesItsProject,
   testARepositoryIsNamedFromItsRealPathAndNeverForABareOne,
   testAnUnreadableWorktreeGitFileListsNoWorktrees,
   testTwoStopsOfOneKeeperSignalItsGameOnce,
@@ -123095,7 +123037,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testProjectTestsImportFirstStartsAtOnceAndItsEngineTakesASlot,
   testSlotlessEnginesOfOneProjectRunOneAtATime,
   testAWaitForTheProjectsLockIsToldAsASlotWait,
-  testADeadHoldersProjectLockIsTakenOver,
+  testALeftProjectLockFileIsTakenAtOnce,
   testTheClassesCommandSaysItWaitsForItsProjectsLock,
   testInOneSlotHoldsOneSlotAndAWaitGivesItBack,
   testAProjectWaitNamesTheHolderAtEachLine,

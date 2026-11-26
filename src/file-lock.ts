@@ -1,7 +1,7 @@
 /**
  * Lock files that name their holder, `{"pid": 1234, "started": 1760000000000}` with the time its
- * process started in milliseconds since the epoch, for the files other than the engine slots (see
- * `engine-slots.ts`). A lock is free again once its holder has gone: when no process has its pid,
+ * process started in milliseconds since the epoch. The engine slots and project locks are not among
+ * them: those are OS locks (see `os-lock.ts`). A lock is free again once its holder has gone: when no process has its pid,
  * or one does that started more than {@link START_TOLERANCE_MS} away from the time it names. A
  * lock still empty or unreadable {@link UNWRITTEN_MS} after it was made belongs to a taker that
  * died between making and writing it.
