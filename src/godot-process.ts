@@ -31,9 +31,9 @@ export interface GodotProcess {
   /**
    * The project this run was started on, for a run read back off disk.
    *
-   * Two servers on one machine share a runtime directory and so share the note a run leaves
-   * behind. Naming the project in the answer is what lets a caller see that the run being
-   * reported is one of theirs, rather than having it silently reported as this project's.
+   * Every server on one machine shares a runtime directory, and a note names its run's project.
+   * Naming the project in the answer is what lets a caller see that the run being reported is one
+   * of theirs, rather than having it silently reported as this project's.
    */
   projectPath: string | null;
   /**

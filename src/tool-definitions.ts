@@ -223,7 +223,8 @@ export function theGamePicked(): string {
     'A call naming neither `projectPath` nor `pid` goes to the game this server started or is ' +
     'playing, named under `answeredBy` when others run too. Failing that, it goes to the only game ' +
     'running. Otherwise the call is refused. The refusal names every game and the argument that ' +
-    'tells them apart: `pid` within one project, `projectPath` across projects.'
+    'tells them apart: `pid` within one project, `projectPath` across projects. A game another live ' +
+    "server started is never answered for: the call is refused with that server's project folder."
   );
 }
 
@@ -237,11 +238,11 @@ const PROJECT_PATH: JsonSchema = {
 };
 const RUNNING_PROJECT_PATH: JsonSchema = {
   type: 'string',
-  description: 'Which game, when several run: its project folder.',
+  description: 'Game by project folder.',
 };
 const RUNNING_PID: JsonSchema = {
   type: 'number',
-  description: 'Its pid.',
+  description: "This server's game, by pid.",
 };
 const SCENE_PATH: JsonSchema = {
   type: 'string',
@@ -1868,7 +1869,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'editor_launch',
     title: 'Open, restart or close the editor, or bind its debug adapter again',
     description:
-      'editor_status says which editor is connected. open and close save project.godot, which drops a key set on purpose to its default value. close and restart save the open scenes. A restart of an editor this server opened is a quit and then a launch. Ending this server between them, as a reconnect does, leaves no editor. close stops the process of an editor this server opened that has not connected yet. A game a visible editor plays opens a window.',
+      'open and close save project.godot, which drops a key set on purpose to its default value. close and restart save the open scenes. A restart of an editor this server opened is a quit and then a launch. Ending this server between them, as a reconnect does, leaves no editor. close stops the process of an editor this server opened that has not connected yet. A game a visible editor plays opens a window.',
     answer: [
       'close answers settingsDropped, what its save took out of project.godot. It is left out when the save took nothing. settingsNote says when the file could not be read to tell. An editor stopped before it connected is answered with beforeConnecting.',
       'close and restart name under savedScenes the open scenes that had unsaved changes and were saved on the way out. The list is empty when none had. A scene that would not save refuses the close or restart and leaves the editor running. Both answer tookMs, how long the editor took to go or to come back.',
@@ -2065,7 +2066,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         minimum: 1,
         ops: ['stop', 'wait', 'profile'],
         description:
-          'Its pid. A stop also takes a game of this project that no server keeps, as editor_status lists under runtimes.',
+          "This server's game, by pid. A stop also takes an unkept game of this project, as editor_status lists under runtimes.",
       },
     },
     requires: [],
@@ -2602,7 +2603,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'runtime_capture',
     title: 'Capture the screen',
     description:
-      "A picture of the running game: the whole screen, one region or node of it at full resolution, or one viewport. The screen is the game's window with its dialogs and popups laid over it. Needs the game running with a window. A capture before the first frame is drawn waits for it.",
+      "A picture of the game: the whole screen, one region or node of it at full resolution, or one viewport. The screen is the game's window with its dialogs and popups over it. Needs a running game with a window. A capture before its first frame waits for it.",
     answer: [
       "A region partly outside the window is cut to it and answered clipped. The answer names the region captured in window pixels. drawnAt is given when the project draws at its own size and stretches it to the window, so the picture has the game's pixels.",
       "nodePath captures what runtime_inspect rect answers for the node: a Control's rectangle, what a 3D node's geometry covers, or what a Sprite2D draws. zoom makes each pixel a square of pixels rather than blending it. An inline picture may be a JPEG, and the text says so. outputPath saves a lossless PNG, and the answer says where.",

@@ -462,9 +462,16 @@ needs none, and with several going it is refused with each run's pid, project an
 
 ### Two servers on one project
 
-Two servers on one project is harder, because their games announce the same project. A game the
-editor plays says which editor. The editor addon puts its process id into its own environment as it
-loads. Every game it plays inherits that. The runtime announces it as `editor_pid`.
+A server answers for the games it started, the game the editor plays through it, and the games of a
+server that has died whose project folder is the same, so a client that restarts its server keeps
+its game. It never stops, restarts, waits on or reads the game of another live server. A call that names
+such a game, or would need it, is refused with the project folder whose server holds it. A start
+that would replace the note of a game another live server runs in the same place is refused too. A
+worktree is its own project folder, so it uses its own server.
+
+Their games still announce the same project, so a game the editor plays says which editor. The
+editor addon puts its process id into its own environment as it loads. Every game it plays inherits
+that. The runtime announces it as `editor_pid`.
 
 A game some other server started announces none. So a start waiting for its game's runtime passes
 over a stranger's announcement, however fresh. `editor_status` lists `editorPid` under each runtime
@@ -782,7 +789,8 @@ nothing to follow. The editor `editor_launch` opens goes through the same launch
 
 Both of the game's streams go to a transcript under the runtime directory. Beside it, a note names
 the process and the file. There is one note per project, because every server on the machine shares
-the directory.
+the directory. The note names the process of the server that started the run, which decides who
+may take the run over (see Two servers on one project).
 
 On Linux and macOS the game writes the transcript file itself. A pipe with no reader fills and then
 blocks the writer, so a game writing into a pipe nobody reads would hang.
