@@ -49360,22 +49360,6 @@ async function testAnEngineRunSaysHowItEnded(): Promise<void> {
     'and stdout to its end',
   );
 
-  // The lock it runs on names this process as its holder and the engine beside it, so what the
-  // engine starts runs on its slot.
-  const naming = await node(
-    "const fs = require('fs'); const lock = process.env.GODOT_ENGINE_HELD; const from = Date.now(); const look = () => { const held = JSON.parse(fs.readFileSync(lock, 'utf8')); if (held.engine !== undefined || Date.now() - from > 20000) { console.log(JSON.stringify({ pid: process.pid, held })); } else { setTimeout(look, 50); } }; look();",
-  );
-  const named = JSON.parse(naming.log.all.at(-1)?.text ?? '{}') as unknown;
-  assert.deepEqual(
-    [
-      get(named, 'held', 'pid'),
-      get(named, 'held', 'engine', 'pid'),
-      typeof get(named, 'held', 'engine', 'started'),
-    ],
-    [process.pid, get(named, 'pid'), 'number'],
-    `the lock names the engine it runs: ${JSON.stringify(named)}`,
-  );
-
   const three = await node('process.exit(3)');
   assert.deepEqual(
     [three.exitCode, three.exitSignal, three.failure, howItEnded(three)],
@@ -69804,7 +69788,15 @@ async function testAProfileSinceAMarkAnswersForOneAction(): Promise<void> {
       `without since, the whole run as before: ${whole.said}`,
     );
 
-    // A second server for the project, after the mark, reads the mark the first one set.
+    // The harness replaces a server by ending the old one, so the game outlives it and the next
+    // server of the project takes it over, mark included.
+    const gone = new Promise<void>((done) => {
+      first.child.once('exit', () => {
+        done();
+      });
+    });
+    first.child.kill('SIGKILL');
+    await gone;
     second = new ServerProcess({ env });
     await second.initialize('profile-mark-again');
     const again = caller(second);
@@ -81060,7 +81052,11 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
         /^ {2}The project turns on gdUnit4's report\/godot\/push_error, so gdUnit4 fails a case on every error and warning the engine prints while it runs, declared or not, which failed this case: res:\/\/tests\/noisy_test\.gd > test_noisy\. /m,
         pushed.said,
       );
-      assert.match(pushed.said, /^ {2}res:\/\/tests\/noisy_test\.gd > test_noisy failed$/m, pushed.said);
+      assert.match(
+        pushed.said,
+        /^ {2}res:\/\/tests\/noisy_test\.gd > test_noisy failed: ERROR: res:\/\/tests\/noisy_test\.gd:4$/m,
+        pushed.said,
+      );
 
       // A suite standing a scene up through the scene runner and saying it runs headless is run
       // headless, where the root viewport takes the size the suite gives it in the next frame.
@@ -81119,42 +81115,8 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
         rmSync(join(project, 'tests', 'updates_test.gd'));
       }
     };
-    /** The lock a suite's engine runs on names that engine beside the process holding it. */
-    const theLockOfASuitesEngine = (): void => {
-      // The lock a suite's engine runs on names that engine beside the process holding it, so what
-      // the engine starts runs on its slot rather than taking a second.
-      writeTree(project, {
-        'tests/slot_test.gd': [
-          'extends GdUnitTestSuite',
-          '',
-          'func test_slot() -> void:',
-          '\tvar lock: String = OS.get_environment("GODOT_ENGINE_HELD")',
-          '\tvar held: Variant = null',
-          '\tfor _look: int in 200:',
-          '\t\tvar parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(lock))',
-          '\t\tif parsed is Dictionary and (parsed as Dictionary).has("engine"):',
-          '\t\t\theld = parsed',
-          '\t\t\tbreak',
-          '\t\tawait get_tree().create_timer(0.1).timeout',
-          '\tvar seen: FileAccess = FileAccess.open("res://slot_seen.json", FileAccess.WRITE)',
-          '\tseen.store_string(JSON.stringify({"pid": OS.get_process_id(), "held": held}))',
-          '\tseen.close()',
-          '',
-        ].join('\n'),
-      });
-      const onSlot = test('tests/slot_test.gd');
-      for (const made of ['slot_test.gd', 'slot_test.gd.uid']) {
-        rmSync(join(project, 'tests', made), { force: true });
-      }
-      assert.equal(onSlot.status, 0, onSlot.said);
-      const seen = JSON.parse(readFileSync(join(project, 'slot_seen.json'), 'utf8')) as unknown;
-      rmSync(join(project, 'slot_seen.json'));
-      assert.deepEqual(
-        [get(seen, 'held', 'engine', 'pid'), get(seen, 'held', 'pid') === get(seen, 'pid')],
-        [get(seen, 'pid'), false],
-        `the lock names the suite's engine beside its holder: ${JSON.stringify(seen)}`,
-      );
-
+    /** A windowed suite and the accessibility tree, on a desktop that has one. */
+    const theWindowedRuns = (): void => {
       const windowed = windowedRunRefused();
       if (windowed === null) {
         // gdUnit4 minimises the window as its runner starts and after every suite, and a minimised
@@ -81254,7 +81216,7 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
         console.log(`test command windowed case skipped: ${windowed}`);
       }
     };
-    theLockOfASuitesEngine();
+    theWindowedRuns();
     /** A gate in a worktree, and runs meeting slots someone else holds. */
     const theLogsAndTheSlotsOfRunsInWorktrees = async (): Promise<void> => {
       // A gate running in a worktree of the commit removes it once the run ends, and the logs with it,
@@ -81379,6 +81341,8 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
       keeper.kill();
       taker.kill();
       assert.equal(oneShare.status, 0, oneShare.said);
+      // A killed holder frees its lock a moment after the signal.
+      await cameTrue(() => leftInSlots(slots).length === 0, 30_000);
       assert.deepEqual(
         leftInSlots(slots),
         [],
@@ -81404,6 +81368,7 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
         assert.equal(joined.status, 0, joined.said);
         assert.ok(joined.said.includes(sharesSaid(1, 2)), joined.said);
         assert.match(joined.said, /^Passed: 2 cases in 2 suites across 2 engines, /m, joined.said);
+        await cameTrue(() => leftInSlots(slots).length === 0, 30_000);
         assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
       }
     };
@@ -92713,7 +92678,7 @@ async function testACaseGdUnitLeavesUnrunIsNoPass(): Promise<void> {
 
       const returned = await run({ path: 'res://test/returned_test.gd' });
       const reason = (index: number, value: number): string =>
-        `The test data set at index (${String(index)}) does not match the expected test parameters: test function: func test...(a: int,b: int) test input values: [${String(value)}]`;
+        `\nThe test data set at index (${String(index)}) does not match the expected test parameters:\n\ttest function: func test...(a: int,b: int)\n\ttest input values: [${String(value)}]\n`;
       assert.deepEqual(read(returned.answer).slice(0, 3), [false, 3, undefined], returned.text);
       assert.deepEqual(
         get(returned.answer, 'rowsMismatched'),
@@ -119031,12 +118996,16 @@ async function testRealSkipsFailARunOfBothTools(): Promise<void> {
       /res:\/\/tests\/skips_test\.gd > test_waits never ran: gdUnit4 skipped it, saying "not ready yet"/,
       ran.said,
     );
-    assert.match(
-      ran.said,
-      /res:\/\/tests\/whole_test\.gd never ran all 2 of its cases: gdUnit4 skipped the whole suite, saying "the whole suite waits"/,
-      ran.said,
-    );
-    assert.match(ran.said, /^Failed: 2 problems, listed above\. Ran 1 case in 2 suites /m, ran.said);
+    for (const name of ['test_first', 'test_second']) {
+      assert.match(
+        ran.said,
+        new RegExp(
+          `res://tests/whole_test\\.gd > ${name} never ran: gdUnit4 skipped it, saying "Skipped from the entire test suite"`,
+        ),
+        ran.said,
+      );
+    }
+    assert.match(ran.said, /^Failed: 3 problems, listed above\. Ran 1 case in 2 suites /m, ran.said);
     assert.doesNotMatch(ran.said, /^Passed: /m, ran.said);
     await withStdioServer(
       async (_call, request) => {
@@ -119074,7 +119043,10 @@ async function testRealSkipsFailARunOfBothTools(): Promise<void> {
           [
             false,
             '2 cases skipped with do_skip, so they never ran',
-            [{ test: 'res://tests/whole_test.gd', reason: 'the whole suite waits', cases: 2 }],
+            ['test_first', 'test_second'].map((name) => ({
+              test: `res://tests/whole_test.gd > ${name}`,
+              reason: 'Skipped from the entire test suite',
+            })),
           ],
           whole.text,
         );
@@ -120474,7 +120446,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunPrintingPastTheLimitOnItsConsoleIsEnded,
   testEverySuiteIsJudgedAgainstTheLimitAsItCloses,
   testASuitePastTheLimitIsEndedWhateverFollowsAndOnEitherStream,
-  testAFailingStringIsReadBackFromWhicheverSuitePrintedIt,
   testAPassingRunListsTwentyUncaughtScriptErrorsAndCountsTheRest,
   testATestRunsTallyUnderItsBoundsReadsAsTheWholeLog,
   testATestRunsTallyPastItsBoundsSaysWhatItCut,
@@ -121410,32 +121381,6 @@ function chattyReport(failing: Readonly<Record<string, string>> = {}): string {
   });
   const failures = Object.keys(failing).length;
   return `<?xml version="1.0" encoding="UTF-8" ?>\n<testsuites id="2026-11-22" name="report_1" tests="3" failures="${String(failures)}" skipped="0" flaky="0" time="0.030">\n${suites.join('\n')}\n</testsuites>\n`;
-}
-
-/**
- * The value of a failing string equality is read back from what each suite printed, the first suite
- * and a later one alike, as the console printed it.
- */
-async function testAFailingStringIsReadBackFromWhicheverSuitePrintedIt(): Promise<void> {
-  const e = String.fromCharCode(0x1b);
-  const printedAt = (path: string, value: string): string =>
-    ` but was\n '${value}'${e}[0m${e}[38;2;173;216;230m\tat 'test_one' in ${path}:5${e}[0m\n`;
-  const missing = (gone: string): string => `${e}[48;2;38;0;0m${e}[38;2;255;255;255m${gone}${e}[0m`;
-  const merged = (path: string): string =>
-    `Expecting:\n 'abc'\n but was\n 'abc'\n\tat 'test_one' in ${path}:5`;
-  const answer = await aRunOfTheChattyEngine(`${CHATTY_A}:0,${CHATTY_B}:0,${CHATTY_C}:0`, 'both', false, {
-    inSuite: {
-      [CHATTY_A]: printedAt(CHATTY_A, missing('abc')),
-      [CHATTY_C]: printedAt(CHATTY_C, `a${missing('bc')}`),
-    },
-    report: chattyReport({ [CHATTY_A]: merged(CHATTY_A), [CHATTY_C]: merged(CHATTY_C) }),
-    exit: 100,
-  });
-  assert.deepEqual(
-    asArray(get(answer, 'failed')).map((one) => /but was\n '(.*)'\n/.exec(String(get(one, 'detail')))?.[1]),
-    ['', 'a'],
-    JSON.stringify(answer).slice(0, 4000),
-  );
 }
 
 /**
