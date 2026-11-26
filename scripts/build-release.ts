@@ -2,6 +2,7 @@
 
 import { chmod, cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { ADDON_FILE, PREBUILDS_FOLDER, PREBUILT_PLATFORMS } from '../src/os-lock.js';
 import { spawnSyncHidden } from '../src/spawn.js';
 import { syncSharedGdscript } from './sync-shared-gd.js';
 
@@ -79,6 +80,16 @@ for (const sourcePath of await collectTypeScriptEntries(sourceRoot)) {
     );
   }
 }
+
+// The prebuilt addon the slot locks go through, one for each platform it ships on, with its
+// licence. The bundle finds it beside itself.
+const addonPackage = path.join(root, 'node_modules', 'fs-native-extensions');
+for (const platform of PREBUILT_PLATFORMS) {
+  const target = path.join(buildRoot, PREBUILDS_FOLDER, platform);
+  await mkdir(target, { recursive: true });
+  await cp(path.join(addonPackage, PREBUILDS_FOLDER, platform, ADDON_FILE), path.join(target, ADDON_FILE));
+}
+await cp(path.join(addonPackage, 'LICENSE'), path.join(buildRoot, PREBUILDS_FOLDER, 'LICENSE'));
 
 // The addon copies of the shared helpers are not tracked, so the bundle is whole only after this.
 syncSharedGdscript(path.join(sourceRoot, 'godot'));

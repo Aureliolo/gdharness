@@ -35,7 +35,7 @@ import { syncSharedGdscript } from '../scripts/sync-shared-gd.js';
 import { declaredClasses, declaredClassLines } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { openTheEditor } from '../src/editor-open.js';
-import { EngineSlots, ownStart, takenOverUnderSteal } from '../src/engine-slots.js';
+import { EngineSlots } from '../src/engine-slots.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { type Frame, FrameReader, frame, MAX_MESSAGE_BYTES, OversizedStreamError } from '../src/framing.js';
 import { answersTo, GameLog, type LogEntry, type Severity } from '../src/game-log.js';
@@ -50,6 +50,7 @@ import {
 import { MalformedReportError, parseJUnit } from '../src/junit.js';
 import { listenForTheServer } from '../src/keeper-channel.js';
 import { GodotLSPClient, LSPTimeout, normalizeLSPError } from '../src/lsp_client.js';
+import { tryOsLock } from '../src/os-lock.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { PendingRequests } from '../src/pending-requests.js';
 import { keepPipelineCache } from '../src/pipeline-cache.js';
@@ -88,12 +89,11 @@ import {
   type CasesBySuite,
   type DeclaredSuite,
   dealt,
-  peakOf,
   type SuiteTimes,
   type Unit,
   unitsOf,
 } from '../src/suite-plan.js';
-import { HandedSlot, MemoryGate, ordered, type RunOrder, runShares } from '../src/suite-run.js';
+import { HandedSlot, ordered, type RunOrder, runShares } from '../src/suite-run.js';
 import { inTurnFor, tryTake } from '../src/write-turns.js';
 import { greeting } from './support/greeting.js';
 import { bandWalk, PORT_BAND } from './support/server.js';
@@ -1091,14 +1091,10 @@ function junkIsNeverAReport(): void {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The waits of a run for a machine slot and for memory
+// The waits of a run for a machine slot
 // ---------------------------------------------------------------------------------------------
 
-const GIB = 1024 ** 3;
-const ENGINE_BYTES = 1.5 * GIB;
-const KEPT_BYTES = 4 * GIB;
 const IDLE_STEPS_BEFORE_HUNG = 100;
-const SETTLE_ROUNDS_BEFORE_STUCK = 1000;
 
 /** Slots handed on in the order they were asked for, taking and giving back with no folder behind. */
 class StandInSlots {
@@ -1145,10 +1141,6 @@ class StandInSlots {
     this.free += 1;
     this.waiting.shift()?.();
   }
-
-  markWaiting(): () => void {
-    return () => undefined;
-  }
 }
 
 interface RunSetup {
@@ -1156,9 +1148,6 @@ interface RunSetup {
   readonly outsideHolds: boolean;
   readonly lanes: number;
   readonly suites: number;
-  readonly freeGiB: number;
-  /** What each suite was seen to hold, in GiB, in suite order. */
-  readonly peaksGiB: readonly number[];
 }
 
 interface Ran {
@@ -1170,22 +1159,14 @@ interface StartedRun {
   readonly slots: StandInSlots;
   readonly settled: () => boolean;
   readonly ran: () => Ran[] | undefined;
-  readonly judgeHung: () => void;
 }
 
-/** The engines memory has room for as a run begins, which is what a run held by memory starts with. */
-function enginesByMemory(freeGiB: number): number {
-  return Math.max(1, Math.floor((freeGiB * GIB - KEPT_BYTES) / ENGINE_BYTES));
-}
-
-/**
- * Suites of one 40 s case each, which `unitsOf` keeps whole, so each is a share of its own or a part
- * of one. Suite `at` was seen to hold `peaksGiB[at]`.
- */
-function suitesOf(
-  count: number,
-  peaksGiB: readonly number[],
-): { units: ReturnType<typeof unitsOf>; declared: CasesBySuite; times: SuiteTimes } {
+/** Suites of one 40 s case each, which `unitsOf` keeps whole, so each is a share of its own or a part of one. */
+function suitesOf(count: number): {
+  units: ReturnType<typeof unitsOf>;
+  declared: CasesBySuite;
+  times: SuiteTimes;
+} {
   const paths = Array.from({ length: count }, (_, at) => `res://suite_${String(at)}.gd`);
   const suites: DeclaredSuite[] = paths.map((path) => ({
     path,
@@ -1196,10 +1177,7 @@ function suitesOf(
     accessible: false,
   }));
   const times: SuiteTimes = Object.fromEntries(
-    paths.map((path, at) => [
-      path,
-      { seconds: 40, cases: { test_one: 40 }, peak: (peaksGiB[at] ?? 1.5) * GIB },
-    ]),
+    paths.map((path) => [path, { seconds: 40, cases: { test_one: 40 } }]),
   );
   return {
     units: unitsOf(suites, times),
@@ -1221,7 +1199,7 @@ function takeFreeSlots(slots: StandInSlots, count: number): string[] {
 }
 
 /** Starts the run the setup describes, with the scheduler deciding when each wait ends. */
-function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number; above?: boolean }): StartedRun {
+function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number }): StartedRun {
   const slots = new StandInSlots(setup.slotCount);
   if (setup.outsideHolds && setup.slotCount > 1) {
     slots.takeNow();
@@ -1229,54 +1207,27 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number; abo
       slots.release('outside');
     });
   }
-  // Each going engine tells what its share was seen to hold at a point the scheduler picks, and the
-  // memory read falls by what the engines have told.
-  const going = new Map<number, { readonly need: number; held: number }>();
-  let hung = false;
-  const told = (): number => [...going.values()].reduce((sum, one) => sum + one.held, 0);
-  const free = (): Promise<number> =>
-    hung ? Promise.reject(new Error('judged hung')) : Promise.resolve(setup.freeGiB * GIB - told());
-  const gate = new MemoryGate(slots, free, 1);
-  const taken = takeFreeSlots(slots, Math.min(setup.lanes, enginesByMemory(setup.freeGiB)));
-  const { units, declared, times } = suitesOf(setup.suites, setup.peaksGiB);
+  const going = new Set<number>();
+  const taken = takeFreeSlots(slots, setup.lanes);
+  const { units, declared } = suitesOf(setup.suites);
   const run = (
     plan: { readonly suites: ReadonlyArray<{ readonly path: string }> },
     index: number,
-    _lock: string,
-    holds?: (bytes: number) => void,
   ): Promise<Ran> => {
     const suites = plan.suites.map((suite) => suite.path);
-    const need = peakOf(suites, times, ENGINE_BYTES).bytes;
-    const owed = [...going.values()].reduce((sum, one) => sum + Math.max(0, one.need - one.held), 0);
-    if (going.size > 0) {
-      assert.ok(
-        setup.freeGiB * GIB - told() - KEPT_BYTES - owed >= need,
-        `engine ${String(index)} started needing ${String(need / GIB)} GiB without room`,
-      );
-    }
-    const engine = { need, held: 0 };
-    going.set(index, engine);
+    going.add(index);
     peak.engines = Math.max(peak.engines, going.size);
     assert.ok(
       going.size <= setup.lanes,
       `${String(going.size)} engines going on ${String(setup.lanes)} lanes`,
     );
-    if (going.size > setup.lanes) {
-      peak.above = true;
-    }
-    void s.schedule(Promise.resolve(), `engine ${String(index)} tells`).then(() => {
-      if (going.get(index) === engine) {
-        engine.held = need;
-        holds?.(need);
-      }
-    });
     return s.schedule(Promise.resolve({ index, suites }), `engine ${String(index)} ends`).finally(() => {
       going.delete(index);
     });
   };
   let result: Ran[] | undefined;
   let settled = false;
-  void runShares(slots, units, declared, setup.lanes, taken, times, run, undefined, gate)
+  void runShares(slots, units, declared, setup.lanes, taken, run)
     .then(
       (ran) => {
         result = ran;
@@ -1286,14 +1237,7 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number; abo
     .finally(() => {
       settled = true;
     });
-  return {
-    slots,
-    settled: () => settled,
-    ran: () => result,
-    judgeHung: () => {
-      hung = true;
-    },
-  };
+  return { slots, settled: () => settled, ran: () => result };
 }
 
 function advanceToNextTimer(): void {
@@ -1303,8 +1247,8 @@ function advanceToNextTimer(): void {
 }
 
 /**
- * Steps a run: the gate's next look, one await so the lanes the look woke run on, then the
- * scheduler's next task. Answers whether the run ended before 100 steps in a row had nothing to run.
+ * Steps a run: one await so the lanes a slot woke run on, then the scheduler's next task. Answers
+ * whether the run ended before 100 steps in a row had nothing to run.
  */
 async function stepUntilEnded(s: fc.Scheduler, started: StartedRun): Promise<boolean> {
   let idle = 0;
@@ -1321,19 +1265,7 @@ async function stepUntilEnded(s: fc.Scheduler, started: StartedRun): Promise<boo
   return started.settled();
 }
 
-/** Makes the gate's reading fail so a hung run ends, and moves the clock until it has. */
-async function endHungRun(started: StartedRun): Promise<void> {
-  started.judgeHung();
-  for (let rounds = 0; !started.settled(); rounds += 1) {
-    if (rounds >= SETTLE_ROUNDS_BEFORE_STUCK) {
-      throw new Error('a run judged hung never ended');
-    }
-    advanceToNextTimer();
-    await Promise.resolve();
-  }
-}
-
-async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
+async function noOrderOfSlotWaitsHangsARun(): Promise<void> {
   const peak = { engines: 0 };
   jest.useFakeTimers();
   try {
@@ -1344,15 +1276,9 @@ async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
         fc.boolean(),
         fc.integer({ min: 2, max: 3 }),
         fc.integer({ min: 2, max: 5 }),
-        fc.constantFrom(4.5, 5, 6.5, 8),
-        fc.array(fc.constantFrom(0.5, 1.5, 3), { minLength: 5, maxLength: 5 }),
-        async (s, slotCount, outsideHolds, lanes, suites, freeGiB, peaksGiB) => {
-          if (enginesByMemory(freeGiB) >= lanes) {
-            return;
-          }
-          const started = startRun(s, { slotCount, outsideHolds, lanes, suites, freeGiB, peaksGiB }, peak);
+        async (s, slotCount, outsideHolds, lanes, suites) => {
+          const started = startRun(s, { slotCount, outsideHolds, lanes, suites }, peak);
           if (!(await stepUntilEnded(s, started))) {
-            await endHungRun(started);
             throw new Error(
               `hung: ${String(suites)} suites over ${String(lanes)} lanes, ${String(slotCount)} slots`,
             );
@@ -1361,7 +1287,7 @@ async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
           const ran = started.ran() ?? [];
           assert.deepEqual(
             ran.flatMap((engine) => engine.suites).toSorted(),
-            suitesOf(suites, peaksGiB)
+            suitesOf(suites)
               .units.map((unit) => unit.suite)
               .toSorted(),
           );
@@ -2507,53 +2433,33 @@ async function theCompileCheckTakesOnlyTheFirstSlotOffered(): Promise<void> {
 
 /**
  * The slot an engine's parent holds is lent to one engine of this process at a time, however many
- * takes begin together, and is lent again once given back. The look at the process tree is a stand-in
- * that takes as many turns as the draw says.
+ * takes begin together, and is lent again once given back.
  */
-async function anInheritedSlotServesOneTakeAtATime(): Promise<void> {
+function anInheritedSlotServesOneTakeAtATime(): void {
   const round = fc.record({
     takes: fc.integer({ min: 1, max: 4 }),
-    ticks: fc.array(fc.nat({ max: 4 }), { minLength: 4, maxLength: 4 }),
     giveBackInherited: fc.boolean(),
   });
-  await fc.assert(
-    fc.asyncProperty(fc.array(round, { minLength: 1, maxLength: 4 }), async (rounds) => {
+  fc.assert(
+    fc.property(fc.array(round, { minLength: 1, maxLength: 4 }), (rounds) => {
       const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-inherit-'));
+      const lentPath = join(root, 'lent.lock');
+      const lent = tryOsLock(lentPath);
+      assert.ok(lent, 'the slot to lend is taken');
+      const before = process.env['GODOT_ENGINE_HELD'];
+      process.env['GODOT_ENGINE_HELD'] = lentPath;
       try {
-        // Room for every take, so the memory this machine has free now refuses none of them.
-        const slots = new EngineSlots(
-          join(root, 'slots'),
-          8,
-          { pid: process.pid, started: await ownStart() },
-          undefined,
-          undefined,
-          {
-            available: () => Promise.resolve(2 ** 50),
-            held: () => Promise.resolve(new Map<number, number>()),
-          },
-        );
-        let turns: number[] = [];
-        Reflect.set(slots, 'inheritedLock', async (): Promise<string | null> => {
-          for (let tick = 0; tick < (turns.shift() ?? 0); tick += 1) {
-            await Promise.resolve();
-          }
-          return 'inherited.lock';
-        });
+        const slots = new EngineSlots(join(root, 'slots'), 8);
         let inheritedHeld = false;
         for (const [at, one] of rounds.entries()) {
-          turns = [...one.ticks];
-          const asked: Promise<string | null>[] = [];
-          for (let take = 0; take < one.takes; take += 1) {
-            asked.push(slots.takeFree());
-          }
-          const got = await Promise.all(asked);
-          const inherited = got.filter((lock) => lock === 'inherited.lock').length;
+          const got = Array.from({ length: one.takes }, () => slots.takeFree());
+          const inherited = got.filter((lock) => lock === lentPath).length;
           assert.equal(
             inherited,
             inheritedHeld ? 0 : 1,
             `round ${String(at)}: ${JSON.stringify(got.map((lock) => (lock === null ? null : basename(lock))))}`,
           );
-          const real = got.filter((lock): lock is string => lock !== null && lock !== 'inherited.lock');
+          const real = got.filter((lock): lock is string => lock !== null && lock !== lentPath);
           assert.equal(new Set(real).size, real.length, 'no two takes hold one slot');
           assert.equal(real.length, one.takes - inherited);
           inheritedHeld = true;
@@ -2561,12 +2467,18 @@ async function anInheritedSlotServesOneTakeAtATime(): Promise<void> {
             slots.release(lock);
           }
           if (one.giveBackInherited) {
-            slots.release('inherited.lock');
+            slots.release(lentPath);
             inheritedHeld = false;
           }
         }
         slots.releaseAll();
       } finally {
+        if (before === undefined) {
+          delete process.env['GODOT_ENGINE_HELD'];
+        } else {
+          process.env['GODOT_ENGINE_HELD'] = before;
+        }
+        lent.release();
         sweep(root);
       }
     }),
@@ -2574,69 +2486,56 @@ async function anInheritedSlotServesOneTakeAtATime(): Promise<void> {
   );
 }
 
-/** Leaves a steal file as another taker's, made just now or long ago. */
-function placeStealFile(steal: string, kind: 'none' | 'fresh' | 'old'): void {
-  if (kind === 'none') {
-    return;
-  }
-  writeFileSync(steal, '');
-  if (kind === 'old') {
-    const longAgo = new Date(Date.now() - 3_600_000);
-    utimesSync(steal, longAgo, longAgo);
-  }
-}
+type SlotStep =
+  | { readonly kind: 'take'; readonly taker: 0 | 1 }
+  | { readonly kind: 'release'; readonly taker: 0 | 1; readonly which: number };
 
-function madeAsOurs(path: string): boolean {
-  try {
-    writeFileSync(path, 'mine', { flag: 'wx' });
-    return true;
-  } catch {
-    return false;
+/** One step of the slot takers, checked against what the takers hold between them. */
+function applySlotStep(takers: readonly EngineSlots[], held: string[][], count: number, one: SlotStep): void {
+  const mine = held[one.taker] ?? [];
+  const taker = takers[one.taker];
+  assert.ok(taker);
+  if (one.kind === 'take') {
+    const total = held.flat().length;
+    const lock = taker.takeFree();
+    assert.equal(lock !== null, total < count, `${String(total)} of ${String(count)} held`);
+    if (lock !== null) {
+      assert.ok(!held.flat().includes(lock), 'no lock is held twice');
+      mine.push(lock);
+    }
+  } else if (mine.length > 0) {
+    const [lock] = mine.splice(one.which % mine.length, 1);
+    assert.ok(lock);
+    taker.release(lock);
   }
 }
 
 /**
- * A take-over reads the lock again under the steal file. A lock replaced by a live holder between
- * the first look and the steal file is left alone, a steal file another taker holds blocks it, and
- * the steal file this call made is always given back.
+ * Two takers of one directory never hold one lock between them, a take finds a slot exactly when
+ * fewer than the count are held, and a slot given back is taken again.
  */
-async function aTakeOverRereadsTheLockUnderTheStealFile(): Promise<void> {
-  const scene = fc.record({
-    replacedBeforeSteal: fc.boolean(),
-    stealBefore: fc.constantFrom('none', 'fresh', 'old'),
-    retake: fc.boolean(),
-  });
-  await fc.assert(
-    fc.asyncProperty(scene, async ({ replacedBeforeSteal, stealBefore, retake }) => {
-      const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-steal-'));
+function twoTakersNeverHoldOneSlot(): void {
+  const step: fc.Arbitrary<SlotStep> = fc.oneof(
+    fc.record({ kind: fc.constant('take' as const), taker: fc.constantFrom<0 | 1>(0, 1) }),
+    fc.record({
+      kind: fc.constant('release' as const),
+      taker: fc.constantFrom<0 | 1>(0, 1),
+      which: fc.nat({ max: 5 }),
+    }),
+  );
+  fc.assert(
+    fc.property(fc.integer({ min: 1, max: 4 }), fc.array(step, { maxLength: 30 }), (count, steps) => {
+      const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-takers-'));
       try {
-        const lock = join(root, 'held.lock');
-        const steal = `${lock}.steal`;
-        writeFileSync(lock, 'stale');
-        placeStealFile(steal, stealBefore);
-        let looks = 0;
-        const taken = await takenOverUnderSteal(
-          lock,
-          () => {
-            looks += 1;
-            const stale = readFileSync(lock, 'utf8') === 'stale';
-            if (looks === 1 && replacedBeforeSteal) {
-              // Another taker replaces the lock after this look judged it.
-              writeFileSync(lock, 'fresh');
-            }
-            return Promise.resolve(stale);
-          },
-          madeAsOurs,
-          retake,
-        );
-        const expected = stealBefore === 'none' && !replacedBeforeSteal;
-        assert.equal(taken, expected, JSON.stringify({ looks, stealBefore, replacedBeforeSteal }));
-        const left = existsSync(lock) ? readFileSync(lock, 'utf8') : null;
-        // A steal file another taker holds blocks this one. One left long ago is removed, and the
-        // take is left to the next look. A lock made fresh since the look stays.
-        const wanted = replacedBeforeSteal ? 'fresh' : stealBefore === 'none' && retake ? 'mine' : 'stale';
-        assert.equal(left, stealBefore === 'none' && !replacedBeforeSteal && !retake ? null : wanted);
-        assert.equal(existsSync(steal), stealBefore === 'fresh', `the ${stealBefore} steal file`);
+        const directory = join(root, 'slots');
+        const takers = [new EngineSlots(directory, count), new EngineSlots(directory, count)];
+        const held: string[][] = [[], []];
+        for (const one of steps) {
+          applySlotStep(takers, held, count, one);
+        }
+        for (const taker of takers) {
+          taker.releaseAll();
+        }
       } finally {
         sweep(root);
       }
@@ -5081,7 +4980,7 @@ damagedArchivesFailCleanly();
 logsReadTheSameInAnyPieces();
 reportsRoundTrip();
 junkIsNeverAReport();
-await noOrderOfSlotAndMemoryWaitsHangsARun();
+await noOrderOfSlotWaitsHangsARun();
 await theWalkGivesOnlyWhatItHolds();
 await writersTakeTurnsInTheOrderTheyAsked();
 aPlanDependsOnItsUnitsAlone();
@@ -5096,8 +4995,8 @@ aWideFoldSpreadsNoList();
 theDebuggerStreamIsCutProof();
 aSuiteOrderKeepsEveryUnitAndRepeats();
 await theCompileCheckTakesOnlyTheFirstSlotOffered();
-await anInheritedSlotServesOneTakeAtATime();
-await aTakeOverRereadsTheLockUnderTheStealFile();
+anInheritedSlotServesOneTakeAtATime();
+twoTakersNeverHoldOneSlot();
 await everyEndOfARequestIsSaid();
 await everyModeIsSaidOnEveryRun();
 await aStalledProcessGetsTheSameReplies();

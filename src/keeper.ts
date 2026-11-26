@@ -28,11 +28,11 @@ import {
   spawnOnDesktop,
 } from './desktop.js';
 import { takenOverSlot } from './engine-slots.js';
-import type { OsLock } from './os-lock.js';
 import { letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
 import { raisedMark } from './game-log.js';
 import { endedOnce, type KeeperListening, listenForTheServer } from './keeper-channel.js';
+import type { OsLock } from './os-lock.js';
 import {
   KEEPER_SCRIPT,
   readLaunched,
@@ -689,11 +689,7 @@ async function keep(): Promise<void> {
   const debuggerPeer = await openDebuggerFor(run, profiled);
   const exitNotes = run === undefined ? null : scratchDirectory('keeper-exit');
   const toStart = specToStart(spec, exitNotes, debuggerPeer);
-  const { started, own, stopFile, exitFile, spawnedAt } = await startTheGame(
-    spec,
-    toStart,
-    run,
-  );
+  const { started, own, stopFile, exitFile, spawnedAt } = await startTheGame(spec, toStart, run);
   if ('error' in started) {
     debuggerPeer?.close();
     process.stdout.write(`error ${started.error}\n`);

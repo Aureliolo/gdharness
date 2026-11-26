@@ -15,9 +15,9 @@ import process from 'node:process';
 import { startTimesOf } from './process-children.js';
 
 /** How far a process's start may be from the time its lock names and still be the one that wrote it. */
-export const START_TOLERANCE_MS = 2000;
+const START_TOLERANCE_MS = 2000;
 /** How long a lock may stay empty before its taker is taken to have died writing it. */
-export const UNWRITTEN_MS = 10_000;
+const UNWRITTEN_MS = 10_000;
 
 /** The process a lock names. */
 export interface LockHolder {

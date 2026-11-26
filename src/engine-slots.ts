@@ -116,13 +116,13 @@ export function machineSlots(
 }
 
 /** The file in the slots folder whose whole number above 0 is the cap, read at every take. */
-export const SLOT_COUNT_FILE = 'count';
+const SLOT_COUNT_FILE = 'count';
 
 /**
  * The cap [param directory]'s count file holds, or undefined where there is none or it holds
  * anything but a whole number above 0, which leaves the count the take was made with.
  */
-export function slotCountFileOf(directory: string): number | undefined {
+function slotCountFileOf(directory: string): number | undefined {
   try {
     const text = readFileSync(join(directory, SLOT_COUNT_FILE), 'utf8').trim();
     const count = /^\d+$/.test(text) ? Number(text) : 0;
@@ -137,7 +137,7 @@ function nonEmpty(value: string | undefined): string | undefined {
 }
 
 /** How long a wait at a full set of slots goes before it looks again. */
-export const SLOT_LOOK_MS = 1000;
+const SLOT_LOOK_MS = 1000;
 /**
  * How often a wait for a slot says it is still waiting: inside the minute the SDK lets a call stay
  * silent by default, since a gate can hold every slot for far longer.
@@ -317,7 +317,7 @@ export class EngineSlots {
 
   /** Gives back every slot this process holds. */
   releaseAll(): void {
-    for (const lock of [...this.held.keys()]) {
+    for (const lock of this.held.keys()) {
       this.release(lock);
     }
     this.inherited = null;
@@ -375,7 +375,7 @@ export async function slotForCall(): Promise<CallSlot> {
   const progress = callProgress();
   const waits = callSlotWaits();
   const began = Date.now();
-  let blocked = false;
+  const wait = { blocked: false };
   const lock = await slots.take(
     callSignal(),
     progress === undefined
@@ -384,10 +384,10 @@ export async function slotForCall(): Promise<CallSlot> {
           progress(waitedMs / 1000, slotWaitSaid(waitedMs, slots.count, slots.directory));
         },
     () => {
-      blocked = true;
+      wait.blocked = true;
     },
   );
-  if (waits !== undefined && blocked) {
+  if (waits !== undefined && wait.blocked) {
     waits.ms += Date.now() - began;
     waits.said ??= (waitedMs) => slotWaitedSaid(waitedMs, slots.count, slots.directory);
   }

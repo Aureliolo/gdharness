@@ -285,7 +285,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
   process.once('SIGINT', interrupted);
   process.once('SIGTERM', interrupted);
   try {
-    const workers = await workerCountFor(options, slotCount);
+    const workers = workerCountFor(options, slotCount);
     const engine = (name: string, lane: number, share: string): Promise<EngineLeft> =>
       enginePlayed(launch, slots, options, runDirectory, name, lane, [
         ...options.benchArguments,
@@ -363,7 +363,7 @@ function armsInFile(file: string): ArmPlayed[] | null {
 }
 
 /** The workers the run uses: the number asked for, or as many as the machine has room for. */
-async function workerCountFor(options: SpreadOptions, slotCount: number): Promise<number> {
+function workerCountFor(options: SpreadOptions, slotCount: number): number {
   if (options.workers !== null) {
     console.log(`${options.scene} over ${plural(options.workers, 'worker')}.`);
     return options.workers;

@@ -1065,9 +1065,7 @@ export function sweepTranscripts(keepMs = 24 * 60 * 60 * 1000, now = Date.now())
     // A partial file is what a writer that died between writing and renaming left behind.
     const transcript =
       entry.startsWith('run-') &&
-      (entry.endsWith('.log') ||
-        entry.endsWith('.profile.json') ||
-        entry.endsWith('.profile-mark.json'));
+      (entry.endsWith('.log') || entry.endsWith('.profile.json') || entry.endsWith('.profile-mark.json'));
     if (!transcript && !entry.endsWith('.partial')) {
       continue;
     }

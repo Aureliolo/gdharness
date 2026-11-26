@@ -164,11 +164,7 @@ export async function runEngine(
   try {
     return await inASlot(
       (lock) =>
-        startedUntilItRuns(
-          () => runStarted(executable, args, lock, options, signal),
-          signal,
-          crashedAtStart,
-        ),
+        startedUntilItRuns(() => runStarted(executable, args, lock, options, signal), signal, crashedAtStart),
       options.project,
       options.slotless,
     );

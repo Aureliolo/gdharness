@@ -782,7 +782,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
   // Whole, whatever the selection asked of them: the cases an engine is to leave out are the rest.
   const wholeSuites = suites.map((suite) => scripts.suite(suite.path) ?? suite);
   const declared: CasesBySuite = new Map(wholeSuites.map((suite) => [suite.path, suite.cases]));
-  const { launch, interrupted } = await openedRun(options, godotPath, scripts, state, startedAt);
+  const { launch, interrupted } = openedRun(options, godotPath, scripts, state, startedAt);
   try {
     return await runStages({
       options,
@@ -826,13 +826,13 @@ interface RunContext {
  * and answers the launch every engine starts from, with the handler that ends them on an interrupt,
  * which the caller takes off once the run is over.
  */
-async function openedRun(
+function openedRun(
   options: TestOptions,
   godotPath: string,
   scripts: ProjectScripts,
   state: string,
   startedAt: number,
-): Promise<{ readonly launch: Launch; readonly interrupted: () => void }> {
+): { readonly launch: Launch; readonly interrupted: () => void } {
   const testRuns = join(options.projectPath, '.godot', 'gdharness', 'test-runs');
   const keptRuns = join(state, 'test-runs');
   const held = sweepRunDirectories(testRuns);
@@ -1176,7 +1176,7 @@ function slotsFreeNow(slots: Pick<EngineSlots, 'takeFree'>, most: number): strin
 /**
  * Takes a slot for each lane where one is free now, and says what that leaves for the rest.
  */
-export function takenLanes<P extends { readonly lane: number }>(
+function takenLanes<P extends { readonly lane: number }>(
   run: {
     readonly slots: Pick<EngineSlots, 'takeFree' | 'take' | 'release'>;
     readonly ordered: boolean;

@@ -41,7 +41,7 @@ export interface Sample {
  * Whether others kept the machine busy through a [param stretch] of seconds in which the engine
  * used [param work] and the whole machine [param busy], over [param cores].
  */
-export function crowded(stretch: number, work: number, busy: number, cores: number): boolean {
+function crowded(stretch: number, work: number, busy: number, cores: number): boolean {
   return stretch > 0 && Math.max(0, busy - work) / (stretch * cores) >= BUSY;
 }
 
@@ -165,7 +165,6 @@ export function sampled(): Promise<Sample> {
   }
   return latest.sample;
 }
-
 
 async function take(): Promise<Sample> {
   const at = nowSeconds();

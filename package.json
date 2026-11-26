@@ -51,7 +51,6 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.4.0",
-    "fs-native-extensions": "1.5.5",
     "ws": "8.22.1",
     "yaml": "2.9.1"
   },
@@ -63,6 +62,7 @@
     "@types/node": "26.6.6",
     "@types/ws": "8.18.2",
     "fast-check": "4.10.2",
+    "fs-native-extensions": "1.5.5",
     "knip": "6.44.1",
     "markdownlint-cli2": "0.24.0",
     "marked": "18.1.3",

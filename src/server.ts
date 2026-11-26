@@ -17294,13 +17294,7 @@ export class GodotServer {
     readonly hung: boolean;
     readonly crashedStarts?: number;
   }> {
-    const started = await this.spawnGame(
-      godotPath,
-      cmdArgs,
-      env,
-      undefined,
-      undefined,
-    );
+    const started = await this.spawnGame(godotPath, cmdArgs, env, undefined, undefined);
     const hungUp = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         started.process.kill();

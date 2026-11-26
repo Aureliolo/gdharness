@@ -1,9 +1,9 @@
 /**
  * Exclusive locks held by the operating system, which frees one when its process ends, however it
  * ends. The lock is LockFileEx on byte 0 with length 1 on Windows, an open file description lock
- * (fcntl F_OFD_SETLK, which flock does not exclude) on Linux and flock on macOS, taken through the prebuilt addon of fs-native-extensions
- * that the build copies beside the bundle (see `docs/test-runs.md` for how another program locks
- * the same file).
+ * (fcntl F_OFD_SETLK, over the whole file) on Linux and flock on macOS. They are taken through the
+ * prebuilt addon of fs-native-extensions, which the build copies beside the bundle. See
+ * `docs/test-runs.md` for how another program locks the same file.
  */
 
 import { closeSync, existsSync, openSync } from 'node:fs';
@@ -19,6 +19,8 @@ interface Binding {
 
 /** The folder of the bundle's prebuilt addons, one folder a platform and architecture. */
 export const PREBUILDS_FOLDER = 'prebuilds';
+/** The platforms the build ships an addon for, as `<platform>-<architecture>`. */
+export const PREBUILT_PLATFORMS = ['win32-x64', 'darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64'];
 /** The addon's file name inside each platform's folder. */
 export const ADDON_FILE = 'fs-native-extensions.node';
 
@@ -43,10 +45,24 @@ function addonPath(): string {
   throw new Error(`File locks are not available on ${platform}: no prebuilt addon for it.`);
 }
 
+function isBinding(value: unknown): value is Binding {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'tryLock' in value &&
+    typeof value.tryLock === 'function' &&
+    'unlock' in value &&
+    typeof value.unlock === 'function'
+  );
+}
+
 function binding(): Binding {
   if (loaded === undefined) {
-    const holder = { exports: {} as Binding };
+    const holder: { exports: unknown } = { exports: {} };
     process.dlopen(holder, addonPath());
+    if (!isBinding(holder.exports)) {
+      throw new Error('The file lock addon does not offer tryLock and unlock.');
+    }
     loaded = holder.exports;
   }
   return loaded;
@@ -73,7 +89,7 @@ export function tryOsLock(path: string): OsLock | null {
     api.tryLock(fd, 0, process.platform === 'win32' ? 1 : 0, true);
   } catch (error) {
     closeSync(fd);
-    const code = (error as { code?: unknown }).code;
+    const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
     if (typeof code === 'string' && HELD_CODES.has(code)) {
       return null;
     }
