@@ -230,6 +230,7 @@ import {
   PROJECTS_FOLDER,
   projectLockOf,
   raiseSlotMemory,
+  SINCE_IN_SECONDS_BELOW,
   SLOT_COUNT_FILE,
   SLOT_COUNT_VARIABLE,
   SLOT_YIELD_MS,
@@ -73406,9 +73407,8 @@ async function testATakeSweepsGoneLocksPastTheCount(): Promise<void> {
     for (const name of ['2.lock', '17.lock', '18.lock']) {
       writeFileSync(join(directory, name), deadHolder);
     }
-    for (const name of ['1.lock', '19.lock']) {
-      writeFileSync(join(directory, name), JSON.stringify({ pid: process.pid, started }));
-    }
+    // One live lock past the count, which leaves the take one slot under the cap of two.
+    writeFileSync(join(directory, '19.lock'), JSON.stringify({ pid: process.pid, started }));
     writeFileSync(join(directory, '18.lock.steal'), '');
     writeFileSync(join(directory, 'notes.lock'), deadHolder);
     const slots = new EngineSlots(
@@ -73423,7 +73423,7 @@ async function testATakeSweepsGoneLocksPastTheCount(): Promise<void> {
     assert.equal(taken, join(directory, '0.lock'), 'the take itself goes on as it would');
     assert.deepEqual(
       readdirSync(directory).toSorted(),
-      ['0.lock', '1.lock', '18.lock', '18.lock.steal', '19.lock', 'notes.lock'],
+      ['0.lock', '18.lock', '18.lock.steal', '19.lock', 'notes.lock'],
       'the gone holders past the count are removed, and a live one and one being taken over stay',
     );
   } finally {
@@ -126769,6 +126769,15 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheContractsWaitingMarkIsWhatTheCodeWrites,
   testTheContractsLineOrderIsWhatTheCodeDoes,
   testTheContractsCapIsTheCountFile,
+  testAWaiterThatStoppedLookingHoldsNoSlotFromALaterTake,
+  testAMarkInSecondsOrWithNoSinceStandsInLineByItsTime,
+  testAnOlderWaiterGoesBeforeNewerMarksInSecondsOrWithNoSince,
+  testACountLoweredBelowTheSlotsHeldStartsNothingUntilEnoughGo,
+  testALockTakenPastALoweredCountByARaceIsGivenBack,
+  testTheFirstEngineOnAMachineStartsWhateverMemoryReads,
+  testALockWithNoMemoryOwesOneAndAHalfGiBASlot,
+  testALockPastTheCountOwesItsMemory,
+  testTheMemoryCheckKeepsFourGiBBack,
   testTheContractsMemoryCheckIsWhatTheCodeDoes,
   testTheContractsCleanupIsWhatTheCodeDoes,
   testFilesOfRemovedRulesLeftInTheFolderChangeNothing,
@@ -127802,6 +127811,8 @@ async function testTheContractsWaitingMarkIsWhatTheCodeWrites(): Promise<void> {
     '`since`',
     'milliseconds since the epoch',
     '.seen',
+    `below ${String(SINCE_IN_SECONDS_BELOW)} as seconds`,
+    "as begun at its file's modification time",
   ]) {
     assert.ok(contract.includes(part), `item (ii) names ${part}`);
   }
@@ -127868,7 +127879,12 @@ function testTheContractsLineOrderIsWhatTheCodeDoes(): void {
 /** (iv) The count file holds a whole number above 0, read at every take, and anything else counts as missing. */
 async function testTheContractsCapIsTheCountFile(): Promise<void> {
   const contract = contractItem('iv');
-  for (const part of [`<directory>/${SLOT_COUNT_FILE}`, SLOT_COUNT_VARIABLE, 'at every take']) {
+  for (const part of [
+    `<directory>/${SLOT_COUNT_FILE}`,
+    SLOT_COUNT_VARIABLE,
+    'at every take',
+    'whatever their number',
+  ]) {
     assert.ok(contract.includes(part), `item (iv) names ${part}`);
   }
   const { directory, slots } = await contractFolder();
@@ -127956,6 +127972,264 @@ async function testTheContractsCleanupIsWhatTheCodeDoes(): Promise<void> {
       false,
       'a lock past the count of a gone holder is removed',
     );
+    slots.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A waiter ahead that stopped looking holds nothing back from a later take of the process either. */
+async function testAWaiterThatStoppedLookingHoldsNoSlotFromALaterTake(): Promise<void> {
+  const folder = await gameLineFolder(2);
+  const realNow = Date.now;
+  try {
+    slotsHeld(folder, [0]);
+    const t0 = Date.now();
+    waitingMarked(folder, lineBegunAgo(200_000, 'gone.json'), t0);
+    const call = new EngineSlots(folder.directory, 2, folder.me, undefined, undefined, plentyOfMemory);
+    const look = async (at: number, line: SlotLine): Promise<number | null> => {
+      Date.now = () => at;
+      return lockNumber(await call.takeFree(false, line));
+    };
+    assert.equal(await look(t0, lineBegunAgo(100_000, 'first.json')), null, 'the slot is left to the waiter');
+    assert.equal(
+      await look(t0 + SLOT_YIELD_MS + 100, lineBegunAgo(100_000, 'second.json')),
+      1,
+      'a later take, at its first look, passes over a waiter that has not looked for the yield',
+    );
+    call.releaseAll();
+  } finally {
+    Date.now = realNow;
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** A mark's since in seconds and a mark with no since stand in line by the time they name. */
+async function testAMarkInSecondsOrWithNoSinceStandsInLineByItsTime(): Promise<void> {
+  for (const kind of ['seconds', 'none'] as const) {
+    const folder = await gameLineFolder(2);
+    try {
+      slotsHeld(folder, [0]);
+      const began = Date.now() - 10_000;
+      const mark = join(folder.directory, WAITING_FOLDER, 'other-1.json');
+      writeFileSync(
+        mark,
+        JSON.stringify({ ...folder.me, ...(kind === 'seconds' ? { since: began / 1000 } : {}) }),
+      );
+      utimesSync(mark, began / 1000, began / 1000);
+      lookedAt(folder, 'other-1.json', Date.now());
+      const call = new EngineSlots(folder.directory, 2, folder.me, undefined, undefined, plentyOfMemory);
+      assert.equal(
+        await call.takeFree(false, lineBegunAgo(5000, 'newer.json')),
+        null,
+        `a take that began after the mark (${kind}) leaves it the slot`,
+      );
+      assert.equal(
+        lockNumber(await call.takeFree(false, lineBegunAgo(20_000, 'older.json'))),
+        1,
+        `a take that began before the mark (${kind}) goes first`,
+      );
+      call.releaseAll();
+    } finally {
+      rmSync(folder.directory, { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * An older waiter beside a newer mark in seconds and a newer mark with no since takes the slot at the
+ * first look after it comes free, not at the yield.
+ */
+async function testAnOlderWaiterGoesBeforeNewerMarksInSecondsOrWithNoSince(): Promise<void> {
+  const folder = await gameLineFolder(1);
+  const stop = new AbortController();
+  try {
+    slotsHeld(folder, [0]);
+    const slots = new EngineSlots(folder.directory, 1, folder.me, undefined, undefined, plentyOfMemory);
+    let tookAt = 0;
+    const waiting = slots.take(stop.signal).then((lock) => {
+      tookAt = Date.now();
+      return lock;
+    });
+    waiting.catch(() => undefined);
+    const marks = join(folder.directory, WAITING_FOLDER);
+    assert.ok(
+      await cameTrue(() => readdirSync(marks).some((name) => name.endsWith('.json')), 10_000),
+      'the take waits with a mark',
+    );
+    await delay(1100);
+    writeFileSync(
+      join(marks, 'q-1.json'),
+      JSON.stringify({ ...folder.me, since: Math.floor(Date.now() / 1000) }),
+    );
+    writeFileSync(join(marks, 'q-2.json'), JSON.stringify(folder.me));
+    lookedAt(folder, 'q-1.json', Date.now());
+    lookedAt(folder, 'q-2.json', Date.now());
+    await delay(300);
+    const freedAt = Date.now();
+    rmSync(join(folder.directory, '0.lock'));
+    assert.ok(await cameTrue(() => tookAt > 0, 10_000), 'the older waiter takes the slot');
+    assert.ok(
+      tookAt - freedAt < SLOT_YIELD_MS / 2,
+      `within a look of the slot coming free: ${String(tookAt - freedAt)} ms`,
+    );
+    slots.releaseAll();
+  } finally {
+    stop.abort();
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * With the count file lowered below the slots held, a take makes no lock until the live locks are
+ * fewer than the count, and a wait is served once enough of them go.
+ */
+async function testACountLoweredBelowTheSlotsHeldStartsNothingUntilEnoughGo(): Promise<void> {
+  const folder = await gameLineFolder(4);
+  const stop = new AbortController();
+  try {
+    slotsHeld(folder, [1, 2, 3]);
+    writeFileSync(join(folder.directory, SLOT_COUNT_FILE), '2');
+    const slots = new EngineSlots(folder.directory, 4, folder.me, undefined, undefined, plentyOfMemory);
+    const locks = (): string[] => readdirSync(folder.directory).filter((name) => /^\d+\.lock$/u.test(name));
+    const made: string[] = [];
+    const watcher = watchFolder(folder.directory, (_, name) => {
+      if (name === '0.lock') {
+        made.push(name);
+      }
+    });
+    try {
+      assert.equal(await slots.takeFree(), null, 'three held on a count of 2 starts nothing');
+      await delay(300);
+    } finally {
+      watcher.close();
+    }
+    assert.deepEqual(made, [], 'and makes no lock, not even one it gives back');
+    assert.deepEqual(locks(), ['1.lock', '2.lock', '3.lock']);
+    // Held in an object, since the take sets it later, which no flow analysis follows.
+    const got: { lock: string | null } = { lock: null };
+    const waiting = slots.take(stop.signal).then((lock) => {
+      got.lock = lock;
+    });
+    const taken = (): string | null => got.lock;
+    waiting.catch(() => undefined);
+    rmSync(join(folder.directory, '3.lock'));
+    await delay(1500);
+    assert.equal(taken(), null, 'two held on a count of 2 still starts nothing');
+    rmSync(join(folder.directory, '2.lock'));
+    assert.ok(await cameTrue(() => taken() !== null, 10_000), 'the wait is served once one more goes');
+    assert.equal(basename(taken() ?? ''), '0.lock');
+    slots.releaseAll();
+  } finally {
+    stop.abort();
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** Two takers that both read room below a lowered count do not both keep a lock: the later gives it back. */
+async function testALockTakenPastALoweredCountByARaceIsGivenBack(): Promise<void> {
+  const folder = await gameLineFolder(4);
+  try {
+    const past = new Date(Date.now() - 60_000);
+    slotsHeld(folder, [5]);
+    utimesSync(join(folder.directory, '5.lock'), past, past);
+    writeFileSync(join(folder.directory, SLOT_COUNT_FILE), '2');
+    let raced = false;
+    const slots = new EngineSlots(folder.directory, 4, folder.me, undefined, undefined, {
+      ...plentyOfMemory,
+      available: () => {
+        if (!raced) {
+          raced = true;
+          slotsHeld(folder, [1]);
+          utimesSync(join(folder.directory, '1.lock'), past, past);
+        }
+        return plentyOfMemory.available();
+      },
+    });
+    assert.equal(await slots.takeFree(), null, "the lock made after the other taker's is given back");
+    assert.equal(existsSync(join(folder.directory, '0.lock')), false, 'and is gone');
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** The first engine on a machine starts whatever the memory reading says. */
+async function testTheFirstEngineOnAMachineStartsWhateverMemoryReads(): Promise<void> {
+  const { directory, started } = await contractFolder();
+  try {
+    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, undefined, {
+      need: 1.6 * GB,
+      available: () => Promise.resolve(0),
+      held: plentyOfMemory.held,
+    });
+    assert.notEqual(await slots.takeFree(), null, 'no other engine holds a slot, so it starts');
+    assert.equal(await slots.takeFree(), null, 'and the next, behind it, waits for memory');
+    assert.ok(slots.drawn.short !== undefined);
+    slots.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A lock naming no memory owes the flat 1.5 GiB for each slot it holds. */
+async function testALockWithNoMemoryOwesOneAndAHalfGiBASlot(): Promise<void> {
+  const { directory, started } = await contractFolder();
+  try {
+    standInLock(directory, 0, started, {});
+    standInLock(directory, 1, started, {});
+    const owed = 2 * 1.5 * MEMORY_GIB;
+    const reading = { free: 4 * MEMORY_GIB + owed + GB - 1 };
+    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, undefined, {
+      need: GB,
+      available: () => Promise.resolve(reading.free),
+      held: plentyOfMemory.held,
+    });
+    assert.equal(await slots.takeFree(), null, 'one byte short of 1.5 GiB a lock waits');
+    assert.equal(slots.drawn.short?.owed, owed, 'two locks with no memory owe 3 GiB');
+    reading.free += 1;
+    assert.notEqual(await slots.takeFree(), null, 'and enough starts');
+    slots.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A live lock numbered past the count owes its memory as any other does. */
+async function testALockPastTheCountOwesItsMemory(): Promise<void> {
+  const { directory, started } = await contractFolder();
+  try {
+    standInLock(directory, 7, started, { memory: 8 * GB });
+    const reading = { free: 4 * MEMORY_GIB + 8 * GB + GB - 1 };
+    const slots = new EngineSlots(directory, 2, { pid: process.pid, started }, undefined, undefined, {
+      need: GB,
+      available: () => Promise.resolve(reading.free),
+      held: plentyOfMemory.held,
+    });
+    assert.equal(await slots.takeFree(), null, 'the 8 GB lock past the count is owed');
+    assert.equal(slots.drawn.short?.owed, 8 * GB);
+    reading.free += 1;
+    assert.notEqual(await slots.takeFree(), null, 'and enough starts');
+    slots.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** The check keeps 4 GiB back from the free reading for everything else. */
+async function testTheMemoryCheckKeepsFourGiBBack(): Promise<void> {
+  const { directory, started } = await contractFolder();
+  try {
+    standInLock(directory, 0, started, { memory: GB });
+    const reading = { free: 4 * MEMORY_GIB + 2 * GB - 1 };
+    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, undefined, {
+      need: GB,
+      available: () => Promise.resolve(reading.free),
+      held: plentyOfMemory.held,
+    });
+    assert.equal(await slots.takeFree(), null, 'free less 4 GiB less what is owed is a byte short');
+    assert.equal(slots.drawn.short?.kept, 4 * MEMORY_GIB);
+    reading.free += 1;
+    assert.notEqual(await slots.takeFree(), null, 'and a byte more starts');
     slots.releaseAll();
   } finally {
     rmSync(directory, { recursive: true, force: true });

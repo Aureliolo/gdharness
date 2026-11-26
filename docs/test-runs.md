@@ -851,6 +851,8 @@ look until the take ends, however it ends.
 - It holds what a lock does (`pid`, `started`, optionally `by`) and `since`, when the take
   began to wait, in milliseconds since the epoch. The marks one take makes together share their
   `since`.
+- A reader takes a `since` below 100000000000 as seconds since the epoch. It takes a mark with no
+  `since` as begun at its file's modification time.
 - A taker may touch `<mark name without .json>.seen` beside its mark at each look, and remove it with
   the mark. Its time says when the taker last looked. A mark with no such file looks since it was
   made.
@@ -884,6 +886,9 @@ Take in the order you began to wait.
   Processes started before and after a change of the variable disagree until they restart, so a
   machine that changes its count writes the file. gdharness setup writes none.
 - A file that holds anything else counts as missing.
+- Take a free slot only while the live locks in the folder, whatever their number, are fewer than
+  the count. After taking, count the live locks made before yours, by file time and then slot, and
+  give the slot back when they are as many as the count.
 - A lock numbered at or past the count belongs to a taker given a larger count. At each take,
   remove every such lock whose holder has gone, under its steal file as in (i).
 

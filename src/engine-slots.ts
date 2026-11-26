@@ -320,6 +320,12 @@ export const SLOT_YIELD_MS = 5000;
 /** The kind a waiting mark names for a wait for memory, which takes no slot and holds no place in line. */
 const MEMORY_TAKER = 'memory';
 
+/**
+ * A mark's `since` below this is in seconds, as a queue that counts in seconds writes it: as
+ * milliseconds it would be early 1973, and as seconds it reaches past the year 5000.
+ */
+export const SINCE_IN_SECONDS_BELOW = 100_000_000_000;
+
 /** A taker waiting for one of the machine's slots, as its mark names it. */
 interface SlotWaiter {
   readonly mark: string;
@@ -332,9 +338,8 @@ interface SlotWaiter {
 
 /**
  * Each live taker waiting for a slot in [param directory], as its mark names it, the mark file
- * names given by [param marks] read as [param read]. A mark that names no holder, no time it began
- * to wait or a holder that has gone is no waiter, and one of kind {@link MEMORY_TAKER} is a run's
- * own wait for memory.
+ * names given by [param marks] read as [param read]. A mark that names no holder or a holder that
+ * has gone is no waiter, and one of kind {@link MEMORY_TAKER} is a run's own wait for memory.
  */
 async function slotWaitersAsync(
   directory: string,
@@ -374,8 +379,9 @@ function markNames(marks: string): string[] {
 
 /**
  * The waiter the mark file [param mark] in [param marks] names, which read as [param content] and
- * was made at [param madeAt], or null when it names none: no holder, no whole millisecond time it
- * began to wait, or a wait for memory.
+ * was made at [param madeAt], or null when it names none: no holder, or a wait for memory. A
+ * `since` below {@link SINCE_IN_SECONDS_BELOW} is in seconds, and a mark with none began to wait
+ * when its file was made.
  */
 function waiterOfMark(marks: string, mark: string, content: string, madeAt: number): SlotWaiter | null {
   const holder = holderOf(content);
@@ -384,14 +390,20 @@ function waiterOfMark(marks: string, mark: string, content: string, madeAt: numb
     return null;
   }
   const { since, taker } = parsed;
-  if (taker === MEMORY_TAKER || typeof since !== 'number' || !Number.isFinite(since)) {
+  if (taker === MEMORY_TAKER) {
     return null;
   }
+  const began =
+    typeof since !== 'number' || !Number.isFinite(since)
+      ? madeAt
+      : since < SINCE_IN_SECONDS_BELOW
+        ? since * 1000
+        : since;
   return {
     mark,
     pid: holder.pid,
     // In whole milliseconds, as a take's own clock reads: a file's time has a fraction.
-    since: Math.floor(since),
+    since: Math.floor(began),
     // No look written: the wait has only its mark's time to show it is alive.
     seen: Math.floor(fileTimeOr(join(marks, seenNoteOf(mark)), madeAt)),
   };
@@ -921,6 +933,7 @@ export class EngineSlots {
    * not cover the engine ({@link EngineSlots.memoryShort}). The count is read again from the folder
    * at every look. A slot already held is kept to its end whatever arrives. A take leaves the free
    * slots the takers ahead of [param line] take first ({@link SlotLine}). One given no line came last.
+   * Live locks numbered past a lowered count count against it ({@link EngineSlots.openSlots}).
    */
   async takeFree(game = false, line?: SlotLine): Promise<string | null> {
     mkdirSync(this.directory, { recursive: true });
@@ -946,7 +959,7 @@ export class EngineSlots {
       return null;
     }
     const lock = await this.lockOneOf(tried, need);
-    if (lock !== null && (await this.overTheMemory(lock, need))) {
+    if (lock !== null && ((await this.overTheCap(lock)) || (await this.overTheMemory(lock, need)))) {
       this.release(lock);
       return null;
     }
@@ -1030,10 +1043,33 @@ export class EngineSlots {
     return true;
   }
 
-  /** The slots with no lock or a lock whose holder has gone, the lowest first. */
+  /**
+   * The slots with no lock or a lock whose holder has gone, the lowest first. None while the live
+   * locks of the folder, those numbered past the count included, are as many as the count: a count
+   * lowered below the slots held starts nothing until enough of them are given back.
+   */
   private async openSlots(): Promise<number[]> {
-    const held = new Set((await this.heldLocks()).map((one) => one.slot));
+    const live = await this.heldLocks(true);
+    if (live.length >= this.cap) {
+      return [];
+    }
+    const held = new Set(live.map((one) => one.slot));
     return Array.from({ length: this.cap }, (_, slot) => slot).filter((slot) => !held.has(slot));
+  }
+
+  /**
+   * Whether the lock just taken at [param lock] is past the cap: the live locks written before it, by
+   * the time and then the slot, are already as many as the count. Two takers that both read room for
+   * one below a lowered count then cannot both keep theirs.
+   */
+  private async overTheCap(lock: string): Promise<boolean> {
+    const slot = Number(/(\d+)\.lock$/.exec(lock)?.[1]);
+    const at = this.writtenAt(lock) ?? Date.now();
+    const before = (await this.heldLocks(true)).filter((one) => {
+      const written = this.writtenAt(one.lock) ?? 0;
+      return one.lock !== lock && (written < at || (written === at && one.slot < slot));
+    });
+    return before.length >= this.cap;
   }
 
   /**
