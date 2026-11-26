@@ -54786,8 +54786,9 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
       );
       assert.ok(writtenAt > 0 && announcedAt > 0, `the announcement should have been written: ${moments}`);
       const foundMs = Math.round(Number(waited[4]) - announcedAt);
+      // A file's modification time can run about a millisecond ahead of Date.now on the same machine.
       assert.ok(
-        foundMs >= 0,
+        foundMs >= -5,
         `the wait should end after the write: ${String(foundMs)}ms; ${moments}; ${told}`,
       );
       assert.ok(
