@@ -792,8 +792,8 @@ import sys
 
 
 def try_lock(path):
-    """Opens the slot file and locks it. Returns the open descriptor that holds the lock,
-    or None when another process holds it. Close the descriptor to give the slot back."""
+    """Locks the slot file. Returns the descriptor holding the lock, or None
+    when another process holds it. Close the descriptor to free the slot."""
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT)
     try:
         if sys.platform == "win32":
