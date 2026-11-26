@@ -54236,7 +54236,7 @@ async function testAPlayedGameHoldsAnEngineSlot(): Promise<void> {
             `a game of ${project} the editor played for editor_run`,
           );
           await endGame(held.game);
-          const taker = new EngineSlots(slots, 1, { pid: process.pid, started: await ownStart() });
+          const taker = new EngineSlots(slots, 1, { pid: process.pid, started: await ownStart() }, undefined, undefined, plentyOfMemory);
           const taken = await taker.takeFree();
           assert.equal(taken, lock, `${round}: and it is free once the game has gone`);
           taker.release(lock);
@@ -72532,7 +72532,7 @@ async function testASlotWaitLooksWhenTheSlotsChange(): Promise<void> {
     }
 
     const me = { pid: process.pid, started: await ownStart() };
-    const holding = new EngineSlots(directory, 1, me);
+    const holding = new EngineSlots(directory, 1, me, undefined, undefined, plentyOfMemory);
     const lock = await holding.take();
     class Counted extends EngineSlots {
       looks = 0;
@@ -72689,7 +72689,7 @@ async function testADeadLockHeldOpenIsTakenOverOnceLetGo(): Promise<void> {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-turns-'));
   try {
-    const slots = new EngineSlots(directory, 1, { pid: process.pid, started });
+    const slots = new EngineSlots(directory, 1, { pid: process.pid, started }, undefined, undefined, plentyOfMemory);
     await aHeldDeadLockIsTakenOverOnceLetGo(
       join(directory, '0.lock'),
       directory,
@@ -73308,7 +73308,7 @@ async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void
 
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
   try {
-    const slots = new EngineSlots(directory, 2, { pid: process.pid, started, by: 'gdharness test of /p' });
+    const slots = new EngineSlots(directory, 2, { pid: process.pid, started, by: 'gdharness test of /p' }, undefined, undefined, plentyOfMemory);
     const first = await slots.take();
     const second = await slots.take();
     assert.deepEqual(readdirSync(directory).toSorted(), ['0.lock', '1.lock'], 'one file a slot');
@@ -73406,7 +73406,7 @@ async function testATakeSweepsGoneLocksPastTheCount(): Promise<void> {
     }
     writeFileSync(join(directory, '18.lock.steal'), '');
     writeFileSync(join(directory, 'notes.lock'), deadHolder);
-    const slots = new EngineSlots(directory, 2, { pid: process.pid, started });
+    const slots = new EngineSlots(directory, 2, { pid: process.pid, started }, undefined, undefined, plentyOfMemory);
     const taken = await slots.takeFree();
     assert.equal(taken, join(directory, '0.lock'), 'the take itself goes on as it would');
     assert.deepEqual(
@@ -75009,7 +75009,7 @@ async function testATakeInsideAJobWaitsOnTheLentSlotAndMarksNothing(): Promise<v
     writeFileSync(lent, JSON.stringify({ pid, started }));
     process.env['GODOT_ENGINE_TIMED'] = lent;
     const me = { pid: process.pid, started: await ownStart() };
-    const inside = new EngineSlots(directory, 2, me);
+    const inside = new EngineSlots(directory, 2, me, undefined, undefined, plentyOfMemory);
     assert.equal(await inside.take(), lent, 'the first take runs on the lent slot');
     let blocked = 0;
     const second = inside.take(waiting.signal, undefined, () => {
@@ -75024,7 +75024,7 @@ async function testATakeInsideAJobWaitsOnTheLentSlotAndMarksNothing(): Promise<v
       : [];
     assert.deepEqual(marked, [], 'and it marks no wait in the machine');
     delete process.env['GODOT_ENGINE_TIMED'];
-    const outsider = new EngineSlots(directory, 2, me);
+    const outsider = new EngineSlots(directory, 2, me, undefined, undefined, plentyOfMemory);
     const free = await outsider.takeFree();
     process.env['GODOT_ENGINE_TIMED'] = lent;
     assert.equal(
@@ -76413,7 +76413,7 @@ async function testASlotTakenOverIsMadeInPlace(): Promise<void> {
   try {
     writeFileSync(join(directory, '0.lock'), dead);
     mkdirSync(join(directory, `.0.lock.${String(process.pid)}-0.writing`));
-    const slots = new EngineSlots(directory, 1, { pid: process.pid, started }, undefined);
+    const slots = new EngineSlots(directory, 1, { pid: process.pid, started }, undefined, undefined, plentyOfMemory);
     const lock = await slots.takeFree();
     assert.equal(lock === null ? null : basename(lock), '0.lock', 'the slot is taken over');
     assert.equal(
@@ -76561,7 +76561,7 @@ async function testASlotLockIsCreatedWithoutAStagedFile(): Promise<void> {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-created-lock-'));
   try {
     mkdirSync(join(directory, `.0.lock.${String(process.pid)}-0.writing`));
-    const slots = new EngineSlots(directory, 1, { pid: process.pid, started }, undefined);
+    const slots = new EngineSlots(directory, 1, { pid: process.pid, started }, undefined, undefined, plentyOfMemory);
     const lock = await slots.takeFree();
     assert.equal(lock === null ? null : basename(lock), '0.lock', 'the slot is taken with no staged file');
     assert.equal(
@@ -76586,7 +76586,7 @@ async function testAFileTakenBesideTheSlotsIsMadeThroughItsStagedFile(): Promise
   try {
     const staged = join(directory, `.mark.json.${String(process.pid)}-0.writing`);
     mkdirSync(staged);
-    const slots = new EngineSlots(directory, 1, { pid: process.pid, started }, undefined);
+    const slots = new EngineSlots(directory, 1, { pid: process.pid, started }, undefined, undefined, plentyOfMemory);
     assert.equal(
       await slots.takeFile(join(directory, 'mark.json')),
       false,
@@ -76629,7 +76629,7 @@ async function testTheSlotSweepJudgesStagedFilesByTheirWritersName(): Promise<vo
     writeFileSync(join(directory, `.9.lock.${String(gone.pid)}-1.writing`), live);
     writeFileSync(join(directory, `.8.lock.${String(process.ppid)}-1.writing`), dead);
     assert.deepEqual(slotWaiters(directory), [], 'a staged file is no mark');
-    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined);
+    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, undefined, plentyOfMemory);
     const lock = await slots.takeFree();
     assert.notEqual(lock, null, 'a take beside staged files finds a slot');
     assert.deepEqual(
@@ -76754,7 +76754,7 @@ async function testACallBehindACappedGameDoesNotSayItLeavesTheSlotToIt(): Promis
     slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
     slotsHeld(folder, [11, 10], true);
     waitingMarked(folder, lineBegunAgo(300_000, 'game.json'), Date.now());
-    const call = new EngineSlots(folder.directory, 12, folder.me, undefined);
+    const call = new EngineSlots(folder.directory, 12, folder.me, undefined, undefined, plentyOfMemory);
     assert.equal(
       lockNumber(await call.takeFree(false, lineBegunAgo(200_000, 'call.json'))),
       9,
@@ -76797,8 +76797,8 @@ async function testTwoTakersThatPlaceEachOtherAheadDoNotLeaveTheSlotToEachOtherF
     const second = lineBegunAgo(200_000, 'second.json');
     waitingMarked(folder, lineBegunAgo(300_000, 'first.json'), t0);
     waitingMarked(folder, second, t0);
-    const a = new EngineSlots(folder.directory, 12, folder.me, undefined);
-    const b = new EngineSlots(folder.directory, 12, folder.me, undefined);
+    const a = new EngineSlots(folder.directory, 12, folder.me, undefined, undefined, plentyOfMemory);
+    const b = new EngineSlots(folder.directory, 12, folder.me, undefined, undefined, plentyOfMemory);
     const look = async (taker: EngineSlots, line: SlotLine, at: number): Promise<number | null> => {
       Date.now = () => at;
       lookedAt(folder, 'first.json', at);
@@ -76908,7 +76908,7 @@ function takerInTurn(
   }
   line.mark = one.mark;
   waitingMarked(folder, line, t0);
-  return { line, slots: new EngineSlots(folder.directory, folder.count, folder.me) };
+  return { line, slots: new EngineSlots(folder.directory, folder.count, folder.me, undefined, undefined, plentyOfMemory) };
 }
 
 /** Every 1000 ms from 0 to [param last] ms, with [param also] among them. */
@@ -77273,7 +77273,7 @@ async function testALockOfATakeForAProjectInGitIsAsThatOfATakeForNone(): Promise
     for (const forProject of [project, undefined]) {
       const directory = join(root, forProject === undefined ? 'none' : 'git');
       mkdirSync(directory);
-      const taker = new EngineSlots(directory, 1, me, undefined, forProject);
+      const taker = new EngineSlots(directory, 1, me, undefined, forProject, plentyOfMemory);
       const lock = await taker.take();
       locks.push(readFileSync(lock, 'utf8'));
       taker.release(lock);
@@ -77315,7 +77315,7 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
   const pending: Promise<unknown>[] = [];
   try {
     const holder = { pid: process.pid, started: await ownStart() };
-    const slots = new EngineSlots(directory, 1, holder);
+    const slots = new EngineSlots(directory, 1, holder, undefined, undefined, plentyOfMemory);
     const waitFor = (signal?: AbortSignal): Promise<string> => {
       const taken = slots.take(signal === undefined ? stop.signal : AbortSignal.any([stop.signal, signal]));
       pending.push(taken.catch(() => undefined));
@@ -81749,11 +81749,11 @@ async function checksALongWaitIsHeardOnce(): Promise<void> {
     const lines: string[] = [];
     const lanes = new EngineSlots(lined, 1, me, (line) => {
       lines.push(line);
-    });
+    }, undefined, plentyOfMemory);
     const unheard: string[] = [];
     const listened = new EngineSlots(lined, 1, me, (line) => {
       unheard.push(line);
-    });
+    }, undefined, plentyOfMemory);
     const told: number[] = [];
     const takes = [
       { slots: lanes, taking: lanes.take() },
@@ -81786,7 +81786,7 @@ async function checksALongWaitIsHeardOnce(): Promise<void> {
     const brief: string[] = [];
     const briefly = new EngineSlots(lined, 1, me, (line) => {
       brief.push(line);
-    });
+    }, undefined, plentyOfMemory);
     const shortTake = briefly.take();
     await delay(500);
     rmSync(lineHeld);
@@ -81797,7 +81797,7 @@ async function checksALongWaitIsHeardOnce(): Promise<void> {
     const queued: string[] = [];
     const run = new EngineSlots(lined, 1, me, (line) => {
       queued.push(line);
-    });
+    }, undefined, plentyOfMemory);
     const first = await run.take();
     const second = run.take();
     await delay(2600);
@@ -86039,7 +86039,7 @@ async function onAFullMachine(body: (machine: FullMachine) => Promise<void>): Pr
     directory,
     1,
     { pid: process.pid, started: await ownStart() },
-    undefined,
+    undefined, undefined, plentyOfMemory,
   );
   const children: ReturnType<typeof spawnHidden>[] = [];
   try {
@@ -86341,7 +86341,7 @@ async function withServersOnAFullMachine(
     directory,
     1,
     { pid: process.pid, started: await ownStart() },
-    undefined,
+    undefined, undefined, plentyOfMemory,
   );
   const cleared = Object.fromEntries(SLOT_VARIABLES.map((name) => [name, '']));
   const servers: ServerProcess[] = [];
@@ -87118,7 +87118,7 @@ async function testASlotCommandServesTheSlotsOfATestRun(): Promise<void> {
   await withASlotCommand({}, async (command) => {
     const directory = join(command.directory, 'slots');
     const holder = { pid: process.pid, started: await ownStart() };
-    const slots = new EngineSlots(directory, 2, holder);
+    const slots = new EngineSlots(directory, 2, holder, undefined, undefined, plentyOfMemory);
     assert.equal(await slots.takeFree(), null, 'a command has no free-now answer');
     assert.deepEqual(grantEvents(command), [], 'and is not asked for one');
     assert.equal(await slots.take(), command.lock);
@@ -87246,7 +87246,7 @@ async function testAnInheritedSlotCallsNoSlotCommand(): Promise<void> {
     process.env['GODOT_ENGINE_HELD'] = lent;
     await withASlotCommand({}, async (command) => {
       const holder = { pid: process.pid, started: await ownStart() };
-      const slots = new EngineSlots(join(directory, 'own'), 2, holder);
+      const slots = new EngineSlots(join(directory, 'own'), 2, holder, undefined, undefined, plentyOfMemory);
       assert.equal(await slots.take(), lent, 'the slot it was started on');
       assert.equal(await slots.takeFree(), null, 'the inherited slot is lent to one engine only');
       assert.deepEqual(grantEvents(command), [], 'the command is never started');
@@ -87273,7 +87273,7 @@ async function theKindAskedUnder(
       const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
         pid: process.pid,
         started: await ownStart(),
-      });
+      }, undefined, undefined, plentyOfMemory);
       slots.release(await slots.take(undefined, undefined, undefined, false, project));
       await command.untilEof();
       return command.entries()[0]?.argv;
@@ -87542,7 +87542,7 @@ async function testARunUnderASlotCommandStartsOnTheGrantsThatCameAtOnce(): Promi
     const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
       pid: process.pid,
       started: await ownStart(),
-    });
+    }, undefined, undefined, plentyOfMemory);
     const said: string[] = [];
     const started = await takenLanes(twoLanesOn(slots), (line) => said.push(line));
     assert.equal(started.taken.length, 2, 'a grant for each lane');
@@ -87567,7 +87567,7 @@ async function testAQueuedGrantDoesNotHoldARunUp(): Promise<void> {
     const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
       pid: process.pid,
       started: await ownStart(),
-    });
+    }, undefined, undefined, plentyOfMemory);
     const said: string[] = [];
     const began = Date.now();
     const started = await takenLanes(twoLanesOn(slots), (line) => said.push(line));
@@ -87595,7 +87595,7 @@ async function testAQueuedGrantDoesNotHoldARunUp(): Promise<void> {
     const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
       pid: process.pid,
       started: await ownStart(),
-    });
+    }, undefined, undefined, plentyOfMemory);
     const started = await takenLanes(twoLanesOn(slots), () => undefined);
     const over = new AbortController();
     over.abort(new Error('handed out'));
@@ -87610,7 +87610,7 @@ async function testAQueuedGrantDoesNotHoldARunUp(): Promise<void> {
     const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
       pid: process.pid,
       started: await ownStart(),
-    });
+    }, undefined, undefined, plentyOfMemory);
     const started = await takenLanes(twoLanesOn(slots), () => undefined);
     const late = await started.granted?.slots.take();
     assert.notEqual(late, undefined, 'a lane that waits is given the late grant');
@@ -87632,7 +87632,7 @@ async function testAGrantThatWasNotQueuedJoinsALateRunWithoutHoldingItsStart(): 
     const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
       pid: process.pid,
       started: await ownStart(),
-    });
+    }, undefined, undefined, plentyOfMemory);
     const began = Date.now();
     const started = await takenLanes(twoLanesOn(slots), () => undefined);
     assert.ok(
@@ -87653,7 +87653,7 @@ async function testAGrantThatWasNotQueuedJoinsALateRunWithoutHoldingItsStart(): 
     const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
       pid: process.pid,
       started: await ownStart(),
-    });
+    }, undefined, undefined, plentyOfMemory);
     const started = await takenLanes(twoLanesOn(slots), () => undefined);
     // No lane asks for it before the work is done, so it is given back unused.
     started.granted?.end();
@@ -87664,7 +87664,7 @@ async function testAGrantThatWasNotQueuedJoinsALateRunWithoutHoldingItsStart(): 
     const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
       pid: process.pid,
       started: await ownStart(),
-    });
+    }, undefined, undefined, plentyOfMemory);
     const began = Date.now();
     const started = await takenLanes(twoLanesOn(slots), () => undefined);
     assert.ok(Date.now() - began < 6000, 'a command that never answers does not hold the start');
@@ -87682,7 +87682,7 @@ async function testAnOutstandingAskSaysItsWaitWhileAGrantIsHeld(): Promise<void>
       join(command.directory, 'slots'),
       2,
       { pid: process.pid, started: await ownStart() },
-      (line) => lines.push(line),
+      (line) => lines.push(line), undefined, plentyOfMemory,
     );
     const held = await slots.take();
     const over = new AbortController();
@@ -87709,7 +87709,7 @@ async function testARefusedLaneIsALaneTheRunDoesNotGet(): Promise<void> {
     const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
       pid: process.pid,
       started: await ownStart(),
-    });
+    }, undefined, undefined, plentyOfMemory);
     const started = await takenLanes(twoLanesOn(slots), () => undefined);
     assert.equal(started.taken.length, 1);
     const over = new AbortController();
@@ -87732,7 +87732,7 @@ async function testARefusedLaneIsALaneTheRunDoesNotGet(): Promise<void> {
     const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
       pid: process.pid,
       started: await ownStart(),
-    });
+    }, undefined, undefined, plentyOfMemory);
     await assert.rejects(
       async () => await takenLanes(twoLanesOn(slots), () => undefined),
       (error: unknown) => error instanceof Refusal && error.message.includes('refused the slot: no room'),
@@ -92837,7 +92837,7 @@ async function twoDiagnosticsAtOneRebuild(slotCount: 1 | 2): Promise<TwoCallsAtO
     }
     writeFileSync(logFile, '');
     const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    const taker = new EngineSlots(slots, slotCount, holder, undefined);
+    const taker = new EngineSlots(slots, slotCount, holder, undefined, undefined, plentyOfMemory);
     const server = new ServerProcess({
       env: {
         [SLOTS_VARIABLE]: slots,
@@ -92935,7 +92935,7 @@ async function testScriptDiagnosticsKeepsOneSlotForAllItsEngines(): Promise<void
     }
     writeFileSync(logFile, '');
     const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    const taker = new EngineSlots(slots, 1, holder, undefined);
+    const taker = new EngineSlots(slots, 1, holder, undefined, undefined, plentyOfMemory);
     const server = new ServerProcess({
       env: {
         [SLOTS_VARIABLE]: slots,
@@ -93062,7 +93062,7 @@ async function testScriptCreateHoldsNoSlotWhileItAsksTheEditor(): Promise<void> 
         await delay(100);
       }
       const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-      const taker = new EngineSlots(slots, 1, holder, undefined);
+      const taker = new EngineSlots(slots, 1, holder, undefined, undefined, plentyOfMemory);
       const call = server.request(
         'tools/call',
         {
@@ -93193,7 +93193,7 @@ async function testScriptDiagnosticsHoldsNoSlotWhileTheEditorScans(): Promise<vo
       });
       socket.send(JSON.stringify(greeting(project)));
       const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-      const taker = new EngineSlots(slots, 1, holder, undefined);
+      const taker = new EngineSlots(slots, 1, holder, undefined, undefined, plentyOfMemory);
       const competitorTook: { at: number | null } = { at: null };
       const competitor = taker.take().then(async (lock) => {
         competitorTook.at = Date.now();
@@ -128370,7 +128370,7 @@ async function diagnosticsBesideACompetitor(options: {
     writeFileSync(logFile, '');
     const entries = (): StandInEntry[] => standInEntries(logFile);
     const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    const taker = new EngineSlots(slots, 1, holder, undefined);
+    const taker = new EngineSlots(slots, 1, holder, undefined, undefined, plentyOfMemory);
     const foreign = options.foreignHolder ? await taker.take() : null;
     const server = new ServerProcess({
       env: {
@@ -128460,7 +128460,7 @@ async function testATakerAheadThatStoppedLookingIsDroppedAfterTheYield(): Promis
     slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
     const t0 = Date.now();
     waitingMarked(folder, lineBegunAgo(200_000, 'gone.json'), t0);
-    const call = new EngineSlots(folder.directory, 12, folder.me, undefined);
+    const call = new EngineSlots(folder.directory, 12, folder.me, undefined, undefined, plentyOfMemory);
     const behind = lineBegunAgo(100_000, 'call.json');
     const look = async (at: number): Promise<number | null> => {
       Date.now = () => at;
@@ -128475,6 +128475,12 @@ async function testATakerAheadThatStoppedLookingIsDroppedAfterTheYield(): Promis
     rmSync(folder.directory, { recursive: true, force: true });
   }
 }
+
+/** A machine with memory to spare, so a take is judged by its slots and its line alone. */
+const plentyOfMemory = {
+  available: (): Promise<number> => Promise.resolve(1024 * MEMORY_GIB),
+  held: (): Promise<Map<number, number>> => Promise.resolve(new Map()),
+};
 
 async function main(): Promise<void> {
   syncSharedGdscript();
