@@ -77558,6 +77558,10 @@ async function testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase(): Promise<v
       );
     } finally {
       holder.kill();
+      // The system frees its lock as the process ends, which is after the kill is sent.
+      if (holder.exitCode === null && holder.signalCode === null) {
+        await new Promise((settle) => holder.once('exit', settle));
+      }
     }
     assert.equal(shared.status, 0, shared.said);
     assert.match(shared.said, /a share at a time/, `the run was shared: ${shared.said}`);

@@ -166,6 +166,12 @@ export class EngineSlots {
   /** The slot of the engine that started this process while one of its engines runs on it. */
   private inherited: string | null = null;
   private saidAt = Number.NEGATIVE_INFINITY;
+  /**
+   * The slots given up for a keeper to take over, with when each stops being kept back. Between the
+   * server's release and the keeper's lock another take of this process would find the slot free and
+   * leave the game on none.
+   */
+  private readonly handedOver = new Map<string, number>();
 
   readonly directory: string;
   /** The cap the take was made with, which the count file of the folder replaces at each take. */
@@ -273,6 +279,9 @@ export class EngineSlots {
     }
     for (let slot = 0; slot < this.cap; slot += 1) {
       const path = join(this.directory, `${String(slot)}.lock`);
+      if (this.keptBackForKeeper(path)) {
+        continue;
+      }
       const lock = tryOsLock(path);
       if (lock !== null) {
         this.held.set(path, lock);
@@ -280,6 +289,35 @@ export class EngineSlots {
       }
     }
     return null;
+  }
+
+  /** Whether [param path] is given up for a keeper that has not yet locked it, nor run out of time. */
+  private keptBackForKeeper(path: string): boolean {
+    const until = this.handedOver.get(path);
+    if (until === undefined) {
+      return false;
+    }
+    if (Date.now() < until) {
+      const probe = tryOsLock(path);
+      if (probe === null) {
+        // The keeper has it, which is what the hand-over waited for.
+        this.handedOver.delete(path);
+        return false;
+      }
+      probe.release();
+      return true;
+    }
+    this.handedOver.delete(path);
+    return false;
+  }
+
+  /**
+   * Gives back the slot at [param lock] for a keeper to take over ({@link takenOverSlot}), which
+   * no take of this process gets first.
+   */
+  handOver(lock: string): void {
+    this.release(lock);
+    this.handedOver.set(lock, Date.now() + TAKE_OVER_MS);
   }
 
   /**
@@ -404,7 +442,12 @@ export async function slotForCall(): Promise<CallSlot> {
     heldUntilGone: (pid) => {
       void untilGone(pid).finally(release);
     },
-    leave: release,
+    leave: () => {
+      if (!released) {
+        released = true;
+        slots.handOver(lock);
+      }
+    },
   };
 }
 
