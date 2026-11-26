@@ -151,7 +151,8 @@ gdharness
 |       |-- suite-plan.ts        which suites, their cost, which engine runs what
 |       |-- suite-judge.ts       an engine's output read case by case
 |       |-- suite-inputs.ts      what a suite's engine loaded, for --changed-only
-|       `-- engine-slots.ts      the slots every tool starting an engine shares
+|       |-- engine-slots.ts      the slots every tool starting an engine shares
+|       `-- os-lock.ts           the operating system lock a slot is
 |
 `-- server.ts             the MCP server: one call in, one answer out
     |-- tool-definitions  every tool, op and argument, in one table

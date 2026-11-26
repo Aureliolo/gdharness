@@ -168,7 +168,6 @@ output can still read it there. It holds:
   and for a share in a reused engine the time that share's suites took to compile.
 - `passed` and `windowed`.
 - `suites`: the suites it was handed.
-- `peakBytes`: the most memory it was read holding, or null when it was never read.
 - `log`: the file its output is kept in.
 
 `log` and `logs` are null once a passing run has removed them, except for the engines of
@@ -228,15 +227,14 @@ the gate deals:
   "res://tests/a_test.gd": {
     "seconds": 12.4,
     "cases": { "test_x": 5.1, "test_y": 7.0 },
-    "rows": { "test_y": [3.4, 3.6] },
-    "peak": 1610612736
+    "rows": { "test_y": [3.4, 3.6] }
   }
 }
 ```
 
 `seconds` is the suite run whole, with its `before` and `after`. `cases` holds each function, with
 the rows of a parameterised one added together. `rows` holds what each row of a parameterised case
-took, from row 0. `peak` is the most memory, in bytes, an engine holding the suite was seen to hold.
+took, from row 0.
 A run that closes the suite replaces it.
 
 ### Missing and stale times
@@ -245,7 +243,7 @@ A case never timed is taken to cost the median of the cases that have been, or 0
 has. Each run that writes the file drops a suite the project no longer has, deleted or renamed. It
 also drops a case its suite no longer declares and takes its seconds off the suite's. A run that
 printed only some rows of a case, because it was dealt them or cut short, keeps the old times of
-the rest. A suite with no peak kept counts as 1.5 GB.
+the rest.
 
 ### Splitting a suite
 
@@ -284,20 +282,12 @@ run starts no more engines than the smallest of these:
 
 - `--engines`.
 - The machine's processors, or `--cores`.
-- What its free memory allows past 4 GB, at the largest peak kept for any suite of the run.
 - What it takes to keep each engine busy for as long as the slowest unit or 5 seconds, whichever
   is longer. One more is added for each unit with a case never timed.
 
 The median is only a guess at what an untimed case costs. It guesses worst for a suite just split
 out of a slow one, and for every suite on a project's first run. A run held below `--engines` by
-processors or memory says which on its first line.
-
-### Free memory
-
-On macOS the free memory is the share the system itself counts as free, which includes the cache it
-can give back. On Windows it is the smaller of the physical memory free and what the system can
-still commit. An allocation fails at the commit limit however much physical memory is free. An
-engine's own figure is what Windows has committed to it, and its resident memory on Linux and macOS.
+processors says so on its first line.
 
 ### When some slots are held
 
@@ -307,11 +297,10 @@ gate's export, say). Then the run says how many were free and hands the work out
 Each slot it holds starts an engine on a share. An engine starts in each other slot as that slot
 comes free. An engine that finishes its share while shares remain runs the next in the same
 process, so a share after the first pays no engine start. A lane whose engine crashed or was ended
-takes its next share in an engine started for it. An engine is reused only when memory does not
-hold the run. In a run held by memory each share gets an engine of its own, admitted for that share.
+takes its next share in an engine started for it.
 
 Each share is judged on the lines the engine printed for it, with its own cases, failures,
-timeouts, deadline and peak memory. A share in an engine that ran out of memory fails and is not run
+timeouts and deadline. A share in an engine that ran out of memory fails and is not run
 again. What the engine reports as leaked at exit is attributed to the share it ran last.
 
 The run and the engine pass shares through the folder named by `--shares-in` (see
@@ -334,48 +323,6 @@ seconds is taken (the lower of two middle ones), so one start, fast or slow, nev
 The shares shrink as the work runs out. A slot freed partway through takes on part of what is
 left, rather than a part fixed when the run began. Once everything is handed out, the run stops
 waiting for slots.
-
-### When memory is short
-
-Memory is handed out the same way. The memory free as a run begins may hold it below the engines
-the processors allow. Then the run deals for those engines, says how many memory had room for and
-hands the work out a share at a time.
-
-Before each engine starts, the memory free is read again. The engine starts once that covers the
-most its share's suites were seen to hold. Each engine going counts at what its share was seen to
-hold, less what it holds now. The run's first engine always starts.
-
-A share waiting for memory keeps a mark in the slots' `waiting` folder, as a wait for a slot does.
-It takes its slot first and gives it back while it waits. Once memory has room it takes a slot
-again, and memory is judged again before its engine starts.
-
-### The memory ceiling and the kept peak
-
-Every engine gdharness starts is read about once a second, with the processes it started. That
-covers a headless operation, `project_test`, a game from `editor_run start`, the boot of
-`editor_run check`, an editor from `editor_launch open` and the engines of a `gdharness test` run.
-A game a server left running is read by the next server that picks up its run. The figure is
-private bytes on Windows and resident memory on Linux and macOS. An engine past its ceiling is
-ended with everything below it. The answer, the run's result and its printed line give the peak
-and the ceiling and name how to raise it.
-
-The ceiling is a quarter of the physical memory and at least 4 GiB. `GDHARNESS_ENGINE_MEMORY_CEILING_MB`
-sets it, in megabytes, for every engine. The project setting `gdharness/engine/memory_ceiling_mb` in
-`project.godot` sets it for the engines started for that project and wins over the variable. A
-setting that is not a whole number above 0 refuses the start, and so does one written in quotes.
-The answer for an engine ended for its memory names where its ceiling came from: the setting, the
-variable or the default.
-
-The memory of an engine is read in the same sample as its processor time, so an engine watched for
-both is read once for each tick.
-
-When an engine ends, its peak is kept for its project and tool in `runs/memory-<project>-<tool>.json`.
-The boot of `editor_run check` keeps its own, apart from the game's. An engine ended for its memory
-keeps none. The next start of that tool in that project counts the larger of 1.5 GiB and the kept
-peak, up to the ceiling. It is refused when the free memory less the reserve does not cover it. The
-refusal says what the engine needs, what that comes from and how much is free. It then names how
-much memory to free, or the ceiling to set that lets the engine start. That ceiling leaves a margin
-of a quarter of the room, and at least 1 GiB, for free memory that moves before the next start.
 
 ## What fails a run
 
@@ -649,7 +596,7 @@ however busy the machine is. Its ending says how it was counted.
 ### Running out of memory
 
 An engine that runs out of memory fails, and the run fails with it. No engine is run again. The run
-says an engine ran out of memory and gives the most each engine held in this run, or unread.
+says an engine ran out of memory.
 
 Running out shows as the allocator's null, an image decode failing, godot-sandbox failing to
 allocate a sandbox, or Windows' `STATUS_NO_MEMORY` or `STATUS_COMMITMENT_LIMIT`.
@@ -760,6 +707,11 @@ The slots are files in one directory, shared by every tool on the machine that s
 for every project. Several games' test runs, a benchmark and a build running at once then start
 no more engines between them than there are slots.
 
+A slot is held by an operating system lock on its file, for as long as the engine runs. The process
+that lives as long as the engine holds it, which is the server or the keeper of a game the keeper
+runs. The system frees the lock when that process ends, however it ends. Nothing is written to a
+slot file and nothing is read from one.
+
 The MCP server's own engines take them too. Each headless operation, script check, export,
 `project_test` run and `editor_run check` waits for a slot before its engine starts. So does a game
 started with `editor_run start`, whether the server starts it or the editor plays it. The game
@@ -773,11 +725,10 @@ still take a slot. Inside an engine's slot (`GODOT_ENGINE_HELD`) an import runs 
 engine does.
 
 These engines of one project run one at a time across the machine, since each writes the project's
-`.godot`. Each takes the project's lock, `<directory>/projects/<key>.lock`, made and judged as a
-slot's lock is, and waits while another holds it. The key is the first 16 hex digits of the SHA-256
-of the project's resolved path, lower-cased on Windows. An engine for another project does not
-wait. A tool call waiting for the lock is told as for a slot, below, with the process that holds it
-named.
+`.godot`. Each takes the project's lock, `<directory>/projects/<key>.lock`, an operating system lock
+as a slot's is, and waits while another process holds it. The key is the first 16 hex digits of the
+SHA-256 of the project's resolved path, lower-cased on Windows. An engine for another project does
+not wait. A tool call waiting for the lock is told as for a slot, below.
 
 ### Games and their slots
 
@@ -788,11 +739,12 @@ nothing would see it end. An editor, and a game played from it by hand, take non
 
 ### Waiting for a slot
 
+A take opens each slot file in turn and keeps the first it can lock. When none is free it looks
+again about once a second.
+
 A wait for a slot is announced. A tool call that asked for progress hears it at once and every 20
 seconds after. A call that waited a second or more in all is answered with an `engine_slot_wait`
-block. It holds `waitedMs` and a note naming who held the slots when it first waited. A wait for a
-free slot that the memory check holds back, on Windows and Linux, says so instead, naming the free
-memory, the memory kept, what the running engines still owe and what the engine needs.
+block. It holds `waitedMs` and a note saying that every slot was in use when it first waited.
 
 `gdharness test` and `gdharness spread` print a line once the wait passes 2 seconds, and again
 every 20 seconds while it lasts. It is one line however many of its engines are waiting. Every
@@ -815,163 +767,73 @@ file is read at each take, the variable once per process.
 
 `--engines` is how many engines one run would like, and is not the slot count.
 
-### The contract for another queue
+### Taking a slot from another program
 
-A queue that takes slots without gdharness's code follows the six items below. gdharness's own
-takes follow them too, so both kinds of taker count one machine alike.
+A program that wants to count against the same slots locks the same files, the same way. The slots
+are `<directory>/<n>.lock` for `n` from 0 below the count. Try each in turn and keep the first you
+lock without waiting. Hold it, open, for as long as your engine runs. When none is free, look again
+about a second later.
 
-#### (i) The lock
+Open the file for reading and writing, creating it when it is missing, and write nothing to it.
+The lock each system takes, and so the one to take, is:
 
-- A slot is `<directory>/<n>.lock`, for `n` from 0 below the count.
-- To take one, create the file exclusively (`O_CREAT | O_EXCL`, Python's `open(path, "x")`). Write
-  `{"pid": <your pid>, "started": <your process's start time>}` into it. The time is in
-  milliseconds since the epoch, as the operating system reports it.
-- A lock may be read empty for a moment, between its creation and its text. Hold an empty lock as
-  held, whatever decides on it. One still empty 10 seconds after it was made belongs to a taker
-  that died, and is free.
-- A lock is free when no process has its pid, or the process with that pid started more than 2000 ms
-  away from `started`. A lock whose holder's start time cannot be read is held.
-- To take a free lock over, create `<n>.lock.steal` exclusively. Holding it, read the lock again, and
-  if it is still free remove it, create it as above and remove the steal file. If the steal file
-  cannot be created, someone else is taking the lock over. Remove it only if it is more than 10
-  seconds old. When nothing is free, look again 50 ms later.
-- Marks and steal files are written whole. The text goes to a file beside,
-  `.<name>.<pid>-<thread>.writing`, and is put in place under the name without replacing a file
-  that exists (a hard link, or a rename that Windows refuses onto a taken name). A reader never opens
-  a `.writing` file or counts it as a lock or a mark.
-- An optional `"by"` says what took the slot, such as the tool and its project. A wait names each
-  holder by it, or by its pid when it is missing.
-- An optional `"memory"` says the peak in bytes the engine on the slot may reach, which (v) reads. A
-  lock without it counts 1.5 GiB. The holder raises it, to the next 256 MiB, as its engine grows
-  past it.
-- An optional `"engine"` is `{"pid", "started"}` of the engine process, written once the holder
-  has its pid (see Holders that are not the engine).
+| System  | The lock                                                           |
+| ------- | ------------------------------------------------------------------ |
+| Windows | `LockFileEx`, exclusive and failing at once, from byte 0, length 1 |
+| Linux   | `fcntl` record lock (`F_OFD_SETLK`), exclusive, the whole file     |
+| macOS   | `flock`, exclusive and failing at once, the whole file             |
 
-#### (ii) The waiting mark
+On Linux a `flock` does not exclude an `fcntl` lock, so the program must use `fcntl`. Python's
+`fcntl.lockf` takes a record lock over the whole file that excludes it. In Python:
 
-A taker that finds every slot held keeps one mark for each slot it waits for, from the first such
-look until the take ends, however it ends.
+```python
+import os
+import sys
 
-- The mark is `<directory>/waiting/<pid>-<n>.json`, with `n` unique within the process. It is made
-  exclusively as a lock is, and the folder is made first if it is missing.
-- It holds what a lock does (`pid`, `started`, optionally `by`) and `since`, when the take
-  began to wait, in milliseconds since the epoch. The marks one take makes together share their
-  `since`.
-- A reader takes a `since` below 100000000000 as seconds since the epoch. It takes a mark with no
-  `since` as begun at its file's modification time.
-- A taker may touch `<mark name without .json>.seen` beside its mark at each look, and remove it with
-  the mark. Its time says when the taker last looked. A mark with no such file looks since it was
-  made.
-- A mark whose `taker` is `memory` is a wait for something other than a slot. It takes no place in
-  line.
 
-#### (iii) The line order
+def try_lock(path):
+    """Locks the slot file. Returns the descriptor holding the lock, or None
+    when another process holds it. Close the descriptor to free the slot."""
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT)
+    try:
+        if sys.platform == "win32":
+            import msvcrt
 
-Take in the order you began to wait.
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        elif sys.platform == "darwin":
+            import fcntl
 
-- At each look, read every live mark but your own. Those with an earlier `since` are ahead of you,
-  the earliest first. Where two `since` values are equal, the lower pid is ahead, and where those
-  are equal too, the mark whose file name is first, byte by byte. Name marks in ASCII, so that
-  every reader orders them alike.
-- Each waiter ahead leaves one free slot to itself, the lowest first. Take the free slots that are
-  left.
-- Before you have a mark of your own, no other taker sees you. Two takers that began in the same
-  millisecond may then both go first, and the slot's lock decides between them.
-- A taker that already holds slots keeps the `since` of each mark it still waits on.
-- You may take a slot you have left for 5 seconds. A waiter that has not looked for 5 seconds,
-  counted from the later of the first time you left it a slot and its last look, is left nothing
-  until it looks again. A slot you have left to waiters ahead at every look for 5 seconds is yours
-  to take, since a waiter that holds the place and does not take the slot waits for something
-  else.
-- A waiter that leaves a free slot untaken is waiting for something else, such as memory.
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            import fcntl
 
-#### (iv) The cap
+            fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(descriptor)
+        return None
+    return descriptor
+```
 
-- `<directory>/count` holds a whole number above 0, the count of slots. Read it at every take.
-- Where the file does not exist, the count is `GODOT_ENGINE_SLOT_COUNT`, then half the processors.
-  Processes started before and after a change of the variable disagree until they restart, so a
-  machine that changes its count writes the file. gdharness setup writes none.
-- A file that holds anything else counts as missing.
-- Take a free slot only while the live locks in the folder, whatever their number, are fewer than
-  the count. After taking, count the live locks made before yours, by file time and then slot, and
-  give the slot back when they are as many as the count.
-- A lock numbered at or past the count belongs to a taker given a larger count. At each take,
-  remove every such lock whose holder has gone, under its steal file as in (i).
+The regression suite runs this snippet against gdharness's lock on every system CI uses, in both
+directions.
 
-#### (v) The memory check
-
-Before taking a free slot, an engine of `need` bytes checks that
-`free - kept - owed >= need`. gdharness makes this check on Windows and Linux only. On macOS only
-the count holds a take, since the system's free share there, less `kept`, leaves a small machine
-room for one engine.
-
-- `free` is the memory the machine can give engines now: the free physical memory as Node's
-  `os.freemem()` reads it. On Windows it is the smaller of that and the commit left
-  (`ullAvailPageFile`), and on macOS the total memory times the percentage `kern.memorystatus_level`
-  reports.
-- `kept` is 4 GiB, left for everything else.
-- `need` is the engine's peak in bytes. gdharness uses the peak kept for the engine's project and
-  tool, at most the engine's memory ceiling, and 1.5 GiB where none is kept.
-- `owed` is the sum over every slot lock whose holder lives of its `memory` (or 1.5 GiB) less the
-  memory the process its `engine` names, and the processes below it, hold now, never below 0. A lock
-  that names no engine yet, or whose engine cannot be read, owes its whole figure. A lock still
-  empty counts nothing.
-- A take that finds no other lock live starts whatever the figures, since nothing would give memory
-  back. After taking, count again with only the locks made before yours, and give the slot back and
-  wait when they leave no room, so two takers that read one room do not both start.
-- Write the peak your engines reach into their locks as `memory`, so another queue reads the
-  machine the same way.
-
-#### (vi) Cleanup
-
-A lock or mark whose pid is gone, or whose pid's start time differs from the one it records by more
-than 2000 ms, is removed by any reader, under its steal file for a lock. A mark that is still
-empty or names no holder is being written and is passed over. A reader also removes the `.seen`
-and `.ended` notes beside marks that are older than 10 minutes.
+Read the count as described above, at every take. A program started inside an engine's slot that
+runs one engine on it, instead of taking a second slot, reads `GODOT_ENGINE_HELD` as the next
+section says.
 
 ### A slot lent to a child
 
-gdharness starts every engine it holds a slot for with `GODOT_ENGINE_HELD` set to that slot's lock
-path. A taker started under it runs one engine on that slot rather than take a second one. Any
-further take of that taker takes a slot of its own. The slot is the engine's only in one of two
-ways:
-
-- The slot's live holder is the nearest process above the taker running another executable. The
-  search passes over launchers of the taker's own (a `bun` under `bun run`).
-- The lock names that process under `engine`, `{"pid", "started"}` as a holder is written, with a
-  start within 2000 ms.
+gdharness starts every engine it holds a slot for with `GODOT_ENGINE_HELD` set to that slot's file
+path. A taker started under it runs one engine on that slot rather than take a second one, while
+some process still holds a lock on that file. A variable left behind by an engine that has ended
+names nothing. Any further take of that taker takes a slot of its own.
 
 ### Holders that are not the engine
 
-A holder that is not the engine writes `engine` once it has the engine's pid. Such a holder is the
-keeper of a game, or a server waiting on an engine it started. It writes `engine` again when a game
-restarts itself into another. A game an editor plays inherits the editor's environment while the
-lock names the editor, so it takes a slot of its own. The taker never gives the lent slot back,
-because it stays its holder's.
-
-### Removing locks on Windows
-
-On Windows, Python opens a file without delete sharing. A lock or mark open in another process
-cannot be removed until it is closed. gdharness retries a refused removal for a second, and a
-game's own tool that removes them should do the same.
-
-### Reading the wait marks
-
-The marks let a tool that counts its own time tell a wait for slots others hold from its own work.
-`gdharness test`, `gdharness spread` and the server's own engines keep one whenever they wait. A
-reader skips a mark that is still empty or names no holder, since it is being written. It removes
-one whose holder has gone, by the same rule as a lock.
-
-### Start times
-
-The start time tells a holder from a later process given its pid. Windows reports a process's
-creation time to the millisecond, and `ps -o lstart` on macOS only to the second. That is why the
-tolerance is two seconds.
-
-On Linux, read it as gdharness and psutil's `create_time()` do. Take the `btime` line of
-`/proc/stat`, plus the 22nd field of `/proc/<pid>/stat` divided by `getconf CLK_TCK`, in seconds.
-That is up to a second early. `ps -o lstart` there cuts the same sum to the second again and reads
-up to two seconds early, which is the whole tolerance.
+A slot is held by the process that lives as long as the engine, which need not be the engine
+itself. It is the keeper of a game, or a server waiting on an engine it started. A server that
+hands a game to a keeper lets go of its lock and the keeper takes it over within 10 seconds. A game
+an editor plays is held by the server until the game announces, and then until the game ends.
 
 ## Preparing the game before any suite
 

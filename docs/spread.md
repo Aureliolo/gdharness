@@ -22,7 +22,7 @@ exits 1 when anything went wrong. A wrong command line exits 2.
 ## Options
 
 - `--workers N`: how many workers. The default is as many as the engine slots allow, fewer on a
-  machine short of processors or memory, as for `gdharness test`.
+  machine short of processors, as for `gdharness test`.
 - `--slots DIR`, `--slot-count N`: the engine slots, the machine's own by default, shared with
   `gdharness test` ([Test runs](test-runs.md#engine-slots)). With each worker and the gathering
   engine holding one, a bench and a gate running at once never start more engines than there are

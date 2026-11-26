@@ -27,13 +27,12 @@ import {
   helperStep,
   spawnOnDesktop,
 } from './desktop.js';
-import { ceilingFor, MemoryWatch } from './engine-memory.js';
-import { giveBackSlotAsync, handSlot, nameSlotEngine, ownStart, raiseSlotMemory } from './engine-slots.js';
-import { sampled } from './engine-spent.js';
+import { takenOverSlot } from './engine-slots.js';
 import { letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
 import { raisedMark } from './game-log.js';
 import { endedOnce, type KeeperListening, listenForTheServer } from './keeper-channel.js';
+import type { OsLock } from './os-lock.js';
 import {
   KEEPER_SCRIPT,
   readLaunched,
@@ -42,7 +41,6 @@ import {
   sendSpec,
   withChanges,
 } from './outside.js';
-import { startTimesOf } from './process-children.js';
 import {
   amendRunRecord,
   type RestartedFrom,
@@ -396,7 +394,6 @@ function amendNoteIfItCan(record: RunRecord): void {
 }
 
 type KeptRun = NonNullable<SentSpec['run']>;
-type KeptSlot = NonNullable<KeptRun['slot']>;
 type Started = Awaited<ReturnType<typeof startDetached>>;
 type Followed = NonNullable<Awaited<ReturnType<typeof followSuccessor>>>;
 
@@ -426,54 +423,7 @@ interface Following {
   readonly command: string;
   readonly exitNotes: string | null;
   readonly transcript: string | undefined;
-  readonly slot: KeptSlot | undefined;
   readonly ender: Ender;
-  readonly raising: SlotRaising;
-}
-
-/** The raise of a run's slot, moved onto each process the game restarts into. */
-interface SlotRaising {
-  /** Raises the slot from the readings of [param pid], and no longer from the process before. */
-  readonly onto: (pid: number) => void;
-  readonly stop: () => void;
-}
-
-/**
- * How often the keeper reads its game for the slot's figure. The server reads the game every second
- * to guard it, and the figure moves in steps of 256 MiB.
- */
-const SLOT_READ_MS = 5000;
-
-/** The keeper's readings of its game, from the sample every guard reads. */
-const gameMemory = new MemoryWatch(sampled, SLOT_READ_MS);
-
-/**
- * Raises the slot of [param run] as its game grows past what the slot counts, so the machine's
- * budget counts what the game holds. The keeper holds the lock, so it is the process that rewrites
- * it. No higher than the project's ceiling, past which the server ends the game. A run with no slot
- * of the keeper's, or whose ceiling cannot be read, is not raised.
- */
-function raisingTheSlot(run: KeptRun | undefined): SlotRaising {
-  let stop = (): void => undefined;
-  const slot = run?.slot;
-  let cap: number | null = null;
-  try {
-    cap = run === undefined ? null : ceilingFor(run.projectPath).bytes;
-  } catch {
-    // A setting that is not a size refused the start, so there is no game to raise for.
-  }
-  return {
-    onto: (pid) => {
-      stop();
-      if (slot !== undefined && cap !== null) {
-        const { lock } = slot;
-        stop = gameMemory.follow(pid, cap, (bytes) => raiseSlotMemory(lock, bytes));
-      }
-    },
-    stop: () => {
-      stop();
-    },
-  };
 }
 
 /**
@@ -521,7 +471,6 @@ async function startTheGame(
   own: string | null;
   stopFile: string;
   exitFile: string;
-  keeperStarted: Promise<number> | undefined;
   spawnedAt: number;
 }> {
   const outputFile = run === undefined ? spec.output : run.transcript;
@@ -531,8 +480,6 @@ async function startTheGame(
   const stopFile = own === null ? '' : join(own, 'stop');
   const exitFile = own === null ? '' : join(own, 'exit');
   let started: Started;
-  // Read beside the start rather than after it: on Windows it is a query of its own.
-  const keeperStarted = run?.slot === undefined ? undefined : ownStart();
   // Before the game exists, so anything listed as started after it can be the game's own.
   const spawnedAt = Date.now();
   try {
@@ -544,7 +491,7 @@ async function startTheGame(
       closeSync(transcript);
     }
   }
-  return { started, own, stopFile, exitFile, keeperStarted, spawnedAt };
+  return { started, own, stopFile, exitFile, spawnedAt };
 }
 
 /** The note a run starts with, or null for a start that is no run. */
@@ -617,27 +564,12 @@ async function sayPid(pid: number): Promise<void> {
 }
 
 /**
- * After the pid has gone back, since on Windows reading this process's start is a query of its
- * own, and a start held up by it answered after a game that announces at once had done so.
- * The pid in the lock is this process's, since a game that restarts itself comes back under
- * another, so the label says whose it is: a wait would otherwise name it as the game's. The game
- * is named beside it, so what the game starts runs on its slot rather than taking a second.
+ * Takes over the slot the server gave up as the pid went back to it, and holds it for the game's
+ * life. The lock is held by this process, which lives as long as the game does, so the operating
+ * system frees it however the keeper ends. A slot another taker got first leaves the game on none.
  */
-async function handTheSlot(
-  slot: KeptSlot | undefined,
-  keeperStarted: Promise<number> | undefined,
-  pid: number,
-): Promise<void> {
-  if (slot === undefined || keeperStarted === undefined) {
-    return;
-  }
-  const gameStarted = (await startTimesOf([pid])).get(pid);
-  await handSlot(slot.lock, slot.from, {
-    pid: process.pid,
-    started: await keeperStarted,
-    by: `${slot.by}, through the keeper process that runs it`,
-    ...(gameStarted === undefined ? {} : { engine: { pid, started: gameStarted } }),
-  });
+async function takeTheSlot(slot: { readonly lock: string } | undefined): Promise<OsLock | null> {
+  return slot === undefined ? null : await takenOverSlot(slot.lock);
 }
 
 /**
@@ -682,10 +614,6 @@ async function followRestart(
     restartedFrom: [...(note.restartedFrom ?? []), restartedFromOf(ended)],
   };
   amendNoteIfItCan(moved);
-  if (following.slot !== undefined) {
-    await nameSlotEngine(following.slot.lock, process.pid, { pid: next.pid, started: next.startedAt });
-  }
-  following.raising.onto(next.pid);
   following.ender.end = () => {
     try {
       process.kill(next.pid);
@@ -761,11 +689,7 @@ async function keep(): Promise<void> {
   const debuggerPeer = await openDebuggerFor(run, profiled);
   const exitNotes = run === undefined ? null : scratchDirectory('keeper-exit');
   const toStart = specToStart(spec, exitNotes, debuggerPeer);
-  const { started, own, stopFile, exitFile, keeperStarted, spawnedAt } = await startTheGame(
-    spec,
-    toStart,
-    run,
-  );
+  const { started, own, stopFile, exitFile, spawnedAt } = await startTheGame(spec, toStart, run);
   if ('error' in started) {
     debuggerPeer?.close();
     process.stdout.write(`error ${started.error}\n`);
@@ -783,11 +707,7 @@ async function keep(): Promise<void> {
   const ender: Ender = { stop: false, end: endedOnce(endingTheGame(child, stopFile)) };
   const listening = record === null ? null : await listenAndNote(record, ender, debuggerPeer);
   await sayPid(pid);
-  const slot = run?.slot;
-  await handTheSlot(slot, keeperStarted, pid);
-  // Once the lock is the keeper's, which is the only process that rewrites it from then on.
-  const raising = raisingTheSlot(run);
-  raising.onto(pid);
+  const slot = await takeTheSlot(run?.slot);
   const told = await exited;
   // Before the exit is noted: whoever reads the note then reads a transcript with the game's last lines.
   await copied;
@@ -805,9 +725,7 @@ async function keep(): Promise<void> {
     command: spec.command,
     exitNotes,
     transcript: run?.transcript,
-    slot,
     ender,
-    raising,
   };
   // Looked for at once, beside the drain: a successor that ends before the listing sees it is not
   // followed, and the run ends with the first process's exit.
@@ -823,10 +741,7 @@ async function keep(): Promise<void> {
     following,
   );
   recordTheEnd(last);
-  raising.stop();
-  if (slot !== undefined) {
-    await giveBackSlotAsync(slot.lock, process.pid);
-  }
+  slot?.release();
   debuggerPeer?.close();
   listening?.close();
   discard(own, exitNotes);

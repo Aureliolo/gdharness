@@ -31,8 +31,7 @@ import {
   WINDOWS_EXCEPTION,
   watchedEngine,
 } from './engine-launch.js';
-import { memoryAvailable } from './engine-memory.js';
-import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
+import { EngineSlots, machineSlots } from './engine-slots.js';
 import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE } from './game-log.js';
 import { wholeFlag } from './launch.js';
@@ -266,23 +265,15 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
   mkdirSync(shareDirectory, { recursive: true });
   const chosen = machineSlots({ directory: options.slotsDirectory, count: options.slotCount });
   const slotCount = chosen.count;
-  const slots = new EngineSlots(
-    chosen.directory,
-    slotCount,
-    { pid: process.pid, started: await ownStart(), by: `gdharness spread of ${options.projectPath}` },
-    (line) => {
-      console.log(`[spread] ${line}`);
-    },
-    options.projectPath,
-    { tool: 'spread_lane' },
-  );
+  const slots = new EngineSlots(chosen.directory, slotCount, (line) => {
+    console.log(`[spread] ${line}`);
+  });
   const launch: EngineLaunch = {
     godotPath,
     projectPath: options.projectPath,
     deadlineSeconds: options.deadlineSeconds,
     running: new Set(),
     cores: options.cores,
-    peakKept: 'spread_lane',
   };
   const interrupted = (): void => {
     for (const end of launch.running) {
@@ -294,7 +285,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
   process.once('SIGINT', interrupted);
   process.once('SIGTERM', interrupted);
   try {
-    const workers = await workerCountFor(options, slotCount);
+    const workers = workerCountFor(options, slotCount);
     const engine = (name: string, lane: number, share: string): Promise<EngineLeft> =>
       enginePlayed(launch, slots, options, runDirectory, name, lane, [
         ...options.benchArguments,
@@ -372,14 +363,13 @@ function armsInFile(file: string): ArmPlayed[] | null {
 }
 
 /** The workers the run uses: the number asked for, or as many as the machine has room for. */
-async function workerCountFor(options: SpreadOptions, slotCount: number): Promise<number> {
+function workerCountFor(options: SpreadOptions, slotCount: number): number {
   if (options.workers !== null) {
     console.log(`${options.scene} over ${plural(options.workers, 'worker')}.`);
     return options.workers;
   }
-  const memory = await memoryAvailable();
   const processors = options.cores ?? availableParallelism();
-  const room = roomFor(slotCount, processors, memory.bytes, memory.said);
+  const room = roomFor(slotCount, processors);
   console.log(
     `${options.scene} over ${plural(room.engines, 'worker')}${room.held === undefined ? '' : `, since ${room.held}`}.`,
   );

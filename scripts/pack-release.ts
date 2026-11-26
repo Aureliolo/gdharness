@@ -5,6 +5,7 @@ import { chmod, cp, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from
 import os from 'node:os';
 import path from 'node:path';
 import sourcePackage from '../package.json' with { type: 'json' };
+import { PREBUILDS_FOLDER } from '../src/os-lock.js';
 import { spawnSyncHidden } from '../src/spawn.js';
 
 const root = path.resolve(import.meta.dirname, '..');
@@ -44,6 +45,9 @@ try {
       cp(path.join(root, 'build', name), path.join(stagingRoot, 'build', name)),
     ),
     cp(path.join(root, 'build', 'godot'), path.join(stagingRoot, 'build', 'godot'), { recursive: true }),
+    cp(path.join(root, 'build', PREBUILDS_FOLDER), path.join(stagingRoot, 'build', PREBUILDS_FOLDER), {
+      recursive: true,
+    }),
     cp(path.join(root, 'README.md'), path.join(stagingRoot, 'README.md')),
     cp(path.join(root, 'LICENSE'), path.join(stagingRoot, 'LICENSE')),
     writeFile(path.join(stagingRoot, 'package.json'), `${JSON.stringify(releasePackage, null, 2)}\n`, 'utf8'),

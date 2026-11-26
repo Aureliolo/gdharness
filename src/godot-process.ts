@@ -1,4 +1,3 @@
-import type { MemoryEnd } from './engine-memory.js';
 import type { CallSlot } from './engine-slots.js';
 import type { GameLog } from './game-log.js';
 import type { EditorPlay, RestartedFrom } from './run-record.js';
@@ -244,11 +243,6 @@ export interface GodotProcess {
    */
   endedHere?: string | null;
   /**
-   * Why another server of this project ended the run for its memory, which it noted beside the
-   * run's transcript before it did: see {@link memoryEndOf}.
-   */
-  endedBeside?: string;
-  /**
    * The last error the editor broke this game on, once it has been written into the log.
    *
    * Held so it is written down once. The adapter goes on reporting the same stop for as long as
@@ -262,6 +256,4 @@ export interface GodotProcess {
 export interface SpawnedGame extends GodotProcess {
   process: ChildProcess;
   throughEditor: false;
-  /** Set when the run was ended for holding more memory than its ceiling. */
-  memoryEnd?: MemoryEnd;
 }

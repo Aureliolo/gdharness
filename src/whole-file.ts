@@ -8,19 +8,9 @@
  * step.
  */
 
-import {
-  existsSync,
-  linkSync,
-  readdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { threadId } from 'node:worker_threads';
 import { alive } from './alive.js';
 import { errorCode } from './errors.js';
 import { isSameDirectory } from './paths.js';
@@ -384,67 +374,6 @@ function renameAttempt(partial: string, path: string): Attempt<boolean> {
     };
     const code = errorCode(error) ?? '';
     return !HELD_BY_A_READER.has(code) || refusesForGood(path) ? { done: gaveUp() } : { held: gaveUp };
-  }
-}
-
-/**
- * Makes [param path] holding [param text], and answers whether this call made it. Another process
- * reading the file finds it whole or not there, never empty. For marks and steal files, which are
- * never raced for as slot locks are ({@link madeInPlace}).
- *
- * The text goes to a file beside it, named as the gates' Python queue names its own
- * ({@link stagedWriterOf}), and is linked into place, which fails where the path exists. A rename
- * would replace a file there on Windows. On a disk that cannot link, the file is created exclusively
- * and written, which leaves it empty for a moment.
- */
-export function makeWhole(path: string, text: string): boolean {
-  // A path already there is passed over without a staged file, whose making and removal would wake
-  // every taker watching the folder at each look.
-  if (existsSync(path)) {
-    return false;
-  }
-  const partial = join(
-    dirname(path),
-    `.${basename(path)}.${String(process.pid)}-${String(threadId)}.writing`,
-  );
-  try {
-    writeFileSync(partial, text, 'utf8');
-  } catch {
-    return false;
-  }
-  try {
-    linkSync(partial, path);
-    return true;
-  } catch (error) {
-    return errorCode(error) === 'EEXIST' ? false : madeInPlace(path, text);
-  } finally {
-    rmSync(partial, { force: true });
-  }
-}
-
-/**
- * The pid of the process writing the staged file [param name], `.<file>.<pid>-<thread>.writing`, or
- * undefined for any other name. No listing of a slot folder takes one for a lock or a mark, and a
- * reader never opens it: a rename onto its name from the other side would be refused meanwhile.
- */
-export function stagedWriterOf(name: string): number | undefined {
-  const pid = /^\..+\.(\d+)-\d+\.writing$/.exec(name)?.[1];
-  return pid === undefined ? undefined : Number(pid);
-}
-
-/**
- * Makes [param path] by creating its name exclusively and then writing [param text], and answers
- * whether this call made it. A reader landing between the two finds the file empty. A slot lock is
- * made so, since a taker that stages its text first loses nearly every race to one that only
- * creates the name: every reader that takes, steals or removes a lock holds an empty one as held
- * ({@link lockIsFree}). Also what {@link makeWhole} falls back on where a link cannot be made.
- */
-export function madeInPlace(path: string, text: string): boolean {
-  try {
-    writeFileSync(path, text, { encoding: 'utf8', flag: 'wx' });
-    return true;
-  } catch {
-    return false;
   }
 }
 
