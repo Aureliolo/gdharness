@@ -102541,6 +102541,124 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
   }
 }
 
+/** A resource script whose setters keep lo and hi in step and refuse values of their own. */
+const IN_STEP_SCRIPT = [
+  '@tool',
+  'extends Resource',
+  '',
+  '@export var lo: int = 0:',
+  '\tset(v):',
+  '\t\tlo = v',
+  '\t\tif hi < lo:',
+  '\t\t\tpush_error("hi raised to lo")',
+  '\t\t\thi = lo',
+  '',
+  '@export var hi: int = 10:',
+  '\tset(v):',
+  '\t\thi = v',
+  '\t\tif lo > hi:',
+  '\t\t\tpush_error("lo lowered to hi")',
+  '\t\t\tlo = hi',
+  '',
+  '@export var errored: int = 0:',
+  '\tset(v):',
+  '\t\tif v > 10:',
+  '\t\t\tpush_error("errored above ten")',
+  '\t\t\treturn',
+  '\t\terrored = v',
+  '',
+  '@export var silent: int = 0:',
+  '\tset(v):',
+  '\t\tif v > 10:',
+  '\t\t\treturn',
+  '\t\tsilent = v',
+  '',
+].join('\n');
+
+/**
+ * An in-step refusal with no editor names the property whose write moved the refused one. A value
+ * its own setter refused is refused as itself, with the engine's message, whatever was written
+ * after it.
+ */
+async function testAnInStepRefusalNamesOnlyThePropertyThatMovedIt(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('in-step refusal regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-in-step-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-in-step-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="InStep"\n',
+  );
+  writeFileSync(join(project, 'raising.gd'), IN_STEP_SCRIPT);
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  let made = 0;
+  // The refusal sentence and the engine's messages after it, each write on a resource of its own.
+  const refused = async (properties: Record<string, number>): Promise<[string, string]> => {
+    made += 1;
+    writeFileSync(
+      join(project, `range${made}.tres`),
+      '[gd_resource type="Resource" load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://raising.gd" id="1_s"]\n\n[resource]\nscript = ExtResource("1_s")\n',
+    );
+    const response = await server.request(
+      'tools/call',
+      {
+        name: 'resource_edit',
+        arguments: {
+          projectPath: project,
+          resourcePath: `res://range${made}.tres`,
+          op: 'modify',
+          properties,
+        },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const said = textOf(response) ?? '';
+    assert.equal(
+      get(response, 'result', 'isError'),
+      true,
+      `${JSON.stringify(properties)} is refused: ${said}`,
+    );
+    const at = said.search(/\{\n\s+"engine_messages"/);
+    return at === -1 ? [said.trimEnd(), ''] : [said.slice(0, at).trimEnd(), said.slice(at)];
+  };
+  const IN_STEP =
+    'Resource.lo was given 5 and holds 3 once hi was set as well: the engine keeps the two in step, so they cannot hold these values together. Nothing was written.';
+  const ERRORED =
+    'Resource.errored was given 20 and holds 0 after it was set: the engine changed or refused the value, so nothing was written.';
+  try {
+    await server.initialize('regression-test');
+
+    // silent's write leaves errored as the setter left it, so errored is refused as itself.
+    const [alone, aloneSaid] = await refused({ errored: 20, silent: 5 });
+    assert.equal(alone, ERRORED);
+    assert.match(aloneSaid, /errored above ten/, aloneSaid);
+
+    // errored's write moves nothing, so lo stays put down to hi, whose write lowered it.
+    const [three, threeSaid] = await refused({ lo: 5, hi: 3, errored: 20 });
+    assert.equal(three, IN_STEP);
+    assert.match(threeSaid, /lo lowered to hi/, threeSaid);
+    assert.equal((await refused({ errored: 20, lo: 5, hi: 3 }))[0], ERRORED);
+
+    // A write the engine undoes twice, in either order, is put down to the property that undid it.
+    assert.equal((await refused({ lo: 5, hi: 3 }))[0], IN_STEP);
+    assert.equal(
+      (await refused({ hi: 3, lo: 5 }))[0],
+      'Resource.hi was given 3 and holds 5 once lo was set as well: the engine keeps the two in step, so they cannot hold these values together. Nothing was written.',
+    );
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
 /**
  * A headless server for a project holding [param files], handed to [param body] with a way to read
  * a resource and a way to write a file under the project. Skips where there is no engine.
@@ -132017,6 +132135,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWriteSaysWhatElseItChanged,
   testAWriteReadsWhatThePropertyDeclares,
   testAResourceWriteWithNoEditorSaysWhatStoppedIt,
+  testAnInStepRefusalNamesOnlyThePropertyThatMovedIt,
   testAShaderWithNoTypeAndATranslationWithNoEditor,
   testAShaderReadWithAMissingIncludeSaysWhatTheEngineSays,
   testAShaderReadWithNoIncludeIsUnchanged,

@@ -3407,6 +3407,11 @@ extends Resource
 			return
 		silent = v
 
+@export var burst: int = 0:
+	set(v):
+		for at: int in v:
+			push_error("burst %d" % at)
+
 @export var objects: int:
 	get:
 		return int(Performance.get_monitor(Performance.OBJECT_COUNT))
@@ -3455,6 +3460,30 @@ async function testAnErrorRaisedOnAnotherThreadIsNotSaidInTheEditor(editor: Edit
 }
 
 /**
+ * A value its own setter refused is refused as itself in an editor, with the engine's message,
+ * though another property was written after it.
+ */
+async function testAValueItsSetterRefusedIsRefusedAsItselfInTheEditor(editor: Editor): Promise<void> {
+  const modify = await raisingResource(editor, 'own_refusal');
+  assert.equal(
+    await editor.refusal('resource_edit', modify({ errored: 20, silent: 5 })),
+    `${REFUSED}Resource.errored was given 20 and holds 0 after it was set: the engine changed or refused the value, so nothing was written. The engine said: errored above ten. errored above ten.`,
+  );
+}
+
+/**
+ * An in-step refusal in an editor names the property whose write moved the refused one, and says
+ * what the engine did there, though a write after it raised an error of its own.
+ */
+async function testAnInStepRefusalInTheEditorNamesThePropertyThatMovedIt(editor: Editor): Promise<void> {
+  const modify = await raisingResource(editor, 'moved_by');
+  assert.equal(
+    await editor.refusal('resource_edit', modify({ lo: 5, hi: 3, errored: 20 })),
+    `${REFUSED}Resource.lo was given 5 and holds 3 once hi was set as well: the engine keeps the two in step, so they cannot hold these values together. Nothing was written. The engine said: lo lowered to hi. hi raised to lo. lo lowered to hi.`,
+  );
+}
+
+/**
  * The editor's error listener is attached for one write only. A later write that raises nothing says
  * nothing, and no listener stays attached to hold the engine's objects.
  */
@@ -3477,15 +3506,27 @@ async function testTheEditorsErrorListenerIsRemovedAfterEachWrite(editor: Editor
     });
     return Number(get(read, 'properties', 'objects'));
   };
-  const before = await objects();
+  // Sixty writes that raise nothing, counted on their own: the editor keeps an object for each error
+  // it shows until it holds thousands, so a write that raises grows the count with or without a
+  // listener left attached, and one that raises nothing grows it only with one.
+  const quietGrowth = async (): Promise<number> => {
+    const before = await objects();
+    for (let at = 0; at < 60; at++) {
+      await refusal('resource_edit', modify({ silent: 20 }));
+    }
+    return (await objects()) - before;
+  };
+  const fresh = await quietGrowth();
   for (let at = 0; at < 60; at++) {
     await refusal('resource_edit', modify({ errored: 20 }));
   }
-  const grew = (await objects()) - before;
-  // A refused write leaves one object in the editor, and a listener left attached leaves a second.
+  const afterRaised = await quietGrowth();
+  await refusal('resource_edit', modify({ burst: 10_000 }));
+  const afterThousands = await quietGrowth();
+  const grew = [fresh, afterRaised, afterThousands];
   assert.ok(
-    grew <= 90,
-    `sixty refused writes left ${grew} more objects in the editor, so a listener stays attached`,
+    grew.every((more) => more < 30),
+    `sixty writes that raised nothing left ${grew.join(', ')} more objects in the editor, fresh, after sixty that raised and after ten thousand errors, so a listener stays attached`,
   );
 }
 
@@ -9910,6 +9951,14 @@ async function main(): Promise<void> {
     [
       'testAnErrorRaisedOnAnotherThreadIsNotSaidInTheEditor',
       testAnErrorRaisedOnAnotherThreadIsNotSaidInTheEditor,
+    ],
+    [
+      'testAValueItsSetterRefusedIsRefusedAsItselfInTheEditor',
+      testAValueItsSetterRefusedIsRefusedAsItselfInTheEditor,
+    ],
+    [
+      'testAnInStepRefusalInTheEditorNamesThePropertyThatMovedIt',
+      testAnInStepRefusalInTheEditorNamesThePropertyThatMovedIt,
     ],
     [
       'testTheEditorsErrorListenerIsRemovedAfterEachWrite',

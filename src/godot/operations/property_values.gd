@@ -281,6 +281,7 @@ func _write_key(writing: GdhWriting, key: Variant) -> void:
 	var outside: String = GdhDeclared.outside(holder, declared, value[1], shown(value[1]))
 	if not outside.is_empty():
 		_outside_declared[property] = outside
+	var before: Dictionary = _held_before(target, writing.given)
 	_write_heard(writing, property, value[1])
 	if unscripted is Dictionary:
 		var was: Dictionary = unscripted
@@ -290,7 +291,7 @@ func _write_key(writing: GdhWriting, key: Variant) -> void:
 				moved_by_engine[moved] = true
 	writing.writes += 1
 	writing.written_at[property] = writing.writes
-	_note_undone(target, property, writing.given, writing.undone_by)
+	_note_undone(target, property, writing.given, before, writing.undone_by)
 	writing.given[property] = value[1]
 	writing.declarations[property] = declared
 
@@ -402,10 +403,11 @@ func _write_again_what_moved(writing: GdhWriting) -> void:
 				read_at(target, property), _as_held(target, property, writing.given)
 			)
 		):
+			var before: Dictionary = _held_before(target, writing.given)
 			_write_heard(writing, property, writing.given[property])
 			writing.writes += 1
 			writing.written_at[property] = writing.writes
-			_note_undone(target, property, writing.given, writing.undone_by)
+			_note_undone(target, property, writing.given, before, writing.undone_by)
 
 
 ## Stops the call with the refusal for the first property that does not hold the value it was given.
@@ -517,14 +519,42 @@ func _write_heard(writing: GdhWriting, property: String, value: Variant) -> void
 		writing.said.append([property, heard.raised])
 
 
+## What each property of [param given] holds on [param target], read before a write so that
+## [method _note_undone] can tell which of them the write moved. A list is copied, since a setter
+## can change the one the engine handed back.
+func _held_before(target: Object, given: Dictionary) -> Dictionary:
+	var held: Dictionary = {}
+	for property: String in given:
+		var value: Variant = read_at(target, property)
+		if value is Array:
+			var items: Array = value
+			value = items.duplicate(true)
+		elif value is Dictionary:
+			var entries: Dictionary = value
+			value = entries.duplicate(true)
+		held[property] = value
+	return held
+
+
 ## Notes in [param undone_by] each property of [param given] that writing [param written] on
-## [param target] left holding something else.
+## [param target] moved away from what it held in [param before], to something other than its
+## given value. One its own setter refused, and that the write left as it was, is not noted, so its
+## refusal names no other property.
 func _note_undone(
-	target: Object, written: String, given: Dictionary, undone_by: Dictionary[String, String]
+	target: Object,
+	written: String,
+	given: Dictionary,
+	before: Dictionary,
+	undone_by: Dictionary[String, String],
 ) -> void:
 	for other: String in given:
+		if other == written:
+			continue
 		var held: Variant = read_at(target, other)
-		if other != written and not GdhSame.same(held, _as_held(target, other, given)):
+		if (
+			not GdhSame.same(held, before[other])
+			and not GdhSame.same(held, _as_held(target, other, given))
+		):
 			undone_by[other] = written
 
 
