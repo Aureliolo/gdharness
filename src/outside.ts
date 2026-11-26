@@ -31,6 +31,8 @@ interface OutsideSpec {
     readonly projectPath: string;
     /** The project the server that started the run serves, where it names one. */
     readonly servedBy?: string;
+    /** The process of the server that started the run. */
+    readonly serverPid?: number;
     /** The folder the run's `user://` is moved to, where the start named one. */
     readonly savesIn?: string;
     /**
@@ -187,16 +189,17 @@ function runOf(value: unknown): NonNullable<OutsideSpec['run']> | null {
 
 type OptionalRunFields = Pick<
   NonNullable<OutsideSpec['run']>,
-  'servedBy' | 'savesIn' | 'profile' | 'engineCalls' | 'breakpoints' | 'debugged'
+  'servedBy' | 'serverPid' | 'savesIn' | 'profile' | 'engineCalls' | 'breakpoints' | 'debugged'
 >;
 
 /** Whether each field of a run part that may be absent is either absent or of its type. */
 function optionalRunFieldsAreTyped(
   value: Readonly<Record<string, unknown>>,
 ): value is Readonly<Record<string, unknown>> & OptionalRunFields {
-  const { servedBy, savesIn, profile, engineCalls, breakpoints, debugged } = value;
+  const { servedBy, serverPid, savesIn, profile, engineCalls, breakpoints, debugged } = value;
   return (
     (servedBy === undefined || typeof servedBy === 'string') &&
+    (serverPid === undefined || typeof serverPid === 'number') &&
     (savesIn === undefined || typeof savesIn === 'string') &&
     (profile === undefined || typeof profile === 'string') &&
     (engineCalls === undefined || typeof engineCalls === 'boolean') &&
@@ -210,9 +213,10 @@ function optionalRunFieldsOf(value: Readonly<Record<string, unknown>>): Optional
   if (!optionalRunFieldsAreTyped(value)) {
     return null;
   }
-  const { servedBy, savesIn, profile, engineCalls, breakpoints, debugged } = value;
+  const { servedBy, serverPid, savesIn, profile, engineCalls, breakpoints, debugged } = value;
   return {
     ...(servedBy === undefined ? {} : { servedBy }),
+    ...(serverPid === undefined ? {} : { serverPid }),
     ...(savesIn === undefined ? {} : { savesIn }),
     ...(profile === undefined ? {} : { profile }),
     ...(engineCalls === undefined ? {} : { engineCalls }),

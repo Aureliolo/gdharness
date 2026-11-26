@@ -42654,7 +42654,7 @@ function assertTheGamePickIsCarriedUnaltered(): void {
   assert.equal(picking.length, 5, `the running-game tools are found: ${picking.join(', ')}`);
   for (const name of picking) {
     const schema = text(toolSpec(name)?.parameters['projectPath']?.['description']);
-    assert.equal(schema, 'Which game, when several run: its project folder.', `${name} projectPath`);
+    assert.equal(schema, 'Game by project folder.', `${name} projectPath`);
   }
   for (const step of ['this server started or plays', 'the only game running']) {
     assert.ok(THE_GAME_PICKED_IN_SHORT.includes(step), `the short pick names ${step}`);
@@ -66498,6 +66498,259 @@ async function testTheRunAdoptedIsTheLatestStarted(): Promise<void> {
 }
 
 /**
+ * A server answers for the games it started and for those of a server that has gone, never for a
+ * game another live server started. The game is a stand-in that announces itself and is noted as
+ * started by a server that is running, and no call the server takes reaches it or ends it: each is
+ * refused with the folder of the server that holds it.
+ */
+async function testAServerLeavesAnotherLiveServersGameAlone(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-live-server-'));
+  const project = join(root, 'project');
+  const runtimeDir = join(root, 'runtime');
+  mkdirSync(project);
+  mkdirSync(join(runtimeDir, 'runs'), { recursive: true });
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Live server"\n',
+  );
+  const standIn = (): ChildProcess =>
+    spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const game = standIn();
+  const otherServer = standIn();
+  const pid = game.pid ?? 0;
+  assert.ok(pid > 0 && (otherServer.pid ?? 0) > 0, 'the fixture needs two stand-in processes');
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
+  try {
+    writeFileSync(
+      join(runtimeDir, `runtime-${pid}.json`),
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL,
+        pid,
+        port: 51_997,
+        address: '127.0.0.1',
+        project: { name: 'Stand-in', path: project },
+        addon_version: SERVER_VERSION,
+        addon_digest: shippedRuntimeDigest(),
+      }),
+      'utf8',
+    );
+    const transcript = join(runtimeDir, 'runs', 'run-1.log');
+    writeFileSync(transcript, "the other server's game\n");
+    const startedAt = Date.now() - 5_000;
+    writeRunRecord({
+      pid,
+      transcript,
+      startedAt,
+      startedBy: startedAt,
+      projectPath: project,
+      servedBy: project,
+      serverPid: otherServer.pid ?? 0,
+      arguments: ['--path', project],
+      command: process.execPath,
+    });
+    await withStdioServer(
+      async (call) => {
+        const calls: [string, Record<string, unknown>][] = [
+          ['editor_run', { op: 'stop', pid }],
+          ['editor_run', { op: 'stop' }],
+          ['editor_run', { op: 'wait', timeoutMs: 500 }],
+          ['editor_run', { op: 'profile' }],
+          ['editor_output', { op: 'run' }],
+          ['runtime_inspect', { op: 'tree' }],
+          ['runtime_inspect', { op: 'tree', pid }],
+        ];
+        for (const [name, args] of calls) {
+          const said = await call(name, args);
+          assert.ok(
+            said.includes(
+              `The game with pid ${pid} was started by the server of ${project}, which is running`,
+            ) && said.includes(`Make this call in the session serving ${project}`),
+            `${name} ${JSON.stringify(args)} is refused with the folder of the server holding the game: ${said}`,
+          );
+        }
+        const status = jsonOf(await call('editor_status', {}), 'editor_status');
+        assert.equal(get(status, 'game', 'run'), null, 'the game is not held here');
+        assert.ok(isAlive(pid), 'no call ended it');
+        assert.equal(readRunRecord(project)?.pid, pid, 'and none took its note away');
+      },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    );
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    game.kill();
+    otherServer.kill();
+    sweep(root);
+  }
+}
+
+/**
+ * A run noted as started by a server that has gone is taken over by the next server of its folder,
+ * and one noted as started by a server that is running is not read at all.
+ */
+async function testAGoneServersRunIsTakenOverAndALiveOnesIsNot(): Promise<void> {
+  const gone = (): number => {
+    const done: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['-e', ''], {
+      encoding: 'utf8',
+    });
+    assert.ok(done.pid > 0, 'the fixture needs processes that have been and gone');
+    return done.pid;
+  };
+  const live = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gone-server-'));
+  const project = join(root, 'project');
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  try {
+    mkdirSync(project);
+    const answers: [string, number | undefined][] = [
+      ['gone', gone()],
+      ['live', live.pid],
+      ['unnamed', undefined],
+    ];
+    const run = gone();
+    const seen: Record<string, unknown> = {};
+    for (const [label, serverPid] of answers) {
+      const runtimeDir = join(root, `runtime-${label}`);
+      mkdirSync(join(runtimeDir, 'runs'), { recursive: true });
+      const transcript = join(runtimeDir, 'runs', 'run-1.log');
+      writeFileSync(transcript, 'a run\n');
+      const startedAt = Date.now() - 60_000;
+      process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
+      writeRunRecord({
+        pid: run,
+        transcript,
+        startedAt,
+        startedBy: startedAt,
+        projectPath: project,
+        servedBy: project,
+        ...(serverPid === undefined ? {} : { serverPid }),
+        arguments: ['--path', project],
+        command: join(root, 'godot.exe'),
+        exitCode: 0,
+        endedAt: startedAt + 2_000,
+      });
+      await withStdioServer(
+        async (call) => {
+          seen[label] = get(jsonOf(await call('editor_status', {}), 'editor_status'), 'game', 'run');
+        },
+        { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+      );
+    }
+    assert.equal(
+      get(seen['gone'], 'pid'),
+      run,
+      `the run of a server that has gone is taken over: ${JSON.stringify(seen['gone'])}`,
+    );
+    assert.equal(get(seen['gone'], 'adopted'), true, 'and said to be taken over');
+    assert.equal(
+      get(seen['unnamed'], 'pid'),
+      run,
+      'a note naming no server is read as one whose server has gone',
+    );
+    assert.equal(seen['live'], null, 'the run of a server that is running is not held here');
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    live.kill();
+    sweep(root);
+  }
+}
+
+/**
+ * The pid argument picks among the games this server holds. With two servers of one project, a
+ * start from the second is refused while the first runs a game in the same place, naming the
+ * folder, and the second takes the game over once the first has gone. Needs the engine.
+ */
+async function testASecondServerOfAFolderLeavesTheFirstsGameAndTakesItOnceItIsGone(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('second server of a folder regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-second-server-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-second-server-runtime-'));
+  const env = {
+    GODOT_PATH: godotPath,
+    GDHARNESS_RUNTIME_DIR: runtime,
+    GDHARNESS_PROJECT: project,
+    [SLOT_COUNT_VARIABLE]: slotCountForEngines(2),
+  };
+  const first = new ServerProcess({ env });
+  const second = new ServerProcess({ env });
+  const met = new MetProcesses();
+  const run = async (
+    server: ServerProcess,
+    args: Record<string, unknown>,
+  ): ReturnType<ServerProcess['request']> =>
+    await server.request('tools/call', { name: 'editor_run', arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Second server"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    await first.initialize('regression-test');
+    await second.initialize('regression-test');
+    const started = await run(first, {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    const game = asNumber(get(parseTextContent(started), 'runtime', 'pid'));
+    await met.meet(game);
+
+    const refusedStart = textOf(await run(second, { projectPath: project, op: 'start', headless: true }));
+    assert.match(
+      refusedStart ?? '',
+      new RegExp(`The game with pid ${game} was started by the server of .*, which is running`),
+      `a start over a live server's game is refused: ${refusedStart}`,
+    );
+    for (const args of [{ op: 'stop', pid: game }, { op: 'stop' }]) {
+      const refused = textOf(await run(second, args));
+      assert.match(refused ?? '', /was started by the server of/, `${JSON.stringify(args)}: ${refused}`);
+    }
+    assert.ok(isAlive(game), 'the first server keeps its game');
+
+    const firstPid = first.child.pid;
+    assert.ok(firstPid !== undefined, 'the server should have a pid');
+    await killTheTree(firstPid);
+    await delay(1_000);
+    assert.ok(isAlive(game), 'a game outlives its server');
+    const taken = parseTextContent(await run(second, { op: 'stop' }));
+    assert.deepEqual(
+      [get(taken, 'stopped'), get(taken, 'endedPid')],
+      [true, game],
+      `the next server of the folder takes the game over: ${JSON.stringify(taken)}`,
+    );
+    assert.equal(await met.gone(game, 10_000), true, `pid ${game} should be gone`);
+  } finally {
+    await met.end();
+    await first.stop().catch(() => undefined);
+    await second.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
  * A profiled run picked up from its note keeps its profile: the run holds where the keeper writes
  * it, since a stop takes the note away, so a run picked up has to take it from the note as it is.
  */
@@ -66869,7 +67122,7 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
         );
         assert.match(
           text(get(output, 'note')),
-          /^This run was started by another server, the one this server replaced or one running beside it, and it ended with nothing here waiting on it/,
+          /^This run was started by another server, the one this server replaced, and it ended with nothing here waiting on it/,
           `saying whose run it was: ${text(get(output, 'note'))}`,
         );
         assert.equal(get(output, 'errors'), 1, JSON.stringify(output));
@@ -122866,6 +123119,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACommandLineNotGivenInTimeIsAskedAgain,
   testARunEndedUnwatchedIsStillReadable,
   testTheRunAdoptedIsTheLatestStarted,
+  testAServerLeavesAnotherLiveServersGameAlone,
+  testAGoneServersRunIsTakenOverAndALiveOnesIsNot,
+  testASecondServerOfAFolderLeavesTheFirstsGameAndTakesItOnceItIsGone,
   testAPickedUpRunKeepsItsProfile,
   testARecordedEndingIsReadBack,
   testARestartBeingLookedForIsWaitedFor,

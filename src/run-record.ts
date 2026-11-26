@@ -68,6 +68,12 @@ export interface RunRecord {
    */
   readonly servedBy?: string;
   /**
+   * The process of the server that started the run. Only that server answers for the run while the
+   * process lives, and the next server of the folder takes the run over once it has gone. Absent in a
+   * note a keeper wrote for no server.
+   */
+  readonly serverPid?: number;
+  /**
    * Where the keeper holding the game listens for a stop: see `keeper-channel.ts`. Absent for a
    * keeper that could not listen.
    */
@@ -526,8 +532,13 @@ function recordAt(path: string): RunRecord | null {
 /** The fields of a note that say who served the run, each present only when it holds something. */
 function namedFields(
   fields: Record<string, unknown>,
-): Pick<RunRecord, 'servedBy' | 'savesIn' | 'keeper' | 'keeperPid' | 'profile' | 'exported'> {
+): Pick<RunRecord, 'servedBy' | 'serverPid' | 'savesIn' | 'keeper' | 'keeperPid' | 'profile' | 'exported'> {
   return {
+    ...(typeof fields['serverPid'] === 'number' &&
+    Number.isInteger(fields['serverPid']) &&
+    fields['serverPid'] > 0
+      ? { serverPid: fields['serverPid'] }
+      : {}),
     ...(fields['exported'] === true ? { exported: true as const } : {}),
     ...(typeof fields['savesIn'] === 'string' && fields['savesIn'] !== ''
       ? { savesIn: fields['savesIn'] }

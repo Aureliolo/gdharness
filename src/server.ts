@@ -1429,7 +1429,7 @@ export function endedWithoutACode(run: {
   if (!run.throughEditor) {
     return run.endedHere
       ? 'This run was started by another server, so nothing here held it and its exit code was never collected. Everything it printed is below, read back from its transcript.'
-      : 'This run was started by another server, the one this server replaced or one running beside it, and it ended with nothing here waiting on it, so its exit code was never collected. Everything it printed is below, read back from its transcript.';
+      : 'This run was started by another server, the one this server replaced, and it ended with nothing here waiting on it, so its exit code was never collected. Everything it printed is below, read back from its transcript.';
   }
   const kept =
     "A game the editor plays is the editor's own child, so its exit code stays with the editor and none was collected here.";
@@ -14423,6 +14423,12 @@ export class GodotServer {
     // that game and said nothing about it.
     await this.pickUpWhatTheEditorIsPlaying(project.value.path);
     await this.adoptRecordedRuns();
+    // The note of a place holds one run, so a start here would replace the note of a game another
+    // live server is running in the same place.
+    const placeTaken = readRunRecord(project.value.path, undefined, run.asked.savesIn);
+    if (placeTaken !== null && this.heldByAnotherServer(placeTaken) && alive(placeTaken.pid)) {
+      return this.anotherServersGameRefusal(placeTaken, true);
+    }
     let ended: EndedRun | null = null;
     // Only a run of this start's own place is ended: the same project writing into the same
     // `user://`. A run of another place goes on beside it, and ending it stopped a bench in one
@@ -16272,6 +16278,7 @@ export class GodotServer {
           projectPath,
           ...(savesIn === undefined ? {} : { savesIn }),
           ...this.servedBy(),
+          serverPid: process.pid,
           ...this.profileOfAKeptRun(profile, engineCalls),
           ...(debugged ? { breakpoints: this.breakpointsForAGame(projectPath) } : { debugged: false }),
           slot: { lock: slot.lock },
@@ -16818,6 +16825,7 @@ export class GodotServer {
       if (
         this.runs.some((held) => held.transcript === record.transcript) ||
         !(this.couldBeOurs(record.projectPath) || this.couldBeOurs(record.servedBy ?? '')) ||
+        this.heldByAnotherServer(record) ||
         !alive(record.pid) ||
         !(await couldStillBeTheRecordedRun(record))
       ) {
@@ -16841,7 +16849,8 @@ export class GodotServer {
     const record = this.recordOfTheRun(found, latest);
     if (
       record === null ||
-      !(this.couldBeOurs(record.projectPath) || this.couldBeOurs(record.servedBy ?? ''))
+      !(this.couldBeOurs(record.projectPath) || this.couldBeOurs(record.servedBy ?? '')) ||
+      this.heldByAnotherServer(record)
     ) {
       return;
     }
@@ -16854,6 +16863,75 @@ export class GodotServer {
       this.settleAnEndedAdoption(adopted, record);
     }
     this.holdRun(adopted);
+  }
+
+  /**
+   * Whether the run [param record] notes is another server's: the process that started it is still
+   * running. A server answers only for the games it started, and for those of a server that has
+   * gone, which the next server of the folder takes over. A note with no server process is read as
+   * one whose server has gone.
+   */
+  private heldByAnotherServer(record: RunRecord): boolean {
+    const { serverPid } = record;
+    return serverPid !== undefined && serverPid !== process.pid && alive(serverPid);
+  }
+
+  /**
+   * The note of a game another live server started, among the games going with one of [param pids]
+   * as their process or as a process under it, or null. A worker a game opened is under its run's
+   * process, so the process tree is read once and only when such a server has a game going.
+   */
+  private async recordOfAnotherServersGame(pids: readonly number[]): Promise<RunRecord | null> {
+    if (pids.length === 0) {
+      return null;
+    }
+    const going = everyRunRecord().filter((one) => this.heldByAnotherServer(one) && alive(one.pid));
+    if (going.length === 0) {
+      return null;
+    }
+    const direct = going.find((one) =>
+      pids.some((pid) => pid === one.pid || (one.restartedFrom ?? []).some((before) => before.pid === pid)),
+    );
+    if (direct !== undefined) {
+      return direct;
+    }
+    const tree = await processTree();
+    if (tree === undefined) {
+      return null;
+    }
+    return going.find((one) => pids.some((pid) => ancestorsIn(tree, pid, one.pid).includes(one.pid))) ?? null;
+  }
+
+  /**
+   * The refusal for a call that names or needs a game another live server started, or null when
+   * none of [param pids] is one. It names the folder whose server holds the game and where the call
+   * works.
+   */
+  private async refusedForAnotherServersGame(pids: readonly number[]): Promise<ToolResponse | null> {
+    const record = await this.recordOfAnotherServersGame(pids);
+    return record === null ? null : this.anotherServersGameRefusal(record, false);
+  }
+
+  /**
+   * The refusal naming the folder whose server runs the game [param record] notes. A start would
+   * replace that game's note, so it is told to use a folder or `savesIn` of its own instead.
+   */
+  private anotherServersGameRefusal(record: RunRecord, starting: boolean): ToolResponse {
+    const folder = record.servedBy ?? record.projectPath;
+    const held = `The game with pid ${record.pid} was started by the server of ${folder}, which is running`;
+    if (starting) {
+      return this.createErrorResponse(
+        `${held}, and it holds this project folder and its user:// folder, so nothing was started: a server answers only for the games it started. Start in the session serving ${folder}, or from a worktree of its own with its own server.`,
+        [
+          `Start in the session serving ${folder}`,
+          'A worktree is its own project folder, served by its own server',
+        ],
+      );
+    }
+    return this.createErrorResponse(
+      `${held}, so nothing was done to it: a server answers only for the games it started. Make this call in the session serving ${folder}.`,
+      [`Make the call in the session serving ${folder}`],
+    );
   }
 
   /**
@@ -17395,7 +17473,7 @@ export class GodotServer {
     }
     const run = picked.run;
     if (!run) {
-      return this.noRunToAnswer(args);
+      return await this.noRunToAnswer(args);
     }
     const elsewhere = this.anotherProjectsRun(run.projectPath, args, 'read');
     if (elsewhere) {
@@ -17759,7 +17837,7 @@ export class GodotServer {
     }
     const run = picked.run;
     if (!run) {
-      return this.noRunToAnswer(args);
+      return await this.noRunToAnswer(args);
     }
     const elsewhere = this.anotherProjectsRun(run.projectPath, args, 'waited on');
     if (elsewhere !== null) {
@@ -18187,7 +18265,7 @@ export class GodotServer {
     }
     const run = picked.run;
     if (!run) {
-      return this.noRunToAnswer(args);
+      return await this.noRunToAnswer(args);
     }
     const elsewhere = this.anotherProjectNamed(
       args,
@@ -18615,7 +18693,7 @@ export class GodotServer {
       return picked.refusal;
     }
     if (!stopped) {
-      return this.createErrorResponse(this.nothingOfOursIsRunning(readNonEmptyString(args, 'projectPath')));
+      return await this.noRunToAnswer(args);
     }
     const elsewhere = this.anotherProjectsRun(stopped.projectPath, args, 'stopped');
     if (elsewhere !== null) {
@@ -18679,8 +18757,17 @@ export class GodotServer {
   }
 
   /** The refusal for a call whose pid or project names no run this server holds. */
-  private noRunToAnswer(args: OperationParams): ToolResponse {
+  private async noRunToAnswer(args: OperationParams): Promise<ToolResponse> {
     const pid = readNumber(args, 'pid');
+    const asked = readNonEmptyString(args, 'projectPath');
+    const another = await this.refusedForAnotherServersGame(
+      pid !== undefined
+        ? [pid]
+        : this.everyRuntimeOfOurs(this.anotherProjectThanOurs(asked)).map((one) => one.pid),
+    );
+    if (another !== null) {
+      return another;
+    }
     if (pid !== undefined) {
       return this.createErrorResponse(`This server holds no run with pid ${pid}.`, [
         'editor_status lists the games running on the machine under runtimes, and this server holds under game.run or game.runs',
@@ -18778,6 +18865,10 @@ export class GodotServer {
     andChildren: boolean,
     args: OperationParams,
   ): Promise<ToolResponse> {
+    const another = await this.refusedForAnotherServersGame([pid]);
+    if (another !== null) {
+      return another;
+    }
     const announced = runtimesAnnounced();
     const among = (project?: string): RuntimeEndpoint | UnspokenRuntime | undefined =>
       [
@@ -22209,7 +22300,7 @@ export class GodotServer {
     // whole runtime timeout, ten seconds, and then a guess that it may be paused at a breakpoint.
     // The session was told, so it says so at once and says what lets the game go. Knowledge and
     // not a default: a session opened after the stop has not been told and asks nothing here.
-    const heldRefusal = await this.refusedForAHeldGame(choice.endpoint, announced.running);
+    const heldRefusal = await this.refusedForTheGameChosen(choice.endpoint, announced.running);
     if (heldRefusal !== null) {
       return heldRefusal;
     }
@@ -22224,6 +22315,17 @@ export class GodotServer {
       chosenAmongSeveral,
       answeredBy,
     });
+  }
+
+  /** The refusal for a runtime call whose game is another live server's or is held by a debugger, or null. */
+  private async refusedForTheGameChosen(
+    endpoint: RuntimeEndpoint,
+    running: readonly RuntimeEndpoint[],
+  ): Promise<ToolResponse | null> {
+    return (
+      (await this.refusedForAnotherServersGame([endpoint.pid])) ??
+      (await this.refusedForAHeldGame(endpoint, running))
+    );
   }
 
   /** The refusal for a runtime call when the game it names is held by a debugger, or null. */
