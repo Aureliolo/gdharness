@@ -13,6 +13,8 @@ import process from 'node:process';
 import { MOST_ENGINES } from '../../src/engine-launch.js';
 import {
   ENDED_SUFFIX,
+  FREED_FOLDER,
+  PROJECTS_FOLDER,
   SLOT_COUNT_VARIABLE,
   SLOTS_VARIABLE,
   slotsDrawnOn,
@@ -96,19 +98,27 @@ export function slotCountForEngines(engines: number, suiteCount = process.env[SL
 }
 
 /**
- * What is left in the slot directory [param slots]: every lock, and every wait mark as
- * `waiting/<name>`. The folder of marks stays once a wait has made it, and so does the note each
- * ended wait leaves, which holds nothing. A run that gave back everything leaves an empty list.
+ * What is left in the slot directory [param slots]: every lock, every wait mark as
+ * `waiting/<name>` and every project lock as `projects/<name>`. The folders of marks and project
+ * locks stay once made, and so does the note each ended wait leaves, which holds nothing. A run that
+ * gave back everything leaves an empty list.
  */
 export function leftInSlots(slots: string): string[] {
-  const marks = join(slots, WAITING_FOLDER);
+  const inside = (folder: string, kept: (name: string) => boolean): string[] => {
+    const path = join(slots, folder);
+    return existsSync(path)
+      ? readdirSync(path)
+          .filter(kept)
+          .map((name) => `${folder}/${name}`)
+      : [];
+  };
   return [
-    ...readdirSync(slots).filter((name) => name !== WAITING_FOLDER),
-    ...(existsSync(marks)
-      ? readdirSync(marks)
-          .filter((name) => !name.endsWith(ENDED_SUFFIX))
-          .map((name) => `${WAITING_FOLDER}/${name}`)
-      : []),
+    ...readdirSync(slots).filter(
+      (name) => name !== WAITING_FOLDER && name !== FREED_FOLDER && name !== PROJECTS_FOLDER,
+    ),
+    ...inside(WAITING_FOLDER, (name) => !name.endsWith(ENDED_SUFFIX)),
+    ...inside(FREED_FOLDER, (name) => !/^\d+$/.test(name)),
+    ...inside(PROJECTS_FOLDER, () => true),
   ].toSorted();
 }
 

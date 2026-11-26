@@ -85,6 +85,11 @@ const GDUNIT: String = "--gdh-gdunit"
 ## low-processor pause, 6.8 ms measured, which a run of suites awaiting frames spends thousands of
 ## times. Zero makes a frame's delta round to nothing, and a tween then never moves.
 const FRAME_SLEEP_USEC: int = 1000
+## The same on Windows, where a delay of a few milliseconds or less spins its processor instead of
+## sleeping: one engine used 73 to 97 percent of a core at 1000 and 2000, and 133 to 226 ms a second
+## at 4000 and 5000.
+## Measured at 6000: 71 ms a second waiting on a thread, 22 idle, and 300 frames in 1.8 s.
+const WINDOWS_FRAME_SLEEP_USEC: int = 6000
 ## What the engine's shutdown prints as it clears the newest script and the oldest, on an engine
 ## whose walk [GdhShutdownWalk] guards. Kept in step with the server's engine-leaks.ts, which reads
 ## a run printing the first and not the second as a walk that stopped part way.
@@ -216,6 +221,15 @@ func compile_only(given: PackedStringArray) -> void:
 	quit()
 
 
+## How long an engine on [param os_name] sleeps after each frame. A cap on the frame rate, from
+## `--max-fps` or the project's `application/run/max_fps`, sets the frame time itself, so the
+## sleep stays at [constant FRAME_SLEEP_USEC] under one.
+static func frame_sleep_usec(os_name: String, max_fps: int) -> int:
+	if os_name == "Windows" and max_fps <= 0:
+		return WINDOWS_FRAME_SLEEP_USEC
+	return FRAME_SLEEP_USEC
+
+
 ## The runner over the suites [param given] lists, to be added to the tree, which starts it. Shared
 ## by this script and the suites scene of the tests addon, which loads this file from where the
 ## server ships it and calls this, since the addon itself names no gdUnit4 class.
@@ -227,7 +241,7 @@ static func started(
 	var oldest: Array[GDScript] = walk
 	if oldest.is_empty() and GdhShutdownWalk.guarded():
 		oldest = GdhShutdownWalk.marker(WALK_ENDED)
-	OS.low_processor_usage_mode_sleep_usec = FRAME_SLEEP_USEC
+	OS.low_processor_usage_mode_sleep_usec = frame_sleep_usec(OS.get_name(), Engine.max_fps)
 	var at: int = given.find(GDUNIT)
 	var asked: PackedStringArray = given if at < 0 else given.slice(0, at)
 	var unread: PackedStringArray = []

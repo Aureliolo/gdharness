@@ -151,9 +151,9 @@ output can still read it there. It holds:
   printed it, `seconds`, the `engine` index, its `slot`, its `priority` and its `log`. `slot` is
   the engine slot's number, or null. `priority` is read from the engine's process while it ran: a
   Windows priority class such as `normal`, or the nice value such as `nice 0` on Linux and
-  macOS. It is null when the engine ended before it was read. `log` names the kept file itself,
-  which is under `engine-<n>-again/` after an out-of-memory rerun. Take the path from the field and
-  never build it. `seconds` is exact, and the report prints it to the millisecond.
+  macOS. It is null when the engine ended before it was read. `log` names the kept file itself.
+  Take the path from the field and never build it. `seconds` is exact, and the report prints it to
+  the millisecond.
 - `enginesAsked`.
 - `slotsFree`: how many of the slots its lanes take were free as it began. Fewer than the lanes
   means the engines were handed the suites a share at a time.
@@ -323,9 +323,8 @@ share in an engine started for it. An engine is reused only when memory does not
 run held by memory each share gets an engine of its own, admitted for that share.
 
 Each share is judged on the lines the engine printed for it, with its own cases, failures,
-timeouts, deadline and peak memory. A share in an engine that ran out of memory runs again alone,
-and only that share does. What the engine reports as leaked at exit
-is attributed to the share it ran last.
+timeouts, deadline and peak memory. A share in an engine that ran out of memory fails and is not run
+again. What the engine reports as leaked at exit is attributed to the share it ran last.
 
 The run and the engine pass shares through the folder named by `--shares-in` (see
 [Starting the runner yourself](#starting-the-runner-yourself)). A share in an engine already
@@ -359,7 +358,8 @@ most its share's suites were seen to hold. Each engine going counts at what its 
 hold, less what it holds now. The run's first engine always starts.
 
 A share waiting for memory keeps a mark in the slots' `waiting` folder, as a wait for a slot does.
-It takes its slot first and keeps it while it waits, so an engine memory admits never waits for a slot.
+It takes its slot first and gives it back while it waits. Once memory has room it takes a slot
+again, and memory is judged again before its engine starts.
 
 ### The memory ceiling and the kept peak
 
@@ -660,11 +660,11 @@ however busy the machine is. Its ending says how it was counted.
 
 ### Running out of memory
 
-When an engine runs out of memory, every engine that failed runs again, one at a time, and those
-runs are the ones judged. Running out shows as the allocator's null, an image decode failing,
-godot-sandbox failing to allocate a sandbox, or Windows' `STATUS_NO_MEMORY` or
-`STATUS_COMMITMENT_LIMIT`. One that fails again is headed as run again alone. The line gives the
-most each engine held in this run, or unread.
+An engine that runs out of memory fails, and the run fails with it. No engine is run again. The run
+says an engine ran out of memory and gives the most each engine held in this run, or unread.
+
+Running out shows as the allocator's null, an image decode failing, godot-sandbox failing to
+allocate a sandbox, or Windows' `STATUS_NO_MEMORY` or `STATUS_COMMITMENT_LIMIT`.
 
 ## Leaving out what passed
 
@@ -776,6 +776,20 @@ The MCP server's own engines take them too. Each headless operation, script chec
 `project_test` run and `editor_run check` waits for a slot before its engine starts. So does a game
 started with `editor_run start`, whether the server starts it or the editor plays it. The game
 keeps the slot for as long as it runs.
+
+An import takes none. That covers every `project_import` op and its status reads, the import
+another call starts first, the class cache rebuild an import or an operation runs first, and the
+engines of `gdharness setup`, `runtime`, `upgrade` and `uninstall`. They are short steps every
+other call waits behind. A test run's own engines, and the import passes it hands to its suites,
+still take a slot. Inside an engine's slot (`GODOT_ENGINE_HELD`) an import runs on that slot as any
+engine does.
+
+These engines of one project run one at a time across the machine, since each writes the project's
+`.godot`. Each takes the project's lock, `<directory>/projects/<key>.lock`, made and judged as a
+slot's lock is, and waits while another holds it. The key is the first 16 hex digits of the SHA-256
+of the project's resolved path, lower-cased on Windows. An engine for another project does not
+wait. A tool call waiting for the lock is told as for a slot, below, with the process that holds it
+named.
 
 ### Games and their slots
 
@@ -934,7 +948,8 @@ the wait.
 - A wait for memory rather than a slot names `taker` `memory`. gdharness keeps its place in line
   with such a mark when a slot is free and the budget below leaves no room for the engine. It adds
   `kind`, the taker it would be in line, and `memory`, the bytes its engine will hold. A `memory`
-  mark that names no `since` is a run waiting for memory while it holds its slot, and takes no place.
+  mark that names no `since` is a run waiting for memory, and takes no place. A share gives its slot
+  back while it waits. A run's compile check keeps its slot.
 
 ### Step 5: take in order
 
@@ -1108,6 +1123,23 @@ name the slots from that one read. By the state of the queue:
   later one. The file is read once for the text, its time and its writer.
 - A gate mark is live and the file is not fresh, seated gate or not: take none of the gates' slots.
   Its ticker writes a fresh file within five seconds.
+
+Each seated gate owns an even share of the gates' slots. Its free part is that share less the
+engines it runs, found as the machine's queue finds them: the engines whose slot holder is the gate's
+process or runs below it. A gate is quiet once ten seconds have passed since the later of its seat
+and the newest lock of any gate's engine. Every gate engine, of any gate, counts against the quiet
+gates' free parts. Side work may take gate slots up to the sum of those parts, less the gate slots
+it holds already, where that is more than the count gives.
+
+Every give-back of slot n first writes `freed/n` in the slots folder, `{"freed": <ms since the
+epoch>}`, through a staged file renamed over it, and a take of the slot removes it. A lock found
+stale and removed is marked the same way. A slot is lent only once its mark is ten seconds old. A
+slot with no mark counts as freed at the first seat, one whose mark cannot be read counts as freed
+now, and one whose lock still stands, its holder gone, is never lent. Where the mark cannot be
+written the lock goes all the same, so the slot reads as one with no mark. Every process reads all
+this from the slot folder alone, so all takers get one answer. A lent slot a side engine holds is
+never taken back: the gate waits for the next free one. A stale count, a held quiet window, a gate
+not yet seated and an unreadable process table lend nothing.
 
 After taking a gate slot, count again from the folder. When side work holds more gate slots written
 since the count than it allows, the newest of them gives its slot back and waits, so two takers that

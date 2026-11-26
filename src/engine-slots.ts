@@ -45,6 +45,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash } from 'node:crypto';
 import {
   closeSync,
   existsSync,
@@ -67,6 +68,7 @@ import { cacheHome } from './cache-home.js';
 import { callNotes, callProgress, callSignal, callSlotWaits, waitedUnlessAborted } from './call-signal.js';
 import { helperPid } from './desktop.js';
 import { ceilingFor, engineNeed, gigabytes, MEMORY_PER_ENGINE } from './engine-memory.js';
+import { errorCode } from './errors.js';
 import { wholeFlag } from './launch.js';
 import {
   ancestorsIn,
@@ -370,6 +372,133 @@ const ONE_OFF_HELD_MS = 600_000;
  * time counts from its last look.
  */
 export const SLOT_YIELD_MS = 5000;
+
+/** A gate holding its seat: the process its mark names and when it was seated. */
+interface SeatedGate {
+  readonly pid: number;
+  readonly seat: number;
+}
+
+/**
+ * How long a seated gate stays quiet, past its seat and its newest engine's lock, before side work
+ * may be lent its free part ({@link EngineSlots.lentRoom}).
+ */
+export const GATE_LEND_MS = 10_000;
+
+/** How long a process keeps its reading of the process table for the lend ({@link EngineSlots.lentRoom}). */
+const LEND_TABLE_KEPT_MS = 5000;
+
+/** Each table reader's last reading, when it began and what it gave, so waiting takers share one. */
+const lendTables = new WeakMap<
+  () => Promise<ProcessTree | undefined>,
+  { at: number; tree: Promise<ProcessTree | undefined> }
+>();
+
+/**
+ * The process table through [param read], or its reading kept from under {@link LEND_TABLE_KEPT_MS}
+ * ago where every lock it places was written before that reading began ([param newestLock]). A kept
+ * table can only still list a process that has since ended, which places an engine that has gone and
+ * lends less, never more. A lock written since may name a process the kept table never saw.
+ */
+function lendTableOf(
+  read: () => Promise<ProcessTree | undefined>,
+  newestLock: number,
+): Promise<ProcessTree | undefined> {
+  const now = Date.now();
+  const kept = lendTables.get(read);
+  if (kept !== undefined && now >= kept.at && now - kept.at < LEND_TABLE_KEPT_MS && newestLock < kept.at) {
+    return kept.tree;
+  }
+  const tree = read();
+  lendTables.set(read, { at: now, tree });
+  return tree;
+}
+
+/**
+ * The most side work may be lent after the moment [param written], as {@link EngineSlots.lentRoom}
+ * counts it with every seated gate quiet, or 0 where that cannot pass [param counted]. It reads only
+ * the gates' seats and the [param held] locks, never the process table.
+ */
+function mostLent(
+  gates: readonly SeatedGate[],
+  gated: number,
+  held: readonly { at: number | undefined }[],
+  written: number,
+  counted: number,
+): number {
+  const now = Date.now();
+  const before = held.filter(({ at }) => at === undefined || at < written).length;
+  const seated = gates.filter((gate) => now - gate.seat >= GATE_LEND_MS).length;
+  const most = Math.floor((gated * seated) / gates.length) - before;
+  return seated === 0 || most <= counted ? 0 : most;
+}
+
+/**
+ * The folder, inside the slots', where every give-back of slot n writes the file n:
+ * `{"freed": <ms since the epoch>}`. Side work is lent a gate slot only once it has stood free
+ * {@link GATE_LEND_MS} by it ({@link EngineSlots.sideShare}).
+ */
+export const FREED_FOLDER = 'freed';
+
+/** When [param content], a mark in {@link FREED_FOLDER}, says its slot was given back, or undefined. */
+function freedTimeOf(content: string): number | undefined {
+  let said: unknown;
+  try {
+    said = JSON.parse(content);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(said)) {
+    return undefined;
+  }
+  const { freed } = said;
+  return typeof freed === 'number' && Number.isFinite(freed) ? freed : undefined;
+}
+
+/**
+ * The freed mark of the slot whose lock is [param lock], or undefined for a lock of no numbered
+ * slot. A lock in {@link PROJECTS_FOLDER} is a project's, whatever its key looks like.
+ */
+function freedMarkOf(lock: string): string | undefined {
+  const folder = dirname(lock);
+  const slot = /^(\d+)\.lock$/.exec(basename(lock))?.[1];
+  return slot === undefined || basename(folder) === PROJECTS_FOLDER
+    ? undefined
+    : join(folder, FREED_FOLDER, slot);
+}
+
+/**
+ * Marks the slot whose lock is [param lock] as given back now, in {@link FREED_FOLDER} beside it,
+ * before the lock goes. The lock goes whether or not the mark could be written, so a long-lived
+ * server never loses the slot: the slot then reads as one with no mark.
+ */
+function slotFreed(lock: string): void {
+  const mark = freedMarkOf(lock);
+  if (mark === undefined) {
+    return;
+  }
+  try {
+    mkdirSync(dirname(mark), { recursive: true });
+  } catch {
+    return;
+  }
+  writeWhole(mark, JSON.stringify({ freed: Date.now() }));
+}
+
+/** Removes the freed mark of the slot whose lock [param lock] this process has just taken. */
+function slotTaken(lock: string): void {
+  const mark = freedMarkOf(lock);
+  if (mark === undefined) {
+    return;
+  }
+  // A held slot is never lent, and its next give-back writes the mark afresh, so a mark that cannot
+  // go now (a folder in its place, or another process renaming over it) must not fail the take.
+  try {
+    rmSync(mark, { force: true });
+  } catch {
+    // Left for the next give-back to replace.
+  }
+}
 
 /**
  * The file in the slot folder that lists the repositories whose side work has high priority:
@@ -928,7 +1057,8 @@ type GateQueue = 'none' | 'queued' | number;
  * One look at the machine's queue: {@link GateQueue}, the gates' free slots it was counted from, and
  * how many side work may hold in all ([param limit], unlimited where no count bounds it) with the
  * gates' slots taken since the count, oldest first ([param since]). A take names its slots from the
- * same free slots the share was counted from.
+ * same free slots the share was counted from. Only a recount after a take reads [param limit] past
+ * the count, so a first look leaves the lend out of it unless a slot can be lent.
  */
 interface GateLook {
   readonly queue: GateQueue;
@@ -1541,6 +1671,8 @@ export class EngineSlots {
 
   /** The physical memory of the machine, which the memory budget is counted from. */
   private readonly machineMemory: number;
+  /** The process table, as the operating system lists it. */
+  private readonly processes: () => Promise<ProcessTree | undefined>;
   /** The tool whose kept peak counts an engine this process takes a slot for, where a take names none. */
   private readonly tool: PeakTool;
 
@@ -1551,7 +1683,12 @@ export class EngineSlots {
     say?: (line: string) => void,
     taker: () => SlotTaker = () => slotTaker(),
     project?: string,
-    machine: { readonly memory?: number; readonly tool?: PeakTool } = {},
+    machine: {
+      readonly memory?: number;
+      readonly tool?: PeakTool;
+      /** Reads the process table, which places a gate's engines below its process. */
+      readonly processes?: () => Promise<ProcessTree | undefined>;
+    } = {},
   ) {
     this.directory = directory;
     this.count = count;
@@ -1561,6 +1698,7 @@ export class EngineSlots {
     this.project = project;
     this.machineMemory = machine.memory ?? totalmem();
     this.tool = machine.tool ?? 'project_test';
+    this.processes = machine.processes ?? processTree;
     this.drawn = slotsDrawnOn(count, taker(), 'none');
   }
 
@@ -1968,7 +2106,7 @@ export class EngineSlots {
    */
   private async overTheShare(lock: string): Promise<boolean> {
     const slot = Number(/(\d+)\.lock$/.exec(lock)?.[1]);
-    const again = await this.gateLook();
+    const again = await this.gateLook(true);
     return again.since.length > again.limit && again.since.indexOf(slot) >= again.limit;
   }
 
@@ -2040,6 +2178,7 @@ export class EngineSlots {
       const lock = join(this.directory, `${String(slot)}.lock`);
       if (madeInPlace(lock, JSON.stringify(holder)) || (await this.takenOver(lock, holder, true))) {
         this.held.add(lock);
+        slotTaken(lock);
         return lock;
       }
     }
@@ -2383,28 +2522,29 @@ export class EngineSlots {
   /**
    * One look at the machine's queue, with the free slots read once for the whole look. A mark whose
    * gate has gone is removed with its `.seated` file, by the rule a lock is freed by, and one not
-   * yet written names nobody and is passed over.
+   * yet written names nobody and is passed over. A [param recount] after a take counts the limit in full.
    */
-  private async gateLook(): Promise<GateLook> {
+  private async gateLook(recount = false): Promise<GateLook> {
     const marks = await this.gateMarks();
     if (marks.live === 0) {
       return { queue: 'none', free: [], limit: Number.POSITIVE_INFINITY, since: [] };
     }
-    const share = await this.sideShare(marks.newestSeat);
+    const share = await this.sideShare(marks.newestSeat, marks.gates, recount);
     return { ...share.look, queue: share.side > 0 ? share.side : 'queued' };
   }
 
-  /** The live gates' marks in the queue folder, and when the newest of them was seated. */
-  private async gateMarks(): Promise<{ live: number; newestSeat: number }> {
+  /** The live gates' marks in the queue folder, when the newest was seated, and each seated gate's process and seat. */
+  private async gateMarks(): Promise<{ live: number; newestSeat: number; gates: SeatedGate[] }> {
     const folder = join(this.directory, QUEUED_FOLDER);
     let names: string[];
     try {
       names = readdirSync(folder).filter((name) => name.endsWith('.json'));
     } catch {
-      return { live: 0, newestSeat: 0 };
+      return { live: 0, newestSeat: 0, gates: [] };
     }
     let live = 0;
     let newestSeat = 0;
+    const gates: SeatedGate[] = [];
     for (const name of names) {
       const mark = join(folder, name);
       const content = await readWholeAsync(mark);
@@ -2416,10 +2556,15 @@ export class EngineSlots {
         await removeWholeAsync(`${mark}${SEATED_SUFFIX}`);
       } else {
         live += 1;
-        newestSeat = Math.max(newestSeat, this.writtenAt(`${mark}${SEATED_SUFFIX}`) ?? 0);
+        const seatedAt = this.writtenAt(`${mark}${SEATED_SUFFIX}`);
+        newestSeat = Math.max(newestSeat, seatedAt ?? 0);
+        const gate = holderOf(content);
+        if (seatedAt !== undefined && gate !== null) {
+          gates.push({ pid: gate.pid, seat: seatedAt });
+        }
       }
     }
-    return { live, newestSeat };
+    return { live, newestSeat, gates };
   }
 
   /**
@@ -2436,8 +2581,17 @@ export class EngineSlots {
    * (`written`), since it could not have counted that seat. A seat in the same clock tick may or may
    * not be in the count, so a tie reads as stale. The slots taken at or after that moment come off
    * it, since each is one the count could not have given to anything else. A tie there reads as taken.
+   *
+   * The free parts of the quiet gates are lent beside the count ({@link EngineSlots.lentRoom}), so a
+   * gate in its build step holds none idle. Side work may hold the larger of the two, the lent slots
+   * only among those given back {@link GATE_LEND_MS} ago ({@link EngineSlots.standingFreed}). A lent slot is
+   * never taken back from a running engine. A stale count and a held window lend nothing.
    */
-  private async sideShare(newestSeat: number): Promise<{ side: number; look: Omit<GateLook, 'queue'> }> {
+  private async sideShare(
+    newestSeat: number,
+    gates: readonly SeatedGate[],
+    recount: boolean,
+  ): Promise<{ side: number; look: Omit<GateLook, 'queue'> }> {
     const gated = Math.max(1, this.count - keptSlotsOf(this.count));
     const free = (await this.openSlots()).filter((slot) => slot < gated);
     const none = { side: 0, look: { free, limit: 0, since: [] } };
@@ -2459,16 +2613,108 @@ export class EngineSlots {
     ) {
       return none;
     }
-    const since = Array.from({ length: gated }, (_, slot) => slot)
+    const locks = Array.from({ length: gated }, (_, slot) => slot)
       .filter((slot) => !free.includes(slot))
-      .flatMap((slot) => {
-        const at = this.writtenAt(join(this.directory, `${String(slot)}.lock`));
-        return at !== undefined && at >= said.written ? [{ slot, at }] : [];
-      })
+      .map((slot) => {
+        const lock = join(this.directory, `${String(slot)}.lock`);
+        return { slot, lock, at: this.writtenAt(lock) };
+      });
+    const since = locks
+      .flatMap(({ slot, at }) => (at !== undefined && at >= said.written ? [{ slot, at }] : []))
       .toSorted((a, b) => a.at - b.at || a.slot - b.slot)
       .map((one) => one.slot);
-    const side = Math.max(0, Math.min(said.count - since.length, free.length));
-    return { side, look: { free, limit: said.count, since } };
+    const top = free.toSorted((a, b) => b - a);
+    const counted = top.slice(0, Math.max(0, Math.min(said.count - since.length, free.length)));
+    const most = mostLent(gates, gated, locks, said.written, said.count);
+    const ripe =
+      most - since.length > counted.length
+        ? await this.standingFreed(top.slice(counted.length), Math.min(...gates.map((gate) => gate.seat)))
+        : [];
+    // The process table is read only where the lend can change the answer.
+    const lent =
+      ripe.length > 0 || (recount && since.length > said.count && most > said.count)
+        ? await this.lentRoom(gates, gated, locks, said.written, said.count)
+        : 0;
+    const offered = [...counted, ...ripe.slice(0, Math.max(0, lent - since.length - counted.length))];
+    return { side: offered.length, look: { free: offered, limit: Math.max(said.count, lent), since } };
+  }
+
+  /**
+   * Those of the free gate slots [param free] given back {@link GATE_LEND_MS} ago or more, by their
+   * marks in {@link FREED_FOLDER}. A slot with no mark counts as freed at the [param firstSeat], the
+   * earliest seat of the gates. One whose mark cannot be read counts as freed now, and one whose lock
+   * still stands, its holder gone, is never lent.
+   */
+  private async standingFreed(free: readonly number[], firstSeat: number): Promise<number[]> {
+    const now = Date.now();
+    const standing: number[] = [];
+    for (const slot of free) {
+      const lock = join(this.directory, `${String(slot)}.lock`);
+      const mark = freedMarkOf(lock);
+      if (mark === undefined || existsSync(lock)) {
+        continue;
+      }
+      let content: string | null;
+      try {
+        content = await readWholeAsync(mark);
+      } catch (error) {
+        // A freed folder that is not a folder holds no mark.
+        content = errorCode(error) === 'ENOTDIR' ? null : '';
+      }
+      const freed = content === null ? firstSeat : (freedTimeOf(content) ?? now);
+      if (now - freed >= GATE_LEND_MS) {
+        standing.push(slot);
+      }
+    }
+    return standing;
+  }
+
+  /**
+   * How many gate slots side work may take after the moment [param written], lent from the quiet
+   * gates, or 0 where that cannot pass [param counted]. The [param gated] slots divide evenly between
+   * the seated [param gates], and a gate is quiet once {@link GATE_LEND_MS} has passed since the later
+   * of its seat and the newest lock of any gate's engine, as the machine's queue counts it, since that
+   * does not tell the gates' engines apart. Every slot [param held] before that moment comes
+   * off the quiet gates' shares, whether a gate engine of any gate or side work holds it, and every
+   * one taken since comes off what is answered here, as a count's do.
+   *
+   * An engine is a gate's when the process holding its lock is the gate's process or runs below it,
+   * as the machine's queue tells it. Where the process table cannot be read, no engine can be placed,
+   * no gate is known to be quiet and none is lent.
+   */
+  private async lentRoom(
+    gates: readonly SeatedGate[],
+    gated: number,
+    held: readonly { slot: number; lock: string; at: number | undefined }[],
+    written: number,
+    counted: number,
+  ): Promise<number> {
+    const now = Date.now();
+    const before = held.filter(({ at }) => at === undefined || at < written).length;
+    const seated = gates.filter((gate) => now - gate.seat >= GATE_LEND_MS);
+    const roomOf = (quiet: number): number => Math.floor((gated * quiet) / gates.length) - before;
+    if (mostLent(gates, gated, held, written, counted) === 0) {
+      return 0;
+    }
+    const newestLock = Math.max(...held.map(({ at }) => at ?? Number.POSITIVE_INFINITY));
+    const tree = held.length === 0 ? new Map() : await lendTableOf(this.processes, newestLock);
+    if (tree === undefined) {
+      return 0;
+    }
+    let newest = Number.NEGATIVE_INFINITY;
+    for (const one of held) {
+      const content = await readWholeAsync(one.lock).catch(() => null);
+      const holder = content === null ? null : holderOf(content);
+      const pids = [holder?.pid, holder?.engine?.pid].filter((pid) => pid !== undefined);
+      const owner = gates.find((gate) =>
+        pids.some((pid) => pid === gate.pid || ancestorsIn(tree, pid, gate.pid).includes(gate.pid)),
+      );
+      if (owner !== undefined) {
+        newest = Math.max(newest, one.at ?? now);
+      }
+    }
+    const quiet = seated.filter((gate) => now - Math.max(gate.seat, newest) >= GATE_LEND_MS);
+    return Math.max(0, roomOf(quiet.length));
   }
 
   /** When the file at [param path] was last written, in milliseconds, or undefined where it is not there. */
@@ -2699,6 +2945,9 @@ export class EngineSlots {
       (path) => this.made(path, holder),
       retake,
       inPlace ? (path) => madeInPlace(path, JSON.stringify(holder)) : undefined,
+      () => {
+        slotFreed(lock);
+      },
     );
   }
 
@@ -2739,7 +2988,7 @@ export class EngineSlots {
  * Removes [param lock] once [param gone] says its holder has gone, under its steal file, so that a
  * lock another taker has just made in its place is never removed. [param make] makes a file for this
  * process, the steal file and with [param retake] the lock again, unless [param makeLock] makes the
- * lock. Answers whether that was done.
+ * lock. [param removing] runs just before the lock is removed. Answers whether that was done.
  * It tries the removal once and never waits, because a server calls it from its protocol and its
  * caller looks again.
  */
@@ -2749,6 +2998,7 @@ export async function takenOverUnderSteal(
   make: (path: string) => boolean,
   retake = true,
   makeLock = make,
+  removing?: () => void,
 ): Promise<boolean> {
   if (!(await gone())) {
     return false;
@@ -2768,6 +3018,7 @@ export async function takenOverUnderSteal(
     if (!(await gone())) {
       return false;
     }
+    removing?.();
     try {
       rmSync(lock, { force: true });
     } catch {
@@ -2912,6 +3163,7 @@ const ENGINE_PID_LOOK_MS = 100;
 export function giveBackSlot(lock: string, pid: number): void {
   try {
     if (holderOf(readFileSync(lock, 'utf8'))?.pid === pid) {
+      slotFreed(lock);
       removeWhole(lock);
     }
   } catch {
@@ -2923,6 +3175,7 @@ export function giveBackSlot(lock: string, pid: number): void {
 export async function giveBackSlotAsync(lock: string, pid: number): Promise<void> {
   try {
     if (holderOf(readFileSync(lock, 'utf8'))?.pid === pid) {
+      slotFreed(lock);
       await removeWholeAsync(lock);
     }
   } catch {
@@ -3347,27 +3600,124 @@ export interface CallSlot {
   readonly leave: () => void;
 }
 
-/** The slot a command of several engine steps holds for all of them, inside {@link inOneSlot}. */
+/** Set inside {@link withoutASlot}, whose engines take no slot. */
+const withoutSlots = new AsyncLocalStorage<true>();
 const keptForSteps = new AsyncLocalStorage<{ held: Promise<CallSlot> | null; project?: string }>();
 
 /**
- * Names the project the command inside {@link inOneSlot} runs for, which gives its slot the
- * project's repository, and high priority where the list names it. Call it before the first engine step. Outside
- * {@link inOneSlot} it does nothing.
+ * The folder under the machine's slots with one lock for each project an engine runs for without a
+ * slot. Those engines of one project run one at a time across the machine, since each writes the
+ * project's .godot, so the count running at once is bounded by the projects in use. A lock is taken
+ * and judged as a slot's is, so a dead holder's is taken over.
  */
-export function forTheProject(project: string): void {
-  const kept = keptForSteps.getStore();
-  if (kept !== undefined) {
-    kept.project = project;
+export const PROJECTS_FOLDER = 'projects';
+
+/** How often an engine waiting for its project's lock looks again. */
+const PROJECT_LOOK_MS = 100;
+
+/** The lock in [param directory] that the slotless engines of [param project] take in turn. */
+export function projectLockOf(
+  project: string | undefined,
+  directory: string = machineSlotsDirectory(),
+): string {
+  const key =
+    project === undefined
+      ? 'none'
+      : createHash('sha256').update(comparable(project)).digest('hex').slice(0, 16);
+  return join(directory, PROJECTS_FOLDER, `${key}.lock`);
+}
+
+/** Who holds the lock at [param lock], or null where it cannot be read or names nobody. */
+function projectHolderOf(lock: string): SlotHolder | null {
+  try {
+    return holderOf(readFileSync(lock, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What waiting [param waitedMs] for [param project]'s lock, held by [param holder], says to the
+ * client of the call that waits.
+ */
+function projectWaitSaid(waitedMs: number, project: string | undefined, holder: SlotHolder | null): string {
+  const so = `Waiting${waitedMs >= 1000 ? ` ${String(Math.round(waitedMs / 1000))} s so far` : ''} for an engine`;
+  return `${so}: another engine of ${projectNamed(project)} is running${heldBySaid(holder)}, and this one starts when it ends.`;
+}
+
+/** What a call's answer says of its wait for [param project]'s lock, [param waitedMs] in all. */
+function projectWaitedSaid(waitedMs: number, project: string | undefined, holder: SlotHolder | null): string {
+  return `This call waited ${String(Math.round(waitedMs / 1000))} s for another engine of ${projectNamed(project)} in all. When it first waited, that engine was run${holder === null ? ' by another call' : heldBySaid(holder)}.`;
+}
+
+function projectNamed(project: string | undefined): string {
+  return project === undefined ? 'no project' : `the project ${project}`;
+}
+
+function heldBySaid(holder: SlotHolder | null): string {
+  return holder === null ? '' : ` by ${holdersNamed(1, [holder]).join('')}`;
+}
+
+/**
+ * Runs [param body] holding [param project]'s lock, waiting while another engine of it holds it. A
+ * call that waits is told so as a slot wait is, and its answer's engine_slot_wait counts the wait.
+ * A command with no call to report to says it on its own output ({@link sayWaitsTo}).
+ */
+async function inTheProjectsTurn<T>(body: () => Promise<T>, project: string | undefined): Promise<T> {
+  const lock = projectLockOf(project);
+  mkdirSync(dirname(lock), { recursive: true });
+  const slots = await processSlots();
+  const signal = callSignal();
+  const progress = callProgress();
+  const waits = callSlotWaits();
+  const began = Date.now();
+  let blockedBy: SlotHolder | null | undefined;
+  let said = Number.NEGATIVE_INFINITY;
+  while (!(await slots.takeFile(lock))) {
+    signal?.throwIfAborted();
+    blockedBy ??= projectHolderOf(lock);
+    const now = Date.now();
+    if (progress !== undefined && now - said >= WAIT_SAID_MS) {
+      said = now;
+      progress((now - began) / 1000, projectWaitSaid(now - began, project, projectHolderOf(lock)));
+    } else if (
+      progress === undefined &&
+      saidTo !== undefined &&
+      now - began >= COMMAND_WAIT_SAID_MS &&
+      now - said >= WAIT_SAID_MS
+    ) {
+      said = now;
+      saidTo(projectWaitSaid(now - began, project, projectHolderOf(lock)));
+    }
+    await delay(PROJECT_LOOK_MS);
+  }
+  if (waits !== undefined && blockedBy !== undefined) {
+    waits.ms += Date.now() - began;
+    const heldBy = blockedBy;
+    waits.said ??= (waitedMs) => projectWaitedSaid(waitedMs, project, heldBy);
+  }
+  try {
+    return await body();
+  } finally {
+    await giveBackSlotAsync(lock, slots.holder.pid);
   }
 }
 
 /**
  * Runs [param body] holding one of the machine's slots for the call, handing it the slot's lock,
- * and gives it back after. Inside {@link inOneSlot} it uses the slot held there. [param project] is
- * the project the call is for, in place of the one {@link forTheProject} named.
+ * and gives it back after. [param project] is the project the call is for. With [param free], or
+ * inside {@link withoutASlot}, it takes no slot and [param body] gets null. It waits only for the
+ * project's other slotless engines ({@link PROJECTS_FOLDER}). An engine started inside another
+ * engine's slot (GODOT_ENGINE_HELD) runs on that slot either way.
  */
-export async function inASlot<T>(body: (lock: string) => Promise<T>, project?: string): Promise<T> {
+export async function inASlot<T>(
+  body: (lock: string | null) => Promise<T>,
+  project?: string,
+  free = false,
+): Promise<T> {
+  if ((free || withoutSlots.getStore() === true) && nonEmpty(process.env[HELD_VARIABLE]) === undefined) {
+    return await inTheProjectsTurn(async () => await body(null), project);
+  }
   const kept = keptForSteps.getStore();
   if (kept !== undefined) {
     kept.held ??= slotForCall(false, project ?? kept.project);
@@ -3383,10 +3733,15 @@ export async function inASlot<T>(body: (lock: string) => Promise<T>, project?: s
 }
 
 /**
- * Runs [param body], a command whose engines run one after another, holding one slot for all of
- * them. Each engine taking its own slot queued again on a busy machine: one `gdharness setup` waited
- * 122, 933 and 335 seconds for its three, 24 minutes in all. The slot is taken at the first engine,
- * so a command refused before one, for want of Godot or for its arguments, says so at once.
+ * Runs [param body], a command whose engines are short setup steps, with every engine it starts
+ * taking no slot. Setup waited behind runs of forty minutes or more for each of its engines.
+ */
+export async function withoutASlot<T>(body: () => Promise<T>): Promise<T> {
+  return await withoutSlots.run(true, body);
+}
+
+/**
+ * Runs [param body], a call whose engines run one after another, holding one slot for all of them.
  */
 export async function inOneSlot<T>(body: () => Promise<T>): Promise<T> {
   if (keptForSteps.getStore() !== undefined) {
@@ -3396,9 +3751,28 @@ export async function inOneSlot<T>(body: () => Promise<T>): Promise<T> {
   try {
     return await keptForSteps.run(kept, body);
   } finally {
-    // A take that failed was thrown to the engine step that asked for it, and holds nothing.
-    const held = await kept.held?.catch(() => null);
-    held?.release();
-    await held?.settled();
+    await givenBack(kept);
   }
+}
+
+/**
+ * Runs [param wait] with the slot {@link inOneSlot} holds given back first, and the next engine step
+ * taking one again. A command waiting on another's engine or on an editor would otherwise keep a
+ * slot that engine may be queued for. Outside {@link inOneSlot} it only runs [param wait].
+ */
+export async function withTheSlotFree<T>(wait: () => Promise<T>): Promise<T> {
+  const kept = keptForSteps.getStore();
+  if (kept !== undefined) {
+    await givenBack(kept);
+  }
+  return await wait();
+}
+
+async function givenBack(kept: { held: Promise<CallSlot> | null }): Promise<void> {
+  const taken = kept.held;
+  kept.held = null;
+  // A take that failed was thrown to the engine step that asked for it, and holds nothing.
+  const held = await taken?.catch(() => null);
+  held?.release();
+  await held?.settled();
 }

@@ -170,12 +170,14 @@ import {
 import {
   handedRunSlot,
   handSlotToKeeper,
+  inOneSlot,
   keeperSlotOf,
   onTheSlot,
   raiseSlotMemory,
   settledRunSlot,
   slotEngineNamed,
   slotForCall,
+  withTheSlotFree,
 } from './engine-slots.js';
 import { processorSecondsOf } from './engine-spent.js';
 import { errorCode, errorMessage, Refusal } from './errors.js';
@@ -7387,7 +7389,7 @@ export class GodotServer {
       case 'script_info':
         return await this.askScriptInfo(...(SCRIPT_INFO_CALLS[op] ?? ['lsp_get_hover', 'Hover']), args);
       case 'script_diagnostics':
-        return await this.handleScriptDiagnostics(args);
+        return await inOneSlot(() => this.handleScriptDiagnostics(args));
 
       default:
         return await this.dispatchResourceTool(tool, op, args);
@@ -8415,7 +8417,8 @@ export class GodotServer {
     // engine, waits for a slot of its own and writes the same cache file.
     const running = this.classRebuilds.get(projectPath);
     if (running !== undefined) {
-      const joined = await running;
+      // The rebuild takes no slot, so the one this call holds between its engines goes to others meanwhile.
+      const joined = await withTheSlotFree(async () => await running);
       if (!joined.ok) {
         return joined;
       }
@@ -8532,6 +8535,11 @@ export class GodotServer {
     if (!this.editorHasOpen(projectPath)) {
       return { waitedMs: 0, stillScanning: false };
     }
+    // An editor's scan can take minutes, which a slot held between engines would idle through.
+    return await withTheSlotFree(async () => await this.untilTheScanIsWritten(projectPath));
+  }
+
+  private async untilTheScanIsWritten(projectPath: string): Promise<ScanWait> {
     const started = Date.now();
     let sawAScan = false;
     let scanEndedAt: number | null = null;
@@ -15016,6 +15024,7 @@ export class GodotServer {
     const probe: AnnounceProbe = {
       asking: null,
       editorAskedAt: 0,
+      editorFirstAskedAt: 0,
       editorSaysGoing: true,
       editorAsks: 0,
       holding: null,
@@ -15041,17 +15050,20 @@ export class GodotServer {
       giveUp: () => this.giveUpOnTheAnnouncement(started, probe),
     });
     // How the wait ended, for the log a slow start is read back from: what it found, how long it
-    // took, and how often the editor was asked on the way.
+    // took, how often the editor was asked on the way and how far into the wait it was first asked.
     // A run started here never asks the editor, and "last said playing" about an editor nobody
-    // asked is the closure's starting value rather than an answer.
+    // asked is the closure's starting value rather than an answer. The end is also given as wall
+    // time in epoch milliseconds, so it can be set against a file's modification time from the
+    // server's own clock rather than from when a reader got the line.
     const asked =
       probe.editorAsks === 0
         ? 'editor not asked'
-        : `editor asked ${probe.editorAsks === 1 ? 'once' : `${probe.editorAsks} times`}, last said ${probe.editorSaysGoing ? 'playing' : 'not playing'}`;
+        : `editor asked ${probe.editorAsks === 1 ? 'once' : `${probe.editorAsks} times`}, last said ${probe.editorSaysGoing ? 'playing' : 'not playing'}, first asked ${probe.editorFirstAskedAt - waitBegan}ms in`;
+    const waitEnded = Date.now();
     this.logDebug(
-      `announce wait ended after ${Date.now() - waitBegan}ms: ${
+      `announce wait ended after ${waitEnded - waitBegan}ms: ${
         fresh.length === 0 ? 'nothing announced' : `pid ${fresh.map((one) => one.pid).join(', ')} announced`
-      }, ${asked}`,
+      }, ${asked}, ended at ${waitEnded}`,
     );
     return await this.verdictOnTheAnnouncement(started, fresh, { budget, withArgs });
   }
@@ -15110,6 +15122,9 @@ export class GodotServer {
       return;
     }
     probe.editorAskedAt = Date.now();
+    if (probe.editorAsks === 0) {
+      probe.editorFirstAskedAt = probe.editorAskedAt;
+    }
     probe.editorAsks += 1;
     probe.asking = this.runStillGoing(run)
       .then((going) => {
@@ -22903,6 +22918,7 @@ function screenshotScratchFor(expectsScreenshot: boolean): {
 interface AnnounceProbe {
   asking: Promise<void> | null;
   editorAskedAt: number;
+  editorFirstAskedAt: number;
   editorSaysGoing: boolean;
   editorAsks: number;
   holding: Promise<void> | null;
