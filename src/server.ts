@@ -233,16 +233,11 @@ import {
   leftOutNamed,
   orphansLeftSaid,
   type orphansPrinted,
-  type PrintedDiff,
   parseJUnit,
-  reportedSkips,
   type ScriptError,
-  SuiteDiffs,
-  skippedInReport,
   type TestReport,
   testProgressMessage,
   type whyNoReport,
-  withPrintedPassesSettled,
 } from './junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop } from './keeper-channel.js';
 import {
@@ -432,7 +427,6 @@ import { type SpawnOptions, spawnHidden, unstartedChild } from './spawn.js';
 import { ENGINE_STARTS, START_RETRY_MS } from './start-race.js';
 import { endedAsItStarted } from './start-watch.js';
 import {
-  casesRetried,
   declaringAdvice,
   ERRORS_KEPT,
   type ErrorsJudged,
@@ -440,15 +434,12 @@ import {
   funcOf,
   type LogRead,
   named,
-  printedPassing,
   pushErrorsFailedSentence,
   readEngineLog,
   readExpected,
-  reasonHeadlinesOf,
   SuiteCuts,
   suiteNotRunFault,
   uncollectedSaid,
-  withoutReasonHeadlines,
 } from './suite-judge.js';
 import {
   capsFrames,
@@ -2737,14 +2728,13 @@ function withScanWait(outcome: HeadlessOutcome, scanned: ScanWait): HeadlessOutc
 }
 
 /**
- * The verdict part for what [param skipped] lists, counting every case it names and each a suite
- * skipped whole held. Undefined when nothing was skipped.
+ * The verdict part for what [param skipped] lists. Undefined when nothing was skipped.
  */
-function skippedVerdict(skipped: readonly { readonly cases?: number }[]): string | undefined {
-  if (skipped.length === 0) {
+function skippedVerdict(skipped: readonly unknown[]): string | undefined {
+  const count = skipped.length;
+  if (count === 0) {
     return undefined;
   }
-  const count = skipped.reduce((sum, one) => sum + (one.cases ?? 1), 0);
   return `${count === 1 ? 'one case' : `${String(count)} cases`} skipped with do_skip, so ${count === 1 ? 'it' : 'they'} never ran`;
 }
 
@@ -5662,8 +5652,6 @@ interface TestRan extends TestPrepared {
   run: SpawnedTest;
   /** What the piped streams said, read as the run's log let each entry go. */
   tally: TestRunTally;
-  /** The diffs of failing strings the console printed, colours and all. */
-  diffs: readonly PrintedDiff[];
   timedOut: boolean;
   /** Why the engine was ended for printing past the limit a log may hold, or null when it was not. */
   capped: string | null;
@@ -5767,8 +5755,6 @@ interface TestAnswer extends TestErrorsJudged {
   unmatched: string[];
   testsNotRun: string[];
   casesNotRun: string[];
-  /** The cases that failed and then passed on a retry, as path > case. */
-  retried: string[];
   /** The suites asked for that never started or never finished, as gdharness test says it. */
   suitesNotRun: string[];
   declaredAs: string;
@@ -5778,7 +5764,7 @@ interface TestAnswer extends TestErrorsJudged {
    * The cases, rows and suites skipped with do_skip, how many cases never ran for it, and `cut` where
    * the reason was cut off.
    */
-  casesSkipped: { test: string; reason: string; cases?: number; cut?: true }[];
+  casesSkipped: { test: string; reason: string }[];
   engineEntriesShown: ReturnType<typeof foldedRepeats>;
 }
 
@@ -10609,7 +10595,7 @@ export class GodotServer {
       callSignal(),
       (one) => !one.timedOut && one.stopped.for === null && diedAtStartOf(one.run),
     );
-    const { run, tally, diffs, timedOut, capped, silentForMs, saidAnything, stopped } = attempt;
+    const { run, tally, timedOut, capped, silentForMs, saidAnything, stopped } = attempt;
     // The helper's own failure reaches only its file, and the exit it leaves says nothing.
     // Or its pid never came, which is a helper that hung until the run's limit ended it.
     const helperFailed = onDesktop
@@ -10631,7 +10617,6 @@ export class GodotServer {
       ...prepared,
       run,
       tally,
-      diffs,
       timedOut,
       capped,
       silentForMs,
@@ -10650,7 +10635,6 @@ export class GodotServer {
   ): Promise<{
     readonly run: SpawnedTest;
     readonly tally: TestRunTally;
-    readonly diffs: readonly PrintedDiff[];
     readonly timedOut: boolean;
     readonly capped: string | null;
     readonly silentForMs: number;
@@ -10690,10 +10674,6 @@ export class GodotServer {
       await keepPipelineCache(userData, project.value.path, engine.value, undefined, seeded);
     };
     const keeping = run.settled.then(keep, keep);
-    // As printed, colours and all, beside the log that strips them: the colours are where gdUnit4
-    // marks which characters of a failing string were there, and its report drops them. Read a
-    // suite at a time, since the whole console can pass what one string holds.
-    const diffs = new SuiteDiffs();
     // A suite printing past what a log may hold ends the engine, as a share doing so ends gdharness
     // test's. Each suite is judged on the log and on the console, the console's errors counted with
     // its other lines, from where the suite began to where the next one does.
@@ -10713,7 +10693,6 @@ export class GodotServer {
     let lastSaid = Date.now();
     let saidAnything = false;
     run.process.stdout?.on('data', (data: Buffer) => {
-      diffs.take(data);
       consoleCuts.take(data);
       capPast(consoleCuts);
       lastSaid = Date.now();
@@ -10771,7 +10750,6 @@ export class GodotServer {
     return {
       run,
       tally,
-      diffs: diffs.finish(),
       timedOut,
       capped: capped.why,
       silentForMs,
@@ -10813,10 +10791,15 @@ export class GodotServer {
       } catch (error) {
         reportProblem = errorMessage(error);
       }
-      // Read after the report, which holds the skip reasons the console cannot always end, and before
-      // the folder the log is in is discarded.
-      const reported = report === null ? undefined : reportedSkips([report]);
-      casePrinted = readEngineLog(engineLog, tally.nested, declaredErrors, undefined, reported);
+      // Read after the report, which holds every case's outcome, and before the folder the log is in
+      // is discarded.
+      casePrinted = readEngineLog(
+        engineLog,
+        tally.nested,
+        declaredErrors,
+        undefined,
+        report === null ? undefined : [report],
+      );
     } finally {
       discard(reportsDir, userData);
       // The directory the runs share goes with the last report in it, so a project that has
@@ -10881,12 +10864,12 @@ export class GodotServer {
 
   /** A test run's engine log and console judged: what it printed, how it exited and what the verdict is. */
   private async testJudged(read: TestReadOut): Promise<ToolResponse> {
-    const { run, asked, timedOut, capped, engine, project, notCompiled, report, tally, casePrinted } = read;
+    const { run, asked, timedOut, capped, engine, project, notCompiled, report, tally } = read;
     // An engine ended for printing too much is judged as one cut off by the limit.
     const cutOff = timedOut || capped !== null;
     // A verbose run's additions are ordinary lines, the leaked instances and the resources still in
     // use at exit among them, and they are what the flag was passed for. The tally took them so.
-    const engineEntries = withoutReasonHeadlines(tally.engine.result(), casePrinted.reasonHeadlines);
+    const engineEntries = tally.engine.result();
     const verdicts: Readonly<Record<number, string>> = {
       0: 'passed',
       100: failedVerdict(report),
@@ -11093,15 +11076,8 @@ export class GodotServer {
 
   /** The answer of a test run that wrote a report, judged against what the engine printed. */
   private testReported(reported: TestWithReport): ToolResponse {
-    const { tally, diffs, casePrinted, uncaught } = reported;
-    // A failure the report keeps from an attempt before a case's last is not the run's: gdUnit4 and
-    // gdharness test both go by what the case printed in the end.
-    const report = withPrintedPassesSettled(reported.report, (path, name) =>
-      printedPassing(casePrinted, path, name),
-    );
-    // From the diffs read off the console as it printed, since the whole console can pass what one
-    // string holds.
-    const { failed, briefed } = failedWithin(failedCases(report, diffs), FAILED_BUDGET);
+    const { tally, casePrinted, uncaught, report } = reported;
+    const { failed, briefed } = failedWithin(failedCases(report), FAILED_BUDGET);
     // What the report cannot say. gdUnit4 decides the run's state on orphan nodes and writes none
     // of that into its XML, so a tier that passed every case and left nodes behind arrived as the
     // word "warnings" and nothing else: no failure, no entry, nothing naming a suite. Read off
@@ -11366,31 +11342,11 @@ export class GodotServer {
       test: `${one.suite} > ${one.name}`,
       reason: one.reason,
     }));
-    // A case, row or suite skipped with do_skip never ran either. The console says each suite's reason
-    // and the report each case's, so what only the report holds is listed too.
-    const consoleSkipped = new Set(
-      [
-        ...casePrinted.mismatched,
-        ...casePrinted.unrunnable,
-        ...casePrinted.skipped.filter((one) => one.name !== null),
-      ].map((one) => `${one.suite} > ${one.name}`),
-    );
-    const skippedWhole = new Set(
-      casePrinted.skipped.filter((one) => one.name === null).map((one) => one.suite),
-    );
-    const casesSkipped = [
-      ...casePrinted.skipped.map((one) => ({
-        ...(one.name === null
-          ? { test: one.suite, reason: one.reason, cases: one.cases }
-          : { test: `${one.suite} > ${one.name}`, reason: one.reason }),
-        ...(one.cut === true ? { cut: one.cut } : {}),
-      })),
-      ...skippedInReport(report)
-        .filter((one) => !consoleSkipped.has(`${one.suite} > ${one.name}`) && !skippedWhole.has(one.suite))
-        .map((one) => ({ test: `${one.suite} > ${one.name}`, reason: one.reason })),
-    ];
-    // gdUnit4 exits 0 on such a case, and its report holds only the failure.
-    const retried = casesRetried(casePrinted);
+    // A case or row skipped with do_skip never ran either.
+    const casesSkipped = casePrinted.skipped.map((one) => ({
+      test: `${one.suite} > ${one.name}`,
+      reason: one.reason,
+    }));
     // A suite the runner was handed that printed no start or no end, which exits 0 beside the suites
     // that ran. A suite with no case, or every case of it left out, is one gdUnit4 has nothing to run
     // in. A case counts as left out by its rows when the runner said it left out any: gdUnit4 opens
@@ -11403,7 +11359,6 @@ export class GodotServer {
       .flatMap((suite) => suiteNotRunFault(casePrinted, suite.path) ?? []);
     return this.reportAnswer({
       ...judged,
-      retried,
       suitesNotRun,
       declaredAndPrinted,
       ranIn,
@@ -11452,7 +11407,6 @@ export class GodotServer {
       notSuites,
       nothingRan,
       report,
-      retried,
       rowsMismatched,
       suitesNotRun,
       testsNotRun,
@@ -11482,7 +11436,6 @@ export class GodotServer {
           missing,
           testsNotRun,
           casesNotRun,
-          retried,
           suitesNotRun,
           rowsMismatched,
           casesUnrunnable,
@@ -11501,7 +11454,6 @@ export class GodotServer {
       countedLeaks,
       declaredNotPrinted,
       notSuites,
-      retried,
       rowsMismatched,
       suitesNotRun,
       testsNotRun,
@@ -11517,7 +11469,6 @@ export class GodotServer {
           countedLeaks.length +
           testsNotRun.length +
           casesNotRun.length +
-          retried.length +
           suitesNotRun.length +
           rowsMismatched.length +
           casesUnrunnable.length +
@@ -11546,7 +11497,6 @@ export class GodotServer {
         testsNotRun.length + casesNotRun.length > 0
           ? `not run: ${[...testsNotRun, ...casesNotRun].join(', ')}`
           : undefined,
-        retried.length > 0 ? `passed only on a retry: ${retried.join(', ')}` : undefined,
         suitesNotRun.length > 0 ? suitesNotRun.join(', ') : undefined,
         rowsMismatched.length > 0
           ? `${rowsMismatched.length === 1 ? 'one row' : `${String(rowsMismatched.length)} rows`} skipped for data that does not fit the case`
@@ -11571,7 +11521,6 @@ export class GodotServer {
       hung,
       missing,
       notSuites,
-      retried,
       rowsMismatched,
       silentForMs,
       testsNotRun,
@@ -11583,7 +11532,6 @@ export class GodotServer {
       ...(testsNotRun.length + casesNotRun.length > 0
         ? { testsNotRun: [...testsNotRun, ...casesNotRun] }
         : {}),
-      ...(retried.length > 0 ? { passedOnARetry: retried } : {}),
       ...(rowsMismatched.length > 0 ? { rowsMismatched } : {}),
       ...(casesUnrunnable.length > 0 ? { casesUnrunnable } : {}),
       ...(casesSkipped.length > 0 ? { casesSkipped } : {}),
@@ -11672,13 +11620,10 @@ export class GodotServer {
 
   /** The sentences of a test run's note about what was asked for and did not run. */
   private notRunNotes(s: TestAnswer): (string | undefined)[] {
-    const { casesNotRun, failed, missingNote, retried, rowsMismatched, suitesNotRun, testsNotRun } = s;
+    const { casesNotRun, missingNote, rowsMismatched, suitesNotRun, testsNotRun } = s;
     return [
       missingNote,
       testsNotRun.length > 0 ? notRunSaid(testsNotRun) : undefined,
-      retried.length > 0
-        ? `${retried.join(', ')} failed before ${retried.length === 1 ? 'it' : 'they'} passed on a retry, which gdUnit4's flaky check counts as a pass. The run is not called passed, as gdharness test judges it${failed.length > 0 ? ', and failed holds the first failure' : ''}.`
-        : undefined,
       suitesNotRun.length > 0
         ? `${suitesNotRun.join(', ')}, though gdUnit4 exited without saying so. The run is not called passed, as gdharness test judges it.`
         : undefined,
@@ -11797,14 +11742,8 @@ export class GodotServer {
       suitesPassed: report.suites.length - unclean.length,
       // Less the ones a suite declared and printed, which are the run going as written, and the
       // lines of skip reasons, which gdUnit4 printed as text.
-      engineErrors: Math.max(
-        0,
-        run.log.count('error') - declaredAndPrinted - reasonHeadlinesOf(casePrinted.reasonHeadlines, 'error'),
-      ),
-      engineWarnings: Math.max(
-        0,
-        run.log.count('warning') - reasonHeadlinesOf(casePrinted.reasonHeadlines, 'warning'),
-      ),
+      engineErrors: Math.max(0, run.log.count('error') - declaredAndPrinted),
+      engineWarnings: run.log.count('warning'),
       // An entry already under uncaughtScriptErrors is named here without its detail again: a stack
       // overflow's backtrace is most of an answer, and it was carried twice.
       engineEntries: engineEntriesShown.map((entry) =>

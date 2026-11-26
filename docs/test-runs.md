@@ -91,7 +91,7 @@ when the command line itself is wrong.
   run out early.
 - `--keep-slower-than SECONDS`: keep the log of each engine that ran a case slower than `SECONDS`,
   a plain decimal above 0 such as `10`, `2.5` or `.5`, in a passing run too. The time is gdUnit4's
-  own, printed on the case's verdict line. The run names each such case with its time, the engine,
+  own, from the JUnit report. The run names each such case with its time, the engine,
   the engine's slot, the engine process's priority and the kept log, and the result holds the same
   as `slowCases`. A passing run keeps only the logs of those engines, and its directory holds a
   `slow-run` file. A later run removes a slow run's directory once five newer slow runs have kept
@@ -196,14 +196,10 @@ Those functions are the cases it is expected to run, which is how a case that ne
 
 A case, a row or a whole suite skipped with `do_skip` never ran either, though gdUnit4 prints it
 passed and exits 0. The run fails and lists each skip with its `skip_reason`, and a suite skipped
-whole is listed once. `project_test` answers them under `casesSkipped`. `gdharness test` counts
-only the cases that ran. No option allows a skip. Both tools read each reason off the console, over
-as many lines as the reason has in the JUnit report gdUnit4 wrote. Where those lines do not close
-the reason's quote, the report's text is the reason, which lacks some words in square brackets. A
-skip the report misses is read off the console, and a reason the output cut off
-before its closing quote is listed by its first line and said to be cut. A run that wrote no report
-reads a reason off the console only when it closes on its own line, and lists no skip whose reason
-runs over several lines.
+whole is listed case by case. `project_test` answers them under `casesSkipped`. `gdharness test`
+counts only the cases that ran. No option allows a skip. Both tools take each reason from the JUnit
+report gdUnit4 wrote, as it wrote it. A run that wrote no report is failed for that, and lists no
+skip.
 
 A project keeps folders out of every search by listing them in `gdharness/tests/not_searched`, a
 `PackedStringArray` of `res://` paths in `project.godot`. Benches written as suites and run by hand
@@ -386,7 +382,7 @@ of a quarter of the room, and at least 1 GiB, for free memory that moves before 
 - A suite that never started, never finished, or finished without running every case it declares.
 - A case that ran without being planned, or a suite the engine ran without being handed it.
 - A suite that reports a failure while all its cases passed, which is a failing `before` or `after`.
-- A run that printed no summary or ran no case, or a script gdUnit4 could not load.
+- A run that wrote no JUnit report or ran no case, or a script gdUnit4 could not load.
 - A script under the folders searched for suites that declares `test_` functions but extends
   nothing that reaches `GdUnitTestSuite`. gdUnit4 runs none of its cases and says nothing, so the
   run names the script beside the suites it did run.
@@ -461,9 +457,9 @@ longer reads the runner's mark.
 
 ## What a failed run prints
 
-Each failure is printed with the lines that show it. Those are a failing case's report, each
-unexpected error and the line after it, and the run's summary. When an engine was cut short and
-none of that explains it, its last 60 lines are printed.
+Each failing case is named with the message gdUnit4's JUnit report holds for it. The lines printed
+beside it are each unexpected error and the line after it, and the run's summary. When an engine
+was cut short and none of that explains it, its last 60 lines are printed.
 
 The engine's whole output stays in `.godot/gdharness/test-runs/<start>-<pid>/engine-<n>/engine.log`,
 which the output names. The file opens with the engine's verdict, so it says why even for an engine

@@ -54,7 +54,7 @@ import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE, GameLog } from './game-log.js';
 import { type ImportOutcome, runImport } from './headless.js';
 import { staleImports } from './import-freshness.js';
-import { parseJUnit, type ReportedSkips, reportedSkips, type TestReport } from './junit.js';
+import { parseJUnit, type TestReport } from './junit.js';
 import { ENGINE_ARG_SPELLING, engineFlagsRefusal, hiddenWindowFlags, wholeFlag } from './launch.js';
 import { unlistedExtensions } from './library-copies.js';
 import { cannotOpen } from './listed-reads.js';
@@ -2538,15 +2538,14 @@ function judgedShare(launch: Launch, share: ShareRun, log: string, end: EngineEn
 }
 
 /**
- * The skip reasons in the JUnit reports gdUnit4 wrote into [param reports] since [param known], with
- * the files they were read from. The reasons are undefined where it wrote none, as an engine that
- * ended before its reports does. A report that does not parse is left out, and its skips are read
- * from the console.
+ * The JUnit reports gdUnit4 wrote into [param reports] since [param known], with the files they were
+ * read from. The reports are undefined where it wrote none, as an engine that ended before its
+ * reports does. A report that does not parse is left out.
  */
 function reportedBy(
   reports: string,
   known: ReadonlyMap<string, string>,
-): { readonly reported: ReportedSkips | undefined; readonly read: ReadonlyMap<string, string> } {
+): { readonly reported: readonly TestReport[] | undefined; readonly read: ReadonlyMap<string, string> } {
   const parsed: TestReport[] = [];
   const read = new Map<string, string>();
   for (const [file, seen] of reportFiles(reports)) {
@@ -2559,7 +2558,7 @@ function reportedBy(
       }
     }
   }
-  return { reported: parsed.length === 0 ? undefined : reportedSkips(parsed), read };
+  return { reported: parsed.length === 0 ? undefined : parsed, read };
 }
 
 /** The file gdUnit4 writes its JUnit report to, in a folder of its own under the reports folder. */
