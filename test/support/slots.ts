@@ -6,18 +6,13 @@
  * Set here, on import, before any server or command is spawned: each inherits the variables. A run
  * that names its own keeps them.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { availableParallelism, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { MOST_ENGINES } from '../../src/engine-launch.js';
-import {
-  ENDED_SUFFIX,
-  PROJECTS_FOLDER,
-  SLOT_COUNT_VARIABLE,
-  SLOTS_VARIABLE,
-  WAITING_FOLDER,
-} from '../../src/engine-slots.js';
+import { PROJECTS_FOLDER, SLOT_COUNT_VARIABLE, SLOTS_VARIABLE } from '../../src/engine-slots.js';
+import { tryOsLock } from '../../src/os-lock.js';
 
 /**
  * The variables that tell a process how it takes engine slots, whichever program set them: the
@@ -74,107 +69,40 @@ export function slotCountForEngines(engines: number, suiteCount = process.env[SL
   return String(Math.max(engines, Number(suiteCount) || 0));
 }
 
-/**
- * What is left in the slot directory [param slots]: every lock, every wait mark as
- * `waiting/<name>` and every project lock as `projects/<name>`. The folders of marks and project
- * locks stay once made, and so does the note each ended wait leaves, which holds nothing. A run that
- * gave back everything leaves an empty list.
- */
-export function leftInSlots(slots: string): string[] {
-  const inside = (folder: string, kept: (name: string) => boolean): string[] => {
-    const path = join(slots, folder);
-    return existsSync(path)
-      ? readdirSync(path)
-          .filter(kept)
-          .map((name) => `${folder}/${name}`)
-      : [];
-  };
-  return [
-    ...readdirSync(slots).filter((name) => name !== WAITING_FOLDER && name !== PROJECTS_FOLDER),
-    ...inside(WAITING_FOLDER, (name) => !name.endsWith(ENDED_SUFFIX)),
-    ...inside(PROJECTS_FOLDER, () => true),
-  ].toSorted();
+/** Whether another holder has the lock at [param lock] now, which a try for it answers. */
+function lockHeld(lock: string): boolean {
+  const taken = tryOsLock(lock);
+  taken?.release();
+  return taken === null;
+}
+
+/** The lock files in [param folder] that are held now, named as `<folder>/<name>`. */
+function heldIn(slots: string, folder: string): string[] {
+  const path = folder === '' ? slots : join(slots, folder);
+  return existsSync(path)
+    ? readdirSync(path)
+        .filter((name) => name.endsWith('.lock') && lockHeld(join(path, name)))
+        .map((name) => (folder === '' ? name : `${folder}/${name}`))
+    : [];
 }
 
 /**
- * Every lock and mark in the suite's slot directory with what it holds and whether its process
- * lives, for a call that stalled: a take waiting on held slots answers nothing until they free.
+ * What is held in the slot directory [param slots]: every slot lock and every project lock as
+ * `projects/<name>`. The files stay once made, so a lock counts only while something holds it. A run
+ * that gave back everything leaves an empty list.
  */
+export function leftInSlots(slots: string): string[] {
+  return [...heldIn(slots, ''), ...heldIn(slots, PROJECTS_FOLDER)].toSorted();
+}
+
+/** Every held lock in the suite's slot directory, for a call that stalled: a take waiting on held slots answers nothing until they free. */
 export function slotsSaid(): string {
   const slots = process.env[SLOTS_VARIABLE];
   if (slots === undefined || !existsSync(slots)) {
     return 'The slot directory holds nothing.';
   }
-  const said = (path: string, name: string): string[] => {
-    try {
-      return readdirSync(path).flatMap((inner) => said(join(path, inner), `${name}/${inner}`));
-    } catch {
-      // Not a folder, so a lock or a mark.
-    }
-    let text: string;
-    try {
-      text = readFileSync(path, 'utf8').trim();
-    } catch {
-      return [`${name} went while it was read`];
-    }
-    const pid = /"pid":(\d+)/.exec(text)?.[1];
-    return [`${name} (${pid === undefined ? 'no pid' : livesSaid(Number(pid))}): ${text}`];
-  };
-  const lines = readdirSync(slots)
-    .toSorted()
-    .flatMap((name) => said(join(slots, name), name))
-    .filter((line) => !line.includes(ENDED_SUFFIX));
-  return lines.length === 0
-    ? `The slot directory ${slots} holds nothing.`
-    : `The slot directory ${slots} holds:\n${lines.join('\n')}`;
-}
-
-function livesSaid(pid: number): string {
-  try {
-    process.kill(pid, 0);
-    return `pid ${String(pid)} lives`;
-  } catch (error) {
-    // EPERM is a live process of another user's.
-    return error instanceof Error && 'code' in error && error.code === 'ESRCH'
-      ? `pid ${String(pid)} has gone`
-      : `pid ${String(pid)} lives`;
-  }
-}
-
-/** A taker waiting for a slot, as its mark in the waiting folder names it. */
-export interface WaitingMark {
-  readonly mark: string;
-  readonly pid: number;
-  /** When it began to wait, in milliseconds since the epoch. */
-  readonly since: number;
-  /** When it last looked, in milliseconds. */
-  readonly seen: number;
-}
-
-/** The marks of the waiting folder of [param directory] that name a pid and a start, by mark name. */
-export function slotWaiters(directory: string): WaitingMark[] {
-  const marks = join(directory, WAITING_FOLDER);
-  if (!existsSync(marks)) {
-    return [];
-  }
-  return readdirSync(marks)
-    .filter((name) => name.endsWith('.json'))
-    .toSorted()
-    .flatMap((mark) => {
-      try {
-        const named: unknown = JSON.parse(readFileSync(join(marks, mark), 'utf8'));
-        const pid: unknown =
-          typeof named === 'object' && named !== null ? Reflect.get(named, 'pid') : undefined;
-        const since: unknown =
-          typeof named === 'object' && named !== null ? Reflect.get(named, 'since') : undefined;
-        if (typeof pid !== 'number' || typeof since !== 'number') {
-          return [];
-        }
-        const note = join(marks, mark.replace(/\.json$/u, '.seen'));
-        const seen = existsSync(note) ? statSync(note).mtimeMs : statSync(join(marks, mark)).mtimeMs;
-        return [{ mark, pid, since, seen: Math.floor(seen) }];
-      } catch {
-        return [];
-      }
-    });
+  const held = leftInSlots(slots);
+  return held.length === 0
+    ? `The slot directory ${slots} holds no held lock.`
+    : `The slot directory ${slots} has held locks:\n${held.join('\n')}`;
 }

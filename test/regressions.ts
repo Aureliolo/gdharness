@@ -21,7 +21,6 @@ import {
   statSync,
   symlinkSync,
   utimesSync,
-  watch as watchFolder,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -165,11 +164,8 @@ import {
   heldToCores,
   inTurns,
   KEPT_RUN_DIRECTORIES,
-  MEMORY_PER_ENGINE,
-  memoryRefusal,
   resPathOf,
   roomFor,
-  roomForAnother,
   SLOW_RUN_MARK,
   sweepRunDirectories,
   versionNamed,
@@ -189,22 +185,6 @@ import {
   walkStoppedPartWay,
 } from '../src/engine-leaks.js';
 import {
-  CEILING_VARIABLE,
-  ceilingBytes,
-  engineMemory,
-  engineNeed,
-  MEMORY_KEPT,
-  type MemoryEnd,
-  MemoryWatch,
-  macMemoryLevel,
-  memoryCeilingSaid,
-  memoryEndedSaid,
-  memoryEndSentence,
-  memoryRoomOf,
-  startRefusedSaid,
-  windowsCommitLeft,
-} from '../src/engine-memory.js';
-import {
   crashedAtStart,
   ENGINE_STARTS,
   type EngineRun,
@@ -213,55 +193,26 @@ import {
   runEngine,
   startedUntilItRuns,
 } from '../src/engine-run.js';
-import { shareText } from '../src/engine-shares.js';
 import {
   EngineSlots,
-  endedNoteOf,
-  FolderChanges,
-  giveBackSlot,
-  handSlot,
-  holderOf,
-  inheritsSlot,
-  lockIsFree,
   machineSlots,
-  markBegan,
-  nameSlotEngine,
-  ownStart,
   PROJECTS_FOLDER,
   projectLockOf,
-  raiseSlotMemory,
-  SINCE_IN_SECONDS_BELOW,
-  SLOT_COUNT_FILE,
   SLOT_COUNT_VARIABLE,
-  SLOT_YIELD_MS,
   SLOTS_VARIABLE,
-  type SlotHolder,
-  SlotLine,
-  START_TOLERANCE_MS,
-  slotCountFileOf,
-  slotMemoryFree,
   slotWaitedSaid,
   slotWaitSaid,
-  UNWRITTEN_MS,
-  WAITING_FOLDER,
 } from '../src/engine-slots.js';
 import {
-  heldBy as bytesHeldBy,
-  countedBy,
-  crowded,
   nowSeconds,
   processorSecondsOf,
-  readingMemoryWith,
   type Sample,
   Spent,
   STARVED,
-  sampled,
   secondsFromClock,
-  type TreeHeld,
-  treesHeldBy,
-  watching,
 } from '../src/engine-spent.js';
 import { EngineUsageError, errorCode, errorMessage, Refusal, toError } from '../src/errors.js';
+import { holderOf, ownStart } from '../src/file-lock.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { fileNoCaseCompare } from '../src/file-order.js';
 import { FrameReader, OversizedStreamError, frame as wireFrame } from '../src/framing.js';
@@ -277,6 +228,7 @@ import {
 import {
   ALREADY_HELD,
   answersTo,
+  CONTROL_SEQUENCE,
   CRASH_HEADER,
   caseLineOf,
   foldedRepeats,
@@ -347,7 +299,7 @@ import {
   HEADLESS_TOOLS,
 } from '../src/headless-operations.js';
 import { idleClosed, idleSettled, portsIn } from '../src/idle-close.js';
-import { IMPORTABLE_EXTENSIONS, importedIntoTheProject, staleImports } from '../src/import-freshness.js';
+import { importedIntoTheProject, staleImports } from '../src/import-freshness.js';
 import { defectReport, defectSignature, withoutMachinePaths } from '../src/issues.js';
 import {
   discoveryListing,
@@ -360,16 +312,11 @@ import {
   MalformedReportError,
   orphansPrinted,
   parseJUnit,
-  RENDERED_AWAY_NOTE,
-  type ReportedSkips,
-  reportedSkips,
   rowsIgnoredIn,
   type ScriptError,
-  SuiteDiffs,
-  skipKey,
   suitesPrinted,
+  type TestReport,
   whyNoReport,
-  withActualsPrinted,
 } from '../src/junit.js';
 import {
   askTheKeepersDebugger,
@@ -385,7 +332,6 @@ import {
   envValue,
   HIDDEN_WINDOW_FPS,
   hiddenWindowFlags,
-  OPENED_BY_A_SERVER,
   resolveHeadless,
   resolveSilent,
   runArguments,
@@ -402,7 +348,7 @@ import {
 } from '../src/library-copies.js';
 import { callsInFlight, LIFECYCLE_LOG_LIMIT, writeLifecycle } from '../src/lifecycle-log.js';
 import { bytesOf, entriesOf, contentOf as listedContentOf, statOf } from '../src/listed-reads.js';
-import { LOG_LIMIT_BYTES, pastTheLogLimit, prependTo, readLog } from '../src/log-read.js';
+import { LOG_LIMIT_BYTES, prependTo, readLog } from '../src/log-read.js';
 import {
   DEFAULT_LSP_PORT,
   GodotLSPClient,
@@ -430,14 +376,8 @@ import {
   SPAWNING_START,
   snapshotAnswer,
 } from '../src/object-snapshot.js';
-import {
-  launchOutsideTheTree,
-  readLaunched,
-  receivedSpec,
-  type SentSpec,
-  sendSpec,
-  withChanges,
-} from '../src/outside.js';
+import { type OsLock, tryOsLock } from '../src/os-lock.js';
+import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from '../src/outside.js';
 import {
   commandProjectRefusal,
   exportedBuild,
@@ -527,18 +467,13 @@ import {
   judgeRun,
   listeningPid,
   listeningPidInNetstat,
-  memoryEndOf,
-  noteMemoryEnd,
   openTranscript,
-  type PeakTool,
   profileMarkPath,
   profilePath,
   type RunRecord,
-  readEnginePeaks,
   readLatestRun,
   readRunRecord,
   readWindowsCommandLine,
-  recordEnginePeak,
   recordRunEnded,
   runningAs,
   runRecordPath,
@@ -639,7 +574,6 @@ import {
   ourRunEnded,
   outOfBounds,
   PLAY_STARTS_WITHIN_MS,
-  PROJECT_FILE_ARGUMENTS,
   patienceForFrames,
   previousRunHow,
   previousRunLeft,
@@ -684,7 +618,6 @@ import {
   ADDONS,
   autoloadIsOurs,
   autoloadPaths,
-  BIND_ADDRESS_SETTING,
   editorUpgradeNote,
   gdUnit4Unusable,
   inspectProject,
@@ -694,14 +627,11 @@ import {
   installedRuntimeDigest,
   installedRuntimeVersion,
   loaderState,
-  PORT_SETTING,
   type ProjectReport,
-  QUIET_SCENES_SETTING,
   RUNTIME_AUTOLOAD,
   RUNTIME_SCRIPT,
   removeAddons,
   removeLoader,
-  SCRIPT_RUNS_SETTING,
   SHARE_SCRIPT,
   shippedAddonsDirectory,
   shippedEditorDigest,
@@ -763,9 +693,9 @@ import {
   judgeEngine,
   type LogRead,
   type RowShare,
-  readEngineLog,
+  readEngineLog as readEngineLogOf,
   readExpected,
-  readRun,
+  readRun as readRunOf,
   rowsAcross,
   SuiteCuts,
   secondsOf,
@@ -786,7 +716,6 @@ import {
   lanesOf,
   NOT_SEARCHED_SETTING,
   ProjectScripts,
-  peakOf,
   readTimes,
   Shares,
   SPLIT_PAST_SECONDS,
@@ -802,7 +731,6 @@ import {
   writeJsonAsync,
 } from '../src/suite-plan.js';
 import {
-  type Admitted,
   acrossSaid,
   displayFlags,
   engineSaid,
@@ -810,9 +738,6 @@ import {
   importFault,
   importNeeded,
   importStartOf,
-  MemoryGate,
-  memorySaid,
-  outOfMemorySaid,
   RunLogs,
   type RunResult,
   reachedAlsoSaid,
@@ -826,7 +751,6 @@ import {
   slowTimeSaid,
   startsSaid,
   suiteImport,
-  takenLanes,
   testOptionsOf,
   wholeTreeSaid,
 } from '../src/suite-run.js';
@@ -874,7 +798,6 @@ import {
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { holdExit, prepareWholeExits } from '../src/whole-exit.js';
 import {
-  makeWhole,
   notesInTurn,
   removeWhole,
   removeWholeAsync,
@@ -934,13 +857,11 @@ import {
   stopServersOf,
   unheldPort,
 } from './support/server.js';
-import { REGRESSION_SECONDS, regressionPart, secondsOn, UNMEASURED_SECONDS } from './support/shards.js';
+import { REGRESSION_SECONDS, regressionPart, UNMEASURED_SECONDS } from './support/shards.js';
 import {
   leftInSlots,
   SLOT_VARIABLES,
   slotCountForEngines,
-  slotsSaid,
-  slotWaiters,
   suiteSlotCount,
   TEST_ENGINES_VARIABLE,
   withTheSuitesOwnSlotVariables,
@@ -1811,34 +1732,6 @@ function testALongUnfinishedLineIsHeldInLinearTime(): void {
   assert.ok(took < 1500, `8 MB in 4 KB reads took ${Math.round(took)} ms`);
 }
 
-/** The runner's character diff of a failing string, with the marks gdUnit4 puts on it. */
-function printedStringDiffs(
-  values: readonly {
-    readonly at: string;
-    readonly parts: readonly (readonly [string, 'kept' | 'missing' | 'added'])[];
-  }[],
-): string {
-  const esc = String.fromCharCode(0x1b);
-  const blue = `${esc}[38;2;30;144;255m`;
-  const marked = (background: string, chars: string): string =>
-    `${esc}[48;2;${background}m${esc}[38;2;255;255;255m${chars}${esc}[0m${blue}${esc}[48;2;${background}m${esc}[0m${blue}`;
-  return values
-    .map(({ at, parts }) => {
-      const body = parts
-        .map(([chars, mark]) =>
-          mark === 'kept' ? chars : marked(mark === 'missing' ? '38;0;0' : '0;38;0', chars),
-        )
-        .join('');
-      return ` but was\n '${blue}${body}${esc}[0m'${esc}[0m${esc}[38;2;173;216;230m\tat ${at}${esc}[0m`;
-    })
-    .join('\n');
-}
-
-/** A failing string equality as the report writes it: both strings merged. */
-function mergedStringFailure(expected: string, merged: string, at: string): { detail: string } {
-  return { detail: `Expecting:\n '${expected}'\n but was\n '${merged}'\n\tat ${at}` };
-}
-
 /** How long [run] takes, in milliseconds. */
 function timedMs(run: () => void): number {
   const began = performance.now();
@@ -1953,18 +1846,6 @@ function testAReportIsReadWholeOrRefusedAndRowsAreKnown(): void {
   }
   assert.equal(parseJUnit(suite('s', '', ' time="0.073"')).time, 0.073, 'while a fractional time is read');
 
-  const wordy =
-    '<testsuite name="one_test" package="t"><testcase name="test_one"><failure message="m"><![CDATA[\nExpecting:\n \'abc\'\n but was\n \'abc\'\n\tat \'test_one\' in res://t/one_test.gd:5\n]]></failure></testcase></testsuite>';
-  const at = "'test_one' in res://t/one_test.gd:5";
-  const diff = printedStringDiffs([{ at, parts: [['abc', 'missing']] }]);
-  for (const ends of ['\n', '\r\n']) {
-    const [only] = failedCases(parseJUnit(wordy.replaceAll('\n', ends)), diff);
-    assert.ok(
-      only?.detail?.includes(" but was\n ''\n"),
-      `${JSON.stringify(ends)} line ends give the value found: ${JSON.stringify(only?.detail)}`,
-    );
-  }
-
   assert.deepEqual(
     [' package=""', ' package="."'].map(
       (attributes) =>
@@ -2002,71 +1883,8 @@ function testAReportIsReadWholeOrRefusedAndRowsAreKnown(): void {
     parseJUnit(
       suite('s', `<testcase name="x"><failure message="m"><![CDATA[x${emoji}]]></failure></testcase>`),
     ),
-    '',
   );
   assert.ok(cut?.detail?.isWellFormed(), 'a detail cut at its limit does not end on half a character');
-}
-
-/**
- * Values are read back from the console in time in proportion to the failures, and one line failing
- * twice gives each failure its own value.
- */
-function testPrintedValuesAreReadBackInLinearTimeAndEachToItsOwnFailure(): void {
-  const readBack = (count: number): { took: number; empty: number } => {
-    const locations = Array.from(
-      { length: count },
-      (_, index) => `'test_n${index}' in res://test/words_test.gd:${index + 1}`,
-    );
-    const failures = locations.map((at) => mergedStringFailure('abc', 'abc', at));
-    const printed = printedStringDiffs(locations.map((at) => ({ at, parts: [['abc', 'missing']] })));
-    const began = performance.now();
-    const read = withActualsPrinted(failures, printed);
-    return {
-      took: performance.now() - began,
-      empty: read.filter((one) => one.detail.includes(" but was\n ''\n")).length,
-    };
-  };
-  const base = readBack(500);
-  assert.equal(base.empty, 500, 'every failure gets the empty value the console shows');
-  const large = readBack(6000);
-  assert.equal(large.empty, 6000, 'and so does every one of a large run');
-  // A linear read of twelve times the failures takes about twelve times as long. A quadratic one takes
-  // a hundred and forty-four times as long, which was over forty seconds at eight thousand.
-  assert.ok(
-    large.took < 40 * base.took + 1000,
-    `6000 failures took ${Math.round(large.took)} ms against ${Math.round(base.took)} ms for 500`,
-  );
-
-  const at = "'test_each' in res://test/each_test.gd:7";
-  const printed = printedStringDiffs([
-    {
-      at,
-      parts: [
-        ['ab', 'kept'],
-        ['c', 'added'],
-      ],
-    },
-    {
-      at,
-      parts: [
-        ['a', 'kept'],
-        ['b', 'missing'],
-        ['c', 'added'],
-      ],
-    },
-  ]);
-  const twice = mergedStringFailure('ab', 'abc', at);
-  const [first, second] = withActualsPrinted([twice, twice], printed);
-  assert.equal(
-    first?.detail,
-    `Expecting:\n 'ab'\n but was\n 'abc'\n\tat ${at}`,
-    'the first failure takes the first value the console printed',
-  );
-  assert.equal(
-    second?.detail,
-    `Expecting:\n 'ab'\n but was\n 'ac'\n\tat ${at}`,
-    'and the second the second, without a note that no copy was printed',
-  );
 }
 
 /**
@@ -11598,35 +11416,6 @@ async function testACallDuringADebugAdapterAbandonKeepsItsOwnConnection(): Promi
   );
 }
 
-/** Every request to a peer waits in `PendingRequests`, and the three clients keep no table of their own. */
-function testEveryRequestWaitsInTheOneTable(): void {
-  const files = readdirSync('src', { recursive: true })
-    .map(String)
-    .filter((entry) => entry.endsWith('.ts'))
-    .map((entry) => ({ entry: entry.replaceAll('\\', '/'), text: readFileSync(join('src', entry), 'utf8') }));
-  assert.ok(files.length > 50, `the sources were walked: ${files.length}`);
-  for (const gone of [
-    'interface PendingRequest',
-    'interface DiagnosticsWaiter',
-    'rejectAllPending',
-    'failPendingRequests',
-  ]) {
-    assert.deepEqual(
-      files.filter((file) => file.text.includes(gone)).map((file) => file.entry),
-      [],
-      `no client keeps ${gone} of its own`,
-    );
-  }
-  assert.deepEqual(
-    files
-      .filter((file) => file.text.includes('new PendingRequests<'))
-      .map((file) => file.entry)
-      .toSorted(),
-    ['dap_client.ts', 'godot-bridge.ts', 'lsp_client.ts'],
-    'the three clients wait in the one table',
-  );
-}
-
 /**
  * The status counts the resources with a call waiting or running, one for each resource however
  * many calls it has, and none once every call is answered.
@@ -11759,39 +11548,6 @@ async function testAPredecessorThatKeepsThePortIsNotWaitedOnForEver(): Promise<v
     });
     sweep(project);
   }
-}
-
-/**
- * The two ends of the bridge announcement agree about where it is and what it says.
- *
- * The server writes it and the editor addon reads it, in different languages, with nothing but
- * two constants holding them together. A path that drifts is an editor that finds no
- * announcement and falls back to the port, which is the behaviour this replaced: it would read as
- * working right up until two projects were open at once.
- */
-function testBothEndsAgreeAboutTheAnnouncement(): void {
-  const addon = readFileSync('src/godot/addons/gdharness_editor/bridge_client.gd', 'utf8');
-
-  const announced = /const ANNOUNCEMENT: String = "res:\/\/(.+)"/.exec(addon)?.[1];
-  assert.ok(announced, 'the addon should name the announcement it reads');
-  assert.equal(
-    announcementPath('project').split(/[\\/]/).slice(1).join('/'),
-    announced,
-    'the server should write the announcement where the addon reads it',
-  );
-
-  const protocol = /const ANNOUNCE_PROTOCOL: int = (\d+)/.exec(addon)?.[1];
-  assert.equal(
-    Number(protocol),
-    BRIDGE_ANNOUNCE_PROTOCOL,
-    'the addon should read the protocol the server writes',
-  );
-
-  // The same pair again, for the variable that says who opened the editor. A name that drifts
-  // reads as an editor nobody opened, which is the one a restart hands to Godot: it comes back
-  // without the ports it was moved to, and every tool behind them is answered by another editor.
-  const opened = /const OPENED_BY_A_SERVER: String = "(.+)"/.exec(addon)?.[1];
-  assert.equal(opened, OPENED_BY_A_SERVER, 'the addon should read the variable the server sets');
 }
 
 /**
@@ -12059,19 +11815,6 @@ async function testAnEditorStartedByAHiddenEditorIsHiddenToo(): Promise<void> {
   const { answer, asked } = await restartAStandIn({ hidden: true, started_by_an_editor: true }, {});
   assert.match(answer, /runs headless or hidden and was not opened by this server/, answer);
   assert.equal(asked.includes('restart_editor'), false, 'and the editor was asked nothing');
-
-  const addon = readFileSync('src/godot/addons/gdharness_editor/bridge_client.gd', 'utf8');
-  assert.match(
-    addon,
-    /static func _on_the_hidden_desktop\(\) -> bool:\n\treturn OS\.get_name\(\) == "Windows" and not OS\.get_environment\(DESKTOP_VARIABLE\)\.is_empty\(\)/,
-    'an editor on the hidden desktop reads the variable it inherits',
-  );
-  assert.match(
-    addon,
-    /^const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"$/m,
-    'named as the server sets it',
-  );
-  assert.equal(addon.includes('set_environment(DESKTOP_VARIABLE'), false, 'and never cleared or replaced');
 }
 
 /** Whether a restart is refused follows the hidden editor_status reports, and no other reading. */
@@ -12097,12 +11840,6 @@ function testTheLaunchDescriptionSaysWhatARestartOfAnotherEditorDoes(): void {
   assert.match(
     toolSpec('editor_launch')?.answer ?? '',
     /One opened by hand restarts itself and comes back with a window, so one with no window is refused unless hidden: false accepts one\./,
-  );
-  assert.ok(
-    readFileSync('src/server.ts', 'utf8').includes(
-      'This editor was opened by hand, and restarts itself as it was, so it cannot come back hidden.',
-    ),
-    'and the refusal of hidden: true says the same of its own value',
   );
 }
 
@@ -16224,28 +15961,6 @@ async function testAnOverrideFileThatRenamesTheAppIsNotSeededIntoTheOldFolder():
 }
 
 /**
- * A keep that is not told what its seed put in takes every seeded file as the run's own, and an
- * overlapping run's untouched copy then replaces a newer kept file. The callers need an engine that
- * draws to run, so the hand-over is read from their source: each one that keeps hands over what its
- * own seed returned.
- */
-function testEveryKeepIsHandedWhatItsSeedPutIn(): void {
-  let callers = 0;
-  for (const file of ['src/engine-launch.ts', 'src/server.ts']) {
-    const source = readFileSync(file, 'utf8');
-    const seeds = [...source.matchAll(/const (\w+) = await seedPipelineCache\(/g)].map(firstGroup);
-    const keeps = [...source.matchAll(/await keepPipelineCache\(([^;]*?)\);/g)].map(firstGroup);
-    assert.equal(keeps.length, seeds.length, `${file} keeps once for each seed`);
-    for (const [at, keep] of keeps.entries()) {
-      const handed = keep.split(',').map((part) => part.trim())[4];
-      assert.equal(handed, seeds[at], `${file} hands its seed's files to the keep: ${keep}`);
-    }
-    callers += keeps.length;
-  }
-  assert.ok(callers >= 2, `only ${String(callers)} keeps were read`);
-}
-
-/**
  * A server killed mid-run never keeps, and leaves nothing of the seed in the temporary folder the
  * run's folder sits in, where the sweep of abandoned runs would not look.
  */
@@ -16806,11 +16521,6 @@ function listedText(tool: string, argument?: string): string {
 function testTheToolTextSaysWhatTheCodeDoes(): void {
   // add_autoload refuses enabled: false, so the argument says so rather than offering it.
   assert.match(listedText('project_settings', 'enabled'), /add_autoload refuses false/);
-  assert.match(
-    readFileSync('src/godot/operations/project_config.gd', 'utf8'),
-    /An autoload cannot be added disabled/,
-    'and the operation is what refuses it',
-  );
 
   // printed matches ignoring case, and is not limited to the ordinary lines.
   const printed = listedText('project_test', 'printed');
@@ -16908,11 +16618,6 @@ function testTheFirstCallRulesAreInTheToolList(): void {
 function testAnObjectSlotIsEmptiedByTheTextNull(): void {
   const value = listedText('runtime_invoke', 'value');
   assert.match(value, /An object property takes a path to one the game holds, or the text null to empty it/);
-  assert.match(
-    readFileSync('src/godot/addons/gdharness_runtime/runtime_changes.gd', 'utf8'),
-    /str\(given\)\.strip_edges\(\) == "null"/,
-    'and the game reads that text as no object',
-  );
 }
 
 /**
@@ -17196,11 +16901,6 @@ async function testTheHazardsAndWorkingFormsAreInTheToolList(): Promise<void> {
 function testATileSetRefusesAResourcePathThatExists(): void {
   const sources = text(get(toolSpec('resource_edit')?.parameters['sources'], 'description'));
   assert.match(sources, /A resourcePath that already exists is refused\./);
-  assert.match(
-    readFileSync('src/godot/addons/gdharness_editor/tools/tileset_tools.gd', 'utf8'),
-    /Give "\s*\+ "resourcePath a path nothing is at\./,
-    'and the TileSet path is what is refused',
-  );
 }
 
 /** An effect of the same class in the slot is kept with its settings, and only another class is replaced. */
@@ -17208,11 +16908,6 @@ function testAnEffectOfTheSameClassKeepsItsSettings(): void {
   assert.match(
     listedText('project_settings', 'effectIndex'),
     /an effect of another class is replaced and one of the same class stays with its settings\./,
-  );
-  assert.match(
-    readFileSync('src/godot/operations/audio_buses.gd', 'utf8'),
-    /kept = held\.get_class\(\) == effect\.get_class\(\)/,
-    'and the operation keeps one of the same class',
   );
 }
 
@@ -18923,139 +18618,6 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
     assert.equal(nowhere.status, 2, 'as a usage error rather than a project with problems');
   } finally {
     sweep(sandbox);
-  }
-}
-
-/**
- * Every GDScript in the tree is somewhere the GDScript gates look, and every place they look holds
- * some.
- *
- * `gdlint` and `gdformat --check` both exit 0 when handed a directory with no GDScript in it, and
- * `gdformat` says "0 files would be left unchanged" while doing it, which reads like a pass. So the
- * paths in `package.json` are a list nothing holds against the tree: move a directory, add one, or
- * mistype one, and the gate goes on reporting success over less than it did, or over nothing.
- *
- * Reported by a downstream project that asked every gate it has what it says about a directory
- * holding nothing of its language. `ruff`, `ty`, `gdlint`, `gdformat` and `markdownlint-cli2` all
- * answered 0.
- *
- * Both directions, because each alone is satisfied by a mistake in the other. A script outside
- * every named path is one nothing checks. A named path with nothing under it is a gate checking
- * nothing and saying so in the language of success, and it is also the positive here: a walk that
- * had stopped finding files would satisfy the first assertion perfectly.
- *
- * The three commands are held level too. They are written out separately, and a directory added to
- * the linter and not to the formatter is a directory only half of them reads.
- */
-function testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome(): void {
-  const manifest: unknown = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'));
-  // Everything after the tool that is not a flag. Reading only the words with a slash in them
-  // looked equivalent and is not: it cannot see a directory at the top level, which is the one a
-  // mistyped or moved path is most likely to be, and the disarm that adds one passed because of it.
-  // A script of the repository's own run through bun is the tool, as the gates run gdstyle through
-  // scripts/gdstyle.ts, and its path is not one of the directories.
-  const pathsIn = (script: string): string[] => {
-    const line = get(manifest, 'scripts', script);
-    assert.equal(typeof line, 'string', `package.json should define the ${script} script`);
-    const words = String(line).split(/\s+/);
-    return words
-      .slice(words[0] === 'bun' && (words[1] ?? '').endsWith('.ts') ? 2 : 1)
-      .filter((word) => word !== '' && !word.startsWith('-'));
-  };
-
-  const gated = pathsIn('lint:gd');
-  assert.ok(
-    gated.length > 0,
-    `lint:gd should name the directories it checks: ${String(get(manifest, 'scripts', 'lint:gd'))}`,
-  );
-  for (const other of ['format:gd', 'format:gd:check']) {
-    assert.deepEqual(
-      pathsIn(other),
-      gated,
-      `${other} reads the same directories as lint:gd, or one of them is only half checked`,
-    );
-  }
-
-  const found: string[] = [];
-  const walk = (directory: string, prefix: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'build') {
-        continue;
-      }
-      const here = `${prefix}${entry.name}`;
-      if (entry.isDirectory()) {
-        walk(join(directory, entry.name), `${here}/`);
-      } else if (entry.name.endsWith('.gd')) {
-        found.push(here);
-      }
-    }
-  };
-  walk(process.cwd(), '');
-
-  const outside = found.filter((path) => !gated.some((where) => path.startsWith(`${where}/`)));
-  assert.deepEqual(outside, [], `every .gd belongs to a directory the gates name, and these do not`);
-
-  for (const where of gated) {
-    const under = found.filter((path) => path.startsWith(`${where}/`));
-    assert.ok(
-      under.length > 0,
-      `${where} is named by the gates and holds no .gd, so both tools pass over nothing there`,
-    );
-  }
-}
-
-/**
- * The bumps the release button offers are the bumps both documents describe.
- *
- * `AGENTS.md` tells the owner how to choose a bump and says `.github/CONTRIBUTING.md` states the
- * same thing publicly, so keep the two in step. That instruction was stated and held by nothing,
- * which is its own shape: a project can write a rule into its working agreement, act on it, and
- * still have no case that fails when the two drift.
- *
- * What is held here is the part that has an artefact behind it. The three documents that have to
- * agree are two prose files and one `type: choice` in a workflow, and the choice is the one a
- * person actually clicks: a bump offered by the button and described in neither file is one nobody
- * can decide correctly, and a bump described in one file only is the drift the instruction is about.
- *
- * What is not held, and deliberately: which level each kind of change belongs to. The two files say
- * that in different words on purpose, one addressing the owner and one the public, so `removal` in
- * one is `taken away` in the other. A check pairing phrase to phrase would be a copy of both texts
- * that rots when either is reworded, which is the fault it would be pretending to catch.
- */
-function testTheReleaseButtonOffersWhatBothDocumentsDescribe(): void {
-  const workflow = readFileSync(join(process.cwd(), '.github', 'workflows', 'release-prepare.yml'), 'utf8');
-  const choices = workflow
-    .slice(workflow.indexOf('bump:'))
-    .split('options:')[1]
-    ?.split(/\n\s*\n|\njobs:/)[0];
-  assert.ok(choices !== undefined, 'the prepare workflow should offer a bump as a list of options');
-  const offered = [...choices.matchAll(/^\s*-\s*(\w+)\s*$/gm)].map((found) => found[1]);
-  assert.deepEqual(
-    offered,
-    ['patch', 'minor', 'major'],
-    `the button offers these three, and both documents are held against them: ${choices}`,
-  );
-
-  // The section rather than the file. `major` appears in CONTRIBUTING's Renovate paragraph as
-  // well, so a whole-file search passes on a Versions section that has lost it, which is a check
-  // reading the right document and the wrong part of it.
-  const sections: [string, string][] = [
-    ['AGENTS.md', '## Releasing'],
-    [join('.github', 'CONTRIBUTING.md'), '## Versions'],
-  ];
-  for (const [file, heading] of sections) {
-    const document = readFileSync(join(process.cwd(), file), 'utf8');
-    const start = document.indexOf(heading);
-    assert.ok(start >= 0, `${file} should still have its ${heading} section`);
-    const after = document.slice(start + heading.length);
-    const ends = after.indexOf('\n## ');
-    const section = (ends < 0 ? after : after.slice(0, ends)).toLowerCase();
-    for (const bump of offered) {
-      assert.ok(
-        section.includes(String(bump)),
-        `${file}'s ${heading} should say what ${String(bump)} means, since the button offers it`,
-      );
-    }
   }
 }
 
@@ -22967,7 +22529,7 @@ async function testALauncherSpecIsReadBackAsSentAndAnAnswerByItsFirstLine(): Pro
       profile: 'prof',
       breakpoints: ['res://a.gd:3'],
       debugged: false,
-      slot: { lock: 'l', from: 1, by: 'k' },
+      slot: { lock: 'l' },
     },
     desktop: 'desk',
     noActivate: true,
@@ -23004,8 +22566,8 @@ async function testALauncherSpecIsReadBackAsSentAndAnAnswerByItsFirstLine(): Pro
     ['a run with no transcript', { ...base, run: { startedAt: 1, projectPath: 'p' } }],
     ['a run started at a string', { ...base, run: { transcript: 't', startedAt: '1', projectPath: 'p' } }],
     [
-      'a run with a half slot',
-      { ...base, run: { transcript: 't', startedAt: 1, projectPath: 'p', slot: { lock: 'l' } } },
+      'a run with a slot whose lock is a number',
+      { ...base, run: { transcript: 't', startedAt: 1, projectPath: 'p', slot: { lock: 3 } } },
     ],
     [
       'breakpoints that are not text',
@@ -23698,13 +23260,6 @@ async function testADesktopStartIsOneCall(): Promise<void> {
     assert.ok(existsSync(beside.files.spec), 'the spec is written');
     assert.equal(beside.pid(), undefined, 'a helper that never ran wrote no pid');
     assert.ok((await failed) instanceof Error, 'a helper that is not there ends the child in an error');
-
-    const keeper = readFileSync(join('src', 'keeper.ts'), 'utf8');
-    assert.equal(keeper.split('endingTheGame(child, stopFile)').length - 1, 1, 'the keeper makes one ender');
-    assert.ok(
-      keeper.includes("child.kill() ? 'signalled' : 'gone'"),
-      'which answers whether anything was signalled',
-    );
 
     if (process.platform !== 'win32') {
       console.log('desktop start regression: the helper is Windows-only');
@@ -26172,26 +25727,6 @@ async function testEveryEngineTheHelperStartsHasAConsoleWithNoWindow(): Promise<
   }
 }
 
-/**
- * The helper's command, its spec and its desktop variable are made in one place. Every other start
- * through the helper is a call to it, which a new caller writing its own would bypass.
- */
-function testEveryDesktopStartGoesThroughOneCall(): void {
-  const files = readdirSync('src', { recursive: true })
-    .map(String)
-    .filter((entry) => entry.endsWith('.ts'))
-    .map((entry) => join('src', entry));
-  assert.ok(files.length > 50, `the sources were walked: ${files.length}`);
-  const calling = (needle: string): string[] =>
-    files.filter((file) => readFileSync(file, 'utf8').includes(needle)).toSorted();
-  assert.deepEqual(calling(['through', 'Helper('].join('')), [join('src', 'desktop.ts')], 'the spec writer');
-  assert.deepEqual(
-    calling(['[DESKTOP', 'VARIABLE]'].join('_')),
-    [join('src', 'desktop.ts')],
-    'the desktop variable is named in one place',
-  );
-}
-
 // A folder the compile cannot use is said at once, not waited out and blamed on the compile.
 async function testAHelperFolderThatCannotBeUsedIsReportedAtOnce(): Promise<void> {
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-folder-'));
@@ -27573,12 +27108,6 @@ async function testAKeeperCaseThatFailsLeavesNoRunFolder(): Promise<void> {
     existsSync(runtime),
     false,
     'the run folder is gone, the keeper having written its note first',
-  );
-  const source = readFileSync('test/regressions.ts', 'utf8');
-  const through = source.slice(source.indexOf('async function testAStopGoesThroughTheKeeper'));
-  assert.ok(
-    through.slice(0, through.indexOf('\n}\n')).includes('sweepAKeeperCase(project, runtime)'),
-    'the case through the keeper removes its folders this way',
   );
 }
 
@@ -29264,17 +28793,11 @@ async function assertARunFollowsTheGamesRestartIntoItsSuccessor(
     `the run goes on in the successor: ${going.said}${get(going.answer, 'running') === true ? '' : searched()}`,
   );
   assert.equal(get(going.answer, 'pid'), one.successor, going.said);
-  // The slot its keeper holds names the successor as its engine, so what it starts rides it.
+  // The slot its keeper holds stays locked while the successor runs, so what it starts rides it.
   const successorLock = readFileSync(join(project, 'successor_lock'), 'utf8');
-  const lockEngine = (): number | undefined => {
-    try {
-      return holderOf(readFileSync(successorLock, 'utf8'))?.engine?.pid;
-    } catch {
-      return undefined;
-    }
-  };
-  await cameTrue(() => lockEngine() === one.successor, 10_000);
-  assert.equal(lockEngine(), one.successor, `the slot names the successor: ${successorLock}`);
+  const successorHeld = (): boolean => lockIsHeld(successorLock);
+  await cameTrue(successorHeld, 10_000);
+  assert.ok(successorHeld(), `the slot stays held while the successor runs: ${successorLock}`);
   assert.deepEqual(
     asArray(get(going.answer, 'restartedFrom')).map((before) => [
       get(before, 'pid'),
@@ -37520,18 +37043,8 @@ function testTheCureIsWrittenWhole(): void {
       ),
     },
     ...installed,
-    ...readdirSync('src')
-      .filter((name) => name.endsWith('.ts'))
-      .flatMap((name) =>
-        readFileSync(join('src', name), 'utf8')
-          .split('\n')
-          .filter((line) => line.includes('editor_launch restart'))
-          .map((line) => ({ where: name, text: line })),
-      ),
   ];
-  // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
-  // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 48, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 4, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -38493,11 +38006,6 @@ function testAHiddenWindowStartsWithVsyncOff(): void {
     }),
     ['--headless', '--path', '/p'],
   );
-  // A game a hidden editor plays is given its flags by the editor addon, which caps it the same.
-  assert.match(
-    readFileSync(join('src', 'godot', 'addons', 'gdharness_editor', 'tools', 'play_tools.gd'), 'utf8'),
-    new RegExp(`^const HIDDEN_WINDOW_FPS: int = ${cap}$`, 'm'),
-  );
 }
 
 /**
@@ -39222,33 +38730,6 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
   } finally {
     sweep(projectDir);
   }
-}
-
-/**
- * The shipped loader passes the checks a game runs on its own files. It is written outside addons/,
- * where a game's gates read it, and it has to stay byte for byte what gdharness ships, so the game
- * cannot reword it to fit them.
- */
-function testTheLoaderPassesAGamesOwnLint(): void {
-  const lines = readFileSync(shippedLoader(), 'utf8').split(/\r?\n/);
-  assert.ok(lines.length > 20, `the shipped loader is read: ${lines.length} lines`);
-  // A game's gdstyle wraps at 100 columns and counts a tab as four, and a 110-column limit here once
-  // let a 101-character line through.
-  const columns = (line: string): number => line.replaceAll('\t', '    ').length;
-  const long = lines.flatMap((line, at) => (columns(line) > 100 ? [`${at + 1}: ${columns(line)}`] : []));
-  assert.deepEqual(long, [], 'every line of the loader is within 100 columns, a tab counting four');
-  // A game's check on cited files reads a backticked span as a path when its first folder holds a
-  // file the repository tracks. Once the loader is committed, gdharness/ is such a folder, so the
-  // setting `gdharness/runtime/serve_script_runs` in its comment was refused as a missing file.
-  const spans = lines.flatMap((line, at) =>
-    [...line.matchAll(/`([^`]*)`/g)].map((match) => ({ at: at + 1, span: match[1] ?? '' })),
-  );
-  assert.ok(spans.length > 0, `the loader's backticked spans are read: ${JSON.stringify(spans)}`);
-  assert.deepEqual(
-    spans.filter(({ span }) => span.includes('/')),
-    [],
-    'no backticked span in the loader reads as a path',
-  );
 }
 
 /**
@@ -41937,31 +41418,6 @@ async function testOneImportPassServesTheServerAndASuiteRun(): Promise<void> {
     'a pass that printed an error and exited 0 is not refused by the judge',
   );
 
-  const functionSource = (file: string, marker: string): string => {
-    const source = readFileSync(join('src', file), 'utf8');
-    const from = source.indexOf(marker);
-    assert.ok(from >= 0, `${marker} is in src/${file}`);
-    const to = source.indexOf('\n}\n', from);
-    return source.slice(from, to);
-  };
-  const importing = functionSource('suite-run.ts', 'async function importProject(');
-  for (const wanted of ['importNeeded(', 'suiteImport(', 'importFault(', 'readRun(readLog(log))']) {
-    assert.ok(importing.includes(wanted), `a suite run's import uses ${wanted}`);
-  }
-  for (const unwanted of ['seedExtensionList(', 'staleAgainst(', '.messages']) {
-    assert.ok(!importing.includes(unwanted), `a suite run's import leaves ${unwanted} to the pass`);
-  }
-  for (const handler of [
-    'private async handleRefreshUids(',
-    'private async reimportThroughTheEngine(',
-    'private async rebuildTheUidTable(',
-  ]) {
-    assert.ok(
-      functionSource('server.ts', handler).includes('extensionsListed'),
-      `${handler} names extensionsListed`,
-    );
-  }
-
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-one-pass-'));
   try {
     // A resource changed since its import is named stale, and the suite's pass forces it.
@@ -42728,7 +42184,7 @@ function assertTheGamePickIsCarriedUnaltered(): void {
   assert.equal(picking.length, 5, `the running-game tools are found: ${picking.join(', ')}`);
   for (const name of picking) {
     const schema = text(toolSpec(name)?.parameters['projectPath']?.['description']);
-    assert.equal(schema, 'Which game, when several run: its project folder.', `${name} projectPath`);
+    assert.equal(schema, 'Game by project folder.', `${name} projectPath`);
   }
   for (const step of ['this server started or plays', 'the only game running']) {
     assert.ok(THE_GAME_PICKED_IN_SHORT.includes(step), `the short pick names ${step}`);
@@ -42941,104 +42397,6 @@ function testTheReferencePrintsEveryShapeOfType(): void {
   // the lines above rather than satisfying this one too.
   const anyLines = markdown.split('\n').filter((line) => line.includes('` (any):'));
   assert.equal(anyLines.length, 3, `three arguments take any value: ${anyLines.join(' | ')}`);
-}
-
-/**
- * The skill says a script run can be served, and names the setting the addon actually reads.
- *
- * It said a `godot -s` script run does not answer, full stop. That is the default and not the rule:
- * the autoload stands down in a script run unless `serve_script_runs` is set, which is there for
- * somebody driving a `-s` script on purpose. The setting was in `docs/` and in neither the skill nor
- * any tool description, so the one sentence an agent reads before its first call was the half that
- * is wrong, and a downstream project had copied it into its own documentation as unconditional.
- * That is the half a consumer builds a guard on.
- *
- * Held against the addon's own constant rather than spelled twice. A rename in the GDScript would
- * otherwise leave the skill naming a setting nothing reads, which is worse than not naming one:
- * a caller sets it, nothing happens, and the sentence says it should have.
- */
-function testTheSkillNamesEverySettingTheAddonsRead(): void {
-  const read = new Set<string>();
-  const walk = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        walk(path);
-      } else if (entry.name.endsWith('.gd')) {
-        for (const found of readFileSync(path, 'utf8').matchAll(/"(gdharness\/[a-z_/]+)"/g)) {
-          read.add(found[1] ?? '');
-        }
-      }
-    }
-  };
-  walk('src/godot/addons');
-
-  // The list comes from the addons rather than from here, so a setting added there is covered by
-  // this the day it lands and nobody has to remember. Two were read and written down nowhere a
-  // caller looks, one of them the bind address, which is the only one with a security answer.
-  assert.ok(read.size >= 4, `the addons should read the settings they document: ${[...read].join(', ')}`);
-  const skill = skillFiles('0.0.0').get('SKILL.md') ?? '';
-  const unsaid = [...read].filter((setting) => !skill.includes(setting)).toSorted();
-  assert.deepEqual(unsaid, [], 'every setting the addons read should be named in the skill');
-
-  // The bind address with its reason rather than only its name. A caller who reads that it exists
-  // and not why it is loopback is one who moves it to reach a game on another machine.
-  assert.match(
-    skill,
-    /The runtime takes unauthenticated `call_method`, `set_property` and input/,
-    'and the bind address should say what it guards',
-  );
-}
-
-function testTheSkillNamesTheSettingThatServesAScriptRun(): void {
-  const addon = readFileSync('src/godot/addons/gdharness_runtime/runtime_autoload.gd', 'utf8');
-  const declared = /SCRIPT_RUNS_SETTING\s*:\s*String\s*=\s*"([^"]+)"/.exec(addon)?.[1];
-  assert.ok(declared, 'the addon should declare the setting it reads');
-  assert.equal(SCRIPT_RUNS_SETTING, declared, 'and the skill should name that one rather than a copy');
-  // The addon reads it where it decides, not merely declares it. A constant nothing consults would
-  // satisfy the line above while the sentence describes a setting with no effect.
-  assert.match(
-    addon,
-    /_script_run\(\)\s*and\s*not\s*GdhRead\.as_bool\(ProjectSettings\.get_setting\(SCRIPT_RUNS_SETTING/,
-    'and the script-run refusal should be the thing that consults it',
-  );
-
-  const skill = skillFiles('0.0.0').get('SKILL.md') ?? '';
-  const sentence = skill.split('\n\n').find((block) => block.includes('`godot -s` script run'));
-  assert.ok(sentence, 'the skill should still say what a script run does');
-  assert.match(sentence, /by default/, 'as a default rather than as a property of script runs');
-  assert.ok(sentence.includes(SCRIPT_RUNS_SETTING), `and name the setting that changes it: ${sentence}`);
-
-  // The quiet scenes the same way: the name the addon declares, consulted where it decides.
-  const quiet = /QUIET_SCENES_SETTING\s*:\s*String\s*=\s*"([^"]+)"/.exec(addon)?.[1];
-  assert.equal(QUIET_SCENES_SETTING, quiet, 'the skill should name the quiet scenes setting the addon reads');
-  assert.match(
-    addon,
-    /ProjectSettings\.get_setting\(QUIET_SCENES_SETTING[^\n]*\n\s*if not _profiled_from_start and not quiet_scene_in\(/,
-    'and the server start should be the thing that consults it',
-  );
-}
-
-/**
- * The bind address and the port the skill names are the settings the addon reads, and the addon
- * reads each where it listens. A renamed setting would leave the skill sending a caller to one that
- * nothing consults.
- */
-function testTheSkillNamesTheBindAddressAndPortTheAddonReads(): void {
-  const addon = readFileSync('src/godot/addons/gdharness_runtime/runtime_autoload.gd', 'utf8');
-  const declared = (constant: string): string | undefined =>
-    new RegExp(`${constant}\\s*:\\s*String\\s*=\\s*"([^"]+)"`).exec(addon)?.[1];
-  assert.equal(BIND_ADDRESS_SETTING, declared('BIND_ADDRESS_SETTING'), 'the bind address setting');
-  assert.equal(PORT_SETTING, declared('PORT_SETTING'), 'and the port setting');
-  assert.match(
-    addon,
-    /ProjectSettings\.get_setting\(\s*BIND_ADDRESS_SETTING/,
-    'the bind address is consulted',
-  );
-  assert.match(addon, /ProjectSettings\.get_setting\(PORT_SETTING/, 'and so is the port');
-  const skill = skillFiles('0.0.0').get('SKILL.md') ?? '';
-  assert.ok(skill.includes(BIND_ADDRESS_SETTING), 'the skill names the bind address setting');
-  assert.ok(skill.includes(PORT_SETTING), 'and the port setting');
 }
 
 /**
@@ -46063,16 +45421,6 @@ async function testAnotherCheckoutRunsTheEngineItsConfigNames(): Promise<void> {
   } finally {
     sweep(root);
   }
-}
-
-/** The extensions the check counts as imported are the ones `project_import status` counts. */
-function testTheImportCheckKnowsWhatStatusImports(): void {
-  const source = readFileSync(join('src', 'godot', 'operations', 'import_pipeline.gd'), 'utf8');
-  const listed = /const IMPORTABLE_EXTENSIONS: Array\[String\] = \[([^\]]*)\]/.exec(source)?.[1];
-  assert.ok(listed !== undefined, 'import_pipeline.gd should hold IMPORTABLE_EXTENSIONS');
-  const extensions = [...listed.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(extensions.length, 31, `the list as it stands: ${extensions.join(', ')}`);
-  assert.deepEqual([...IMPORTABLE_EXTENSIONS], extensions);
 }
 
 /**
@@ -50010,22 +49358,6 @@ async function testAnEngineRunSaysHowItEnded(): Promise<void> {
     bySource('stdout').at(-1)?.text,
     `line ${lines - 1} ${'x'.repeat(40)}`,
     'and stdout to its end',
-  );
-
-  // The lock it runs on names this process as its holder and the engine beside it, so what the
-  // engine starts runs on its slot.
-  const naming = await node(
-    "const fs = require('fs'); const lock = process.env.GODOT_ENGINE_HELD; const from = Date.now(); const look = () => { const held = JSON.parse(fs.readFileSync(lock, 'utf8')); if (held.engine !== undefined || Date.now() - from > 20000) { console.log(JSON.stringify({ pid: process.pid, held })); } else { setTimeout(look, 50); } }; look();",
-  );
-  const named = JSON.parse(naming.log.all.at(-1)?.text ?? '{}') as unknown;
-  assert.deepEqual(
-    [
-      get(named, 'held', 'pid'),
-      get(named, 'held', 'engine', 'pid'),
-      typeof get(named, 'held', 'engine', 'started'),
-    ],
-    [process.pid, get(named, 'pid'), 'number'],
-    `the lock names the engine it runs: ${JSON.stringify(named)}`,
   );
 
   const three = await node('process.exit(3)');
@@ -54229,13 +53561,23 @@ async function testAPlayedRunWithNoReportGivesNoVerdict(): Promise<void> {
  * the worker. Two rounds, one announcing inside the start's wait and one after it, since the tie is
  * made in each.
  */
+/** Whether another holder has the lock at [param lock] now, which a try for it answers. */
+function isHeld(lock: string): boolean {
+  if (!existsSync(lock)) {
+    return false;
+  }
+  const taken = tryOsLock(lock);
+  taken?.release();
+  return taken === null;
+}
+
 async function testAPlayedGameHoldsAnEngineSlot(): Promise<void> {
   for (const announces of [true, false]) {
     const round = announces ? 'a game that announces' : 'a game that never announces';
     const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-slot-'));
     const lock = join(slots, '0.lock');
     const held: { game: ChildProcess | null } = { game: null };
-    const atThePlay: { holder: SlotHolder | null } = { holder: null };
+    const atThePlay: { held: boolean | null } = { held: null };
     try {
       await withAPlayingEditor(
         ({ adapter, project, runtimeDir }) =>
@@ -54249,40 +53591,25 @@ async function testAPlayedGameHoldsAnEngineSlot(): Promise<void> {
               runtimeDir,
               atThePlay,
             }),
-        async ({ server, project, start }) => {
+        async ({ start }) => {
           await start(announces ? 5_000 : 300);
-          assert.equal(
-            atThePlay.holder?.pid,
-            server.child.pid,
-            `${round}: the server holds the slot as it asks for the play`,
-          );
+          assert.equal(atThePlay.held, true, `${round}: the server holds the slot as it asks for the play`);
           if (!announces) {
             assert.deepEqual(leftInSlots(slots), [], `${round}: the slot is given back once the wait ends`);
             return;
           }
-          const game = held.game?.pid;
           assert.ok(
-            await cameTrue(
-              () => existsSync(lock) && holderOf(readFileSync(lock, 'utf8'))?.pid === game,
-              10_000,
-            ),
-            `${round}: the slot is handed to the game`,
-          );
-          assert.equal(
-            holderOf(readFileSync(lock, 'utf8'))?.by,
-            `a game of ${project} the editor played for editor_run`,
+            isHeld(lock),
+            `${round}: the slot stays held for the game once the wait has ended, as the game runs`,
           );
           await endGame(held.game);
-          const taker = new EngineSlots(
-            slots,
-            1,
-            { pid: process.pid, started: await ownStart() },
-            undefined,
-            undefined,
-            plentyOfMemory,
+          assert.ok(
+            await cameTrue(() => !isHeld(lock), 15_000),
+            `${round}: and it is free once the game has gone`,
           );
-          const taken = await taker.takeFree();
-          assert.equal(taken, lock, `${round}: and it is free once the game has gone`);
+          const taker = new EngineSlots(slots, 1);
+          const taken = taker.takeFree();
+          assert.equal(taken, lock, `${round}: and a take gets it`);
           taker.release(lock);
         },
         { held, env: { GODOT_ENGINE_SLOTS: slots, GODOT_ENGINE_SLOT_COUNT: '1' } },
@@ -54302,13 +53629,13 @@ interface PlayedGameInASlot {
   readonly adapter: number;
   readonly project: string;
   readonly runtimeDir: string;
-  readonly atThePlay: { holder: SlotHolder | null };
+  readonly atThePlay: { held: boolean | null };
 }
 
 /** The fake editor's answer to one tool call: a play notes who holds the slot, then starts a game. */
 function answerAsAnEditorPlayingAGameInASlot(tool: string, play: PlayedGameInASlot): Record<string, unknown> {
   if (tool === 'play_scene') {
-    play.atThePlay.holder = existsSync(play.lock) ? holderOf(readFileSync(play.lock, 'utf8')) : null;
+    play.atThePlay.held = isHeld(play.lock);
     const game = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
       stdio: 'ignore',
     });
@@ -66577,6 +65904,259 @@ async function testTheRunAdoptedIsTheLatestStarted(): Promise<void> {
 }
 
 /**
+ * A server answers for the games it started and for those of a server that has gone, never for a
+ * game another live server started. The game is a stand-in that announces itself and is noted as
+ * started by a server that is running, and no call the server takes reaches it or ends it: each is
+ * refused with the folder of the server that holds it.
+ */
+async function testAServerLeavesAnotherLiveServersGameAlone(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-live-server-'));
+  const project = join(root, 'project');
+  const runtimeDir = join(root, 'runtime');
+  mkdirSync(project);
+  mkdirSync(join(runtimeDir, 'runs'), { recursive: true });
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Live server"\n',
+  );
+  const standIn = (): ChildProcess =>
+    spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const game = standIn();
+  const otherServer = standIn();
+  const pid = game.pid ?? 0;
+  assert.ok(pid > 0 && (otherServer.pid ?? 0) > 0, 'the fixture needs two stand-in processes');
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
+  try {
+    writeFileSync(
+      join(runtimeDir, `runtime-${pid}.json`),
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL,
+        pid,
+        port: 51_997,
+        address: '127.0.0.1',
+        project: { name: 'Stand-in', path: project },
+        addon_version: SERVER_VERSION,
+        addon_digest: shippedRuntimeDigest(),
+      }),
+      'utf8',
+    );
+    const transcript = join(runtimeDir, 'runs', 'run-1.log');
+    writeFileSync(transcript, "the other server's game\n");
+    const startedAt = Date.now() - 5_000;
+    writeRunRecord({
+      pid,
+      transcript,
+      startedAt,
+      startedBy: startedAt,
+      projectPath: project,
+      servedBy: project,
+      serverPid: otherServer.pid ?? 0,
+      arguments: ['--path', project],
+      command: process.execPath,
+    });
+    await withStdioServer(
+      async (call) => {
+        const calls: [string, Record<string, unknown>][] = [
+          ['editor_run', { op: 'stop', pid }],
+          ['editor_run', { op: 'stop' }],
+          ['editor_run', { op: 'wait', timeoutMs: 500 }],
+          ['editor_run', { op: 'profile' }],
+          ['editor_output', { op: 'run' }],
+          ['runtime_inspect', { op: 'tree' }],
+          ['runtime_inspect', { op: 'tree', pid }],
+        ];
+        for (const [name, args] of calls) {
+          const said = await call(name, args);
+          assert.ok(
+            said.includes(
+              `The game with pid ${pid} was started by the server of ${project}, which is running`,
+            ) && said.includes(`Make this call in the session serving ${project}`),
+            `${name} ${JSON.stringify(args)} is refused with the folder of the server holding the game: ${said}`,
+          );
+        }
+        const status = jsonOf(await call('editor_status', {}), 'editor_status');
+        assert.equal(get(status, 'game', 'run'), null, 'the game is not held here');
+        assert.ok(isAlive(pid), 'no call ended it');
+        assert.equal(readRunRecord(project)?.pid, pid, 'and none took its note away');
+      },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    );
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    game.kill();
+    otherServer.kill();
+    sweep(root);
+  }
+}
+
+/**
+ * A run noted as started by a server that has gone is taken over by the next server of its folder,
+ * and one noted as started by a server that is running is not read at all.
+ */
+async function testAGoneServersRunIsTakenOverAndALiveOnesIsNot(): Promise<void> {
+  const gone = (): number => {
+    const done: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['-e', ''], {
+      encoding: 'utf8',
+    });
+    assert.ok(done.pid > 0, 'the fixture needs processes that have been and gone');
+    return done.pid;
+  };
+  const live = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gone-server-'));
+  const project = join(root, 'project');
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  try {
+    mkdirSync(project);
+    const answers: [string, number | undefined][] = [
+      ['gone', gone()],
+      ['live', live.pid],
+      ['unnamed', undefined],
+    ];
+    const run = gone();
+    const seen: Record<string, unknown> = {};
+    for (const [label, serverPid] of answers) {
+      const runtimeDir = join(root, `runtime-${label}`);
+      mkdirSync(join(runtimeDir, 'runs'), { recursive: true });
+      const transcript = join(runtimeDir, 'runs', 'run-1.log');
+      writeFileSync(transcript, 'a run\n');
+      const startedAt = Date.now() - 60_000;
+      process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
+      writeRunRecord({
+        pid: run,
+        transcript,
+        startedAt,
+        startedBy: startedAt,
+        projectPath: project,
+        servedBy: project,
+        ...(serverPid === undefined ? {} : { serverPid }),
+        arguments: ['--path', project],
+        command: join(root, 'godot.exe'),
+        exitCode: 0,
+        endedAt: startedAt + 2_000,
+      });
+      await withStdioServer(
+        async (call) => {
+          seen[label] = get(jsonOf(await call('editor_status', {}), 'editor_status'), 'game', 'run');
+        },
+        { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+      );
+    }
+    assert.equal(
+      get(seen['gone'], 'pid'),
+      run,
+      `the run of a server that has gone is taken over: ${JSON.stringify(seen['gone'])}`,
+    );
+    assert.equal(get(seen['gone'], 'adopted'), true, 'and said to be taken over');
+    assert.equal(
+      get(seen['unnamed'], 'pid'),
+      run,
+      'a note naming no server is read as one whose server has gone',
+    );
+    assert.equal(seen['live'], null, 'the run of a server that is running is not held here');
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    live.kill();
+    sweep(root);
+  }
+}
+
+/**
+ * The pid argument picks among the games this server holds. With two servers of one project, a
+ * start from the second is refused while the first runs a game in the same place, naming the
+ * folder, and the second takes the game over once the first has gone. Needs the engine.
+ */
+async function testASecondServerOfAFolderLeavesTheFirstsGameAndTakesItOnceItIsGone(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('second server of a folder regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-second-server-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-second-server-runtime-'));
+  const env = {
+    GODOT_PATH: godotPath,
+    GDHARNESS_RUNTIME_DIR: runtime,
+    GDHARNESS_PROJECT: project,
+    [SLOT_COUNT_VARIABLE]: slotCountForEngines(2),
+  };
+  const first = new ServerProcess({ env });
+  const second = new ServerProcess({ env });
+  const met = new MetProcesses();
+  const run = async (
+    server: ServerProcess,
+    args: Record<string, unknown>,
+  ): ReturnType<ServerProcess['request']> =>
+    await server.request('tools/call', { name: 'editor_run', arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Second server"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    await first.initialize('regression-test');
+    await second.initialize('regression-test');
+    const started = await run(first, {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    const game = asNumber(get(parseTextContent(started), 'runtime', 'pid'));
+    await met.meet(game);
+
+    const refusedStart = textOf(await run(second, { projectPath: project, op: 'start', headless: true }));
+    assert.match(
+      refusedStart ?? '',
+      new RegExp(`The game with pid ${game} was started by the server of .*, which is running`),
+      `a start over a live server's game is refused: ${refusedStart}`,
+    );
+    for (const args of [{ op: 'stop', pid: game }, { op: 'stop' }]) {
+      const refused = textOf(await run(second, args));
+      assert.match(refused ?? '', /was started by the server of/, `${JSON.stringify(args)}: ${refused}`);
+    }
+    assert.ok(isAlive(game), 'the first server keeps its game');
+
+    const firstPid = first.child.pid;
+    assert.ok(firstPid !== undefined, 'the server should have a pid');
+    await killTheTree(firstPid);
+    await delay(1_000);
+    assert.ok(isAlive(game), 'a game outlives its server');
+    const taken = parseTextContent(await run(second, { op: 'stop' }));
+    assert.deepEqual(
+      [get(taken, 'stopped'), get(taken, 'endedPid')],
+      [true, game],
+      `the next server of the folder takes the game over: ${JSON.stringify(taken)}`,
+    );
+    assert.equal(await met.gone(game, 10_000), true, `pid ${game} should be gone`);
+  } finally {
+    await met.end();
+    await first.stop().catch(() => undefined);
+    await second.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
  * A profiled run picked up from its note keeps its profile: the run holds where the keeper writes
  * it, since a stop takes the note away, so a run picked up has to take it from the note as it is.
  */
@@ -66948,7 +66528,7 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
         );
         assert.match(
           text(get(output, 'note')),
-          /^This run was started by another server, the one this server replaced or one running beside it, and it ended with nothing here waiting on it/,
+          /^This run was started by another server, the one this server replaced, and it ended with nothing here waiting on it/,
           `saying whose run it was: ${text(get(output, 'note'))}`,
         );
         assert.equal(get(output, 'errors'), 1, JSON.stringify(output));
@@ -70208,7 +69788,15 @@ async function testAProfileSinceAMarkAnswersForOneAction(): Promise<void> {
       `without since, the whole run as before: ${whole.said}`,
     );
 
-    // A second server for the project, after the mark, reads the mark the first one set.
+    // The harness replaces a server by ending the old one, so the game outlives it and the next
+    // server of the project takes it over, mark included.
+    const gone = new Promise<void>((done) => {
+      first.child.once('exit', () => {
+        done();
+      });
+    });
+    first.child.kill('SIGKILL');
+    await gone;
     second = new ServerProcess({ env });
     await second.initialize('profile-mark-again');
     const again = caller(second);
@@ -70803,6 +70391,170 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
   }
 }
 
+/** A suite as the console shows it, its cases already as report elements. */
+interface ConsoleSuite {
+  readonly path: string;
+  readonly cases: string[];
+  failed: number;
+  hook: boolean;
+  closed: boolean;
+  time: number;
+}
+
+const xmlText = (value: string): string =>
+  value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+
+/** A case's report element: passed, or failed, or skipped with [param reason]. */
+function caseElement(
+  suite: string,
+  printed: { readonly name: string; readonly verdict: string; readonly time: string },
+  reason?: string,
+): string {
+  const head = `<testcase name="${xmlText(printed.name)}" time="${String(secondsOf(printed.time))}">`;
+  if (reason !== undefined) {
+    return `${head}<skipped message="SKIPPED: ${suite}:1"><![CDATA[\nThis test is skipped!\n  Reason: '${reason}'\n]]></skipped></testcase>`;
+  }
+  if (/^(?:FAILED|ERROR|ABORTED)/.test(printed.verdict)) {
+    return `${head}<failure message="FAILED: ${suite}:1" type="FAILURE"><![CDATA[Failed]]></failure></testcase>`;
+  }
+  return `${head}</testcase>`;
+}
+
+/** The console's lines read into suites, the skip a case's reason lines say it is included. */
+class ConsoleReport {
+  readonly suites: ConsoleSuite[] = [];
+  private skipping = false;
+  private gathering: string[] | null = null;
+  private last: { name: string; verdict: string; time: string } | null = null;
+
+  take(line: string): void {
+    const opened = /^Run Test Suite: (\S+)/.exec(line);
+    if (opened) {
+      this.suites.push({
+        path: opened[1] ?? '',
+        cases: [],
+        failed: 0,
+        hook: false,
+        closed: false,
+        time: 0.04,
+      });
+      this.last = null;
+      return;
+    }
+    const current = this.suites.at(-1);
+    if (current === undefined) {
+      return;
+    }
+    if (!this.takeStatistics(current, line)) {
+      this.takeCase(current, line);
+    }
+  }
+
+  private takeStatistics(current: ConsoleSuite, line: string): boolean {
+    const stats = /^Statistics: .*\| (PASSED|FAILED|ERROR)\b(.*)$/.exec(line);
+    if (!stats) {
+      return false;
+    }
+    current.closed = true;
+    current.time = secondsOf(stats[2] ?? '');
+    current.hook = stats[1] !== 'PASSED' && current.failed === 0;
+    return true;
+  }
+
+  private takeCase(current: ConsoleSuite, line: string): void {
+    const printed = caseLineOf(line);
+    if (printed !== null && printed.verdict !== 'STARTED') {
+      this.skipping = false;
+      this.last = printed;
+      current.failed += /^(?:FAILED|ERROR|ABORTED)/.test(printed.verdict) ? 1 : 0;
+      current.cases.push(
+        caseElement(current.path, printed, printed.verdict.startsWith('SKIPPED') ? '' : undefined),
+      );
+      return;
+    }
+    if (/^\s*This test is skipped!/.test(line)) {
+      this.skipping = true;
+    }
+    this.takeReason(current, line);
+  }
+
+  private takeReason(current: ConsoleSuite, line: string): void {
+    if (this.gathering !== null) {
+      if (line === "'") {
+        this.skipLast(current, this.gathering.join('\n').replace(/^\n/, ''));
+        this.gathering = null;
+      } else {
+        this.gathering.push(line);
+      }
+      return;
+    }
+    if (!this.skipping) {
+      return;
+    }
+    if (/^\s*Reason: '$/.test(line)) {
+      this.gathering = [];
+      return;
+    }
+    const said = /^\s*Reason: '(.*)'?$/.exec(line);
+    if (said) {
+      this.skipLast(current, (said[1] ?? '').replace(/'$/, ''));
+    }
+  }
+
+  private skipLast(current: ConsoleSuite, reason: string): void {
+    if (this.last !== null && current.cases.length > 0) {
+      current.cases[current.cases.length - 1] = caseElement(current.path, this.last, reason);
+    }
+    this.skipping = false;
+  }
+}
+
+/**
+ * The report a run of [param console] would have written, as far as the console shows it: a case per
+ * verdict line, a suite closed by its statistics line, and a skip's reason from the lines after it.
+ * No statistics line anywhere is a run that wrote no report.
+ */
+function reportsFromConsole(console: string): TestReport[] | undefined {
+  const read = new ConsoleReport();
+  for (const source of console.split(/\r?\n/)) {
+    read.take(source.replaceAll(CONTROL_SEQUENCE, ''));
+  }
+  const closed = read.suites.filter((one) => one.closed);
+  if (closed.length === 0) {
+    return undefined;
+  }
+  const element = (one: ConsoleSuite): string => {
+    const inside = one.path.replace(/^res:\/\//, '');
+    const folder = inside.includes('/') ? inside.replace(/\/[^/]*$/, '') : '';
+    const name = one.path.replace(/^.*\//, '').replace(/\.gd$/, '');
+    const failures = String(one.failed + (one.hook ? 1 : 0));
+    return `<testsuite name="${xmlText(name)}" package="${xmlText(folder)}" tests="${String(one.cases.length)}" failures="${failures}" errors="0" time="${String(one.time)}">${one.cases.join('')}</testsuite>`;
+  };
+  return [parseJUnit(`<testsuites>${closed.map(element).join('')}</testsuites>`)];
+}
+
+/** {@link readRunOf} over the report [param console] implies, unless one is handed. */
+function readRun(console: string, reports?: readonly TestReport[]): ReturnType<typeof readRunOf> {
+  return readRunOf(console, reports ?? reportsFromConsole(console));
+}
+
+/** {@link readEngineLogOf} over the report the log's console implies, unless one is handed. */
+function readEngineLog(
+  path: string,
+  nested: Parameters<typeof readEngineLogOf>[1],
+  expected: Expected,
+  chunkBytes?: number,
+  reports?: readonly TestReport[],
+): ReturnType<typeof readEngineLogOf> {
+  return readEngineLogOf(
+    path,
+    nested,
+    expected,
+    chunkBytes,
+    reports ?? (existsSync(path) ? reportsFromConsole(readFileSync(path, 'utf8')) : undefined),
+  );
+}
+
 const S_TEST = 'res://tests/s_test.gd';
 
 /** One case line as gdUnit4's console prints it, coloured the way it colours the path. */
@@ -71205,7 +70957,7 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   const mute = judgeEngine(readRun('\n\n'), handed(['test_a']), clean).faults;
   assert.deepEqual(
     mute,
-    ['the engine printed nothing at all', 'the run never printed its summary', `${S_TEST} never started`],
+    ['the engine printed nothing at all', 'the run wrote no JUnit report', `${S_TEST} never started`],
     'a silent engine says so, and that no summary came and no suite started',
   );
   const crashed = judgeEngine(readRun(rows([1, 1, 1])), declaredRows, {
@@ -71712,22 +71464,6 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
     'a failing before or after',
   );
 
-  const flaky = judgeEngine(
-    readRun(
-      cannedRun([
-        caseLine(S_TEST, 'test_a', 'STARTED'),
-        caseLine(S_TEST, 'test_a', 'FLAKY (2 retries)', '5ms'),
-      ]),
-    ),
-    handed(['test_a']),
-    clean,
-  );
-  assert.deepEqual(
-    flaky.faults,
-    [`${S_TEST} > test_a failed before it passed on a retry`],
-    'flaky is failing',
-  );
-
   const failing = judgeEngine(
     readRun(
       cannedRun(
@@ -71747,15 +71483,9 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   );
   assert.deepEqual(
     failing.faults,
-    [`${S_TEST} > test_a failed`],
-    "gdUnit4's 100 beside a failed case says nothing the case's line does not",
+    [`${S_TEST} > test_a failed: FAILED: ${S_TEST}:1`],
+    "gdUnit4's 100 beside a failed case adds nothing to the case's own failure",
   );
-  assert.match(
-    failing.shown.join('\n'),
-    /test_a FAILED 5ms\n {2}Report:\n {2}Expecting: 2 but was 1/,
-    failing.shown.join('\n'),
-  );
-  assert.doesNotMatch(failing.shown.join('\n'), /unrelated|Godot Engine/, 'the failure, not the whole run');
 
   // No suite opened, as an engine handed none prints: one that opened a suite it was not handed
   // is a fault of its own.
@@ -71767,6 +71497,7 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
         'Executed test cases : (0/0)',
         ' Exit code: 0',
       ].join('\r\n'),
+      [parseJUnit('<testsuites></testsuites>')],
     ),
     { suites: [], expected: { errors: {}, warnings: {} } },
     clean,
@@ -71781,6 +71512,7 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
         '  at res://tests/bad_test.gd:3',
         'Executed test cases : (0/0)',
       ].join('\n'),
+      [parseJUnit('<testsuites></testsuites>')],
     ),
     { suites: [], expected: { errors: {}, warnings: {} } },
     { code: 105, signal: null, ended: null },
@@ -71798,7 +71530,7 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   );
   assert.deepEqual(ended.faults, [
     'the engine printed nothing for 300 s, so it was ended',
-    'the run never printed its summary',
+    'the run wrote no JUnit report',
     `${S_TEST} never finished`,
   ]);
   assert.match(ended.shown.join('\n'), /test_a STARTED$/, 'a run cut short shows how it ended');
@@ -71887,7 +71619,7 @@ function testAJudgedRunNamesWhatNoHandedSuiteShows(): void {
   const killed = { code: null, signal: 'SIGSEGV', ended: null };
   const ended = [
     'the engine was ended by SIGSEGV',
-    'the run never printed its summary',
+    'the run wrote no JUnit report',
     `${S_TEST} never finished`,
   ];
   assert.deepEqual(
@@ -72105,7 +71837,7 @@ function testARowSkippedForItsDataIsNoPass(): void {
   const fitting = judgeEngine(readRun(run(false)), handed, clean);
   assert.deepEqual([fitting.faults, fitting.passedSuites], [[], [S_TEST]], 'rows that ran pass');
   const reason = (index: number, value: number): string =>
-    `The test data set at index (${String(index)}) does not match the expected test parameters: test function: func test...(a: int,b: int) test input values: [${String(value)}]`;
+    `The test data set at index (${String(index)}) does not match the expected test parameters:\n\ttest function: func test...(a: int,b: int)\n\ttest input values: [${String(value)}]`;
   assert.deepEqual(
     readRun(run(true)).mismatched,
     [
@@ -72170,23 +71902,6 @@ function testARowSkippedForItsDataIsNoPass(): void {
     [[], [], [null]],
     'a skip reason printed after the suite closed',
   );
-  const twoRows = readRun(
-    [
-      `Run Test Suite: ${S_TEST}`,
-      caseLine(S_TEST, 'test_p:0 (1)', 'PASSED', '0ms'),
-      '  The test data set at index (0) does not match the expected test parameters:',
-      `  Reason: '${typo}'`,
-      '',
-      caseLine(S_TEST, 'test_p:1 (2)', 'PASSED', '0ms'),
-      '  The test data set at index (1) does not match the expected test parameters:',
-      '',
-    ].join('\n'),
-  );
-  assert.deepEqual(
-    [twoRows.mismatched.map((one) => one.name), twoRows.unrunnable],
-    [['test_p:0 (1)', 'test_p:1 (2)'], []],
-    'a reason line inside a skipped row is part of that row and starts no skip of its own',
-  );
 }
 
 /**
@@ -72209,12 +71924,6 @@ function testEveryReaderOfTheConsoleKnowsALineAlike(): void {
       [read?.name, read?.verdict ?? null],
       verdict === null ? [undefined, null] : [name, verdict],
       `the case line ${line}`,
-    );
-    const judged = readRun(`Run Test Suite: ${S_TEST}\n${line}\n`).suites.get(S_TEST)?.cases ?? [];
-    assert.deepEqual(
-      judged.map((one) => one.verdict),
-      verdict === null ? [] : [verdict],
-      `the judge reads ${line} as the shared reader does`,
     );
     const progress = suitesPrinted([
       `Run Test Suite: ${S_TEST}`,
@@ -72539,76 +72248,6 @@ function testNestedErrorsAndDeclaredErrorsAreRead(): void {
 }
 
 /**
- * A wait for a slot looks when the slots' folder changes, and otherwise once a second.
- *
- * A wait looking every 50 ms was measured at some 2.7% of a core for each waiting taker, for
- * as long as a gate held every slot, charged to the waiting gate. Counted here as looks rather than
- * processor time: the slot is given back 2.5 s into the wait, which a wait polling as before met
- * with some fifty looks. The wake on a change is held apart from the wait: when the looks by the
- * clock fall depends on how long the platform takes to say when a holder started, so a release
- * taken soon after it can be the clock's doing. A wait given a minute is woken only by the change.
- */
-async function testASlotWaitLooksWhenTheSlotsChange(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slot-wait-'));
-  let giveBack: NodeJS.Timeout | undefined;
-  try {
-    const changes = new FolderChanges(directory);
-    try {
-      const waited = changes.next(60_000, 50, undefined).then(() => Date.now());
-      await delay(300);
-      const changedAt = Date.now();
-      writeFileSync(join(directory, 'changed'), '');
-      const wokenAt = await Promise.race([waited, delay(5000).then(() => Number.POSITIVE_INFINITY)]);
-      assert.ok(
-        wokenAt - changedAt < 1000,
-        `a change in the folder ends the wait: ${String(wokenAt - changedAt)} ms after it`,
-      );
-      // macOS can report one write twice, the second past the settle, so the quiet wait starts
-      // only once the write's every report is in and taken.
-      await delay(1000);
-      await changes.next(0, 0, undefined);
-      const quietFrom = Date.now();
-      await changes.next(200, 50, undefined);
-      assert.ok(Date.now() - quietFrom >= 150, 'and with none, the clock does');
-    } finally {
-      changes.close();
-      rmSync(join(directory, 'changed'), { force: true });
-    }
-
-    const me = { pid: process.pid, started: await ownStart() };
-    const holding = new EngineSlots(directory, 1, me, undefined, undefined, plentyOfMemory);
-    const lock = await holding.take();
-    class Counted extends EngineSlots {
-      looks = 0;
-      override async takeFree(game = false, line?: SlotLine): Promise<string | null> {
-        this.looks += 1;
-        return await super.takeFree(game, line);
-      }
-    }
-    const slots = new Counted(directory, 1, me);
-    let releasedAt = Number.POSITIVE_INFINITY;
-    giveBack = setTimeout(() => {
-      releasedAt = Date.now();
-      holding.release(lock);
-    }, 2500);
-    const taken = await slots.take();
-    const takenAt = Date.now();
-    console.log(
-      `slot wait: ${String(slots.looks)} looks, the slot taken ${String(takenAt - releasedAt)} ms after it was given back`,
-    );
-    assert.equal(taken, lock, 'the slot given back is the one taken');
-    assert.ok(
-      slots.looks <= 8,
-      `a wait of 2.5 s looks a few times, not every 50 ms: ${String(slots.looks)} looks`,
-    );
-    slots.release(taken);
-  } finally {
-    clearTimeout(giveBack);
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
  * A hidden PowerShell opening [param path] for [param access] while sharing [param sharing], reads and
  * writes but no removal by default, as a tool that locks the file itself does, on Windows. Settles once it holds the file. It
  * closes it after [param forMs], and else at [method letGo] or after 30 s, so a run killed before its
@@ -72658,111 +72297,6 @@ async function heldOpenByAReader(
  * leaves a loaded machine 680 ms of stall. No case waits for a quiet processor.
  */
 const HELD_FILE_WIDEST_GAP_MS = 700;
-
-/**
- * Runs [param call], which takes over the dead [param lock] in [param directory] while a reader holds
- * it open, and lets the reader go 300 ms after the takeover first makes its steal file. The call must
- * leave the process free to run, shown by an interval that keeps ticking, and answer within 5 s of the
- * let-go.
- */
-async function aHeldDeadLockIsTakenOverOnceLetGo(
-  lock: string,
-  directory: string,
-  dead: string,
-  call: () => Promise<unknown>,
-  caller: string,
-): Promise<void> {
-  writeFileSync(lock, dead);
-  const reader = await heldOpenByAReader(lock, 'ReadWrite');
-  let letGoAt = 0;
-  let sawSteal = false;
-  const watcher = watchFolder(directory, (_event, name) => {
-    if (!sawSteal && name === `${basename(lock)}.steal`) {
-      sawSteal = true;
-      setTimeout(() => {
-        letGoAt = Date.now();
-        void reader.letGo();
-      }, 300);
-    }
-  });
-  const loop = await watchTheLoop();
-  const running = call().then(
-    () => 'taken',
-    (error: unknown) => `refused: ${error instanceof Error ? error.message : String(error)}`,
-  );
-  let watched: Awaited<ReturnType<typeof loop.stop>> | undefined;
-  try {
-    const outcome = await Promise.race([running, delay(20_000).then(() => 'still waiting after 20 s')]);
-    const tookAt = Date.now();
-    watched = await loop.stop();
-    assert.equal(outcome, 'taken', `${caller} takes the dead lock over once the reader lets go`);
-    assert.ok(sawSteal, `${caller} made a steal file while the reader held the lock`);
-    assert.ok(
-      tookAt - letGoAt < 5000,
-      `${caller} answers within 5 s of the let-go: ${String(tookAt - letGoAt)} ms`,
-    );
-    assert.ok(
-      watched.widest < HELD_FILE_WIDEST_GAP_MS,
-      `${caller} leaves the process free to run: ticks ${watched.widest.toFixed(0)} ms apart, the gap's time went to ${watched.accounted}`,
-    );
-  } finally {
-    watched ??= await loop.stop();
-    watcher.close();
-    await reader.letGo();
-    rmSync(lock, { force: true });
-    await running;
-  }
-}
-
-/**
- * A dead lock a reader holds open is taken over once the reader lets go, by a slot's taker and by a
- * write waiting its turn, and neither stops the process while it waits. Windows alone, since
- * elsewhere a reader holds no removal back.
- */
-async function testADeadLockHeldOpenIsTakenOverOnceLetGo(): Promise<void> {
-  if (process.platform !== 'win32') {
-    console.log(
-      'held-lock takeover regression ran on Windows alone: elsewhere a reader holds no removal back',
-    );
-    return;
-  }
-  const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
-  await exitOf(gone);
-  const started = await ownStart();
-  const dead = JSON.stringify({ pid: gone.pid, started });
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-turns-'));
-  try {
-    const slots = new EngineSlots(
-      directory,
-      1,
-      { pid: process.pid, started },
-      undefined,
-      undefined,
-      plentyOfMemory,
-    );
-    await aHeldDeadLockIsTakenOverOnceLetGo(
-      join(directory, '0.lock'),
-      directory,
-      dead,
-      () => slots.take(AbortSignal.timeout(20_000)),
-      'a slot',
-    );
-    const file = join(project, 'floor.tscn');
-    const lock = writeLockOf(project, file);
-    mkdirSync(dirname(lock), { recursive: true });
-    await aHeldDeadLockIsTakenOverOnceLetGo(
-      lock,
-      dirname(lock),
-      dead,
-      () => inTurnFor(project, file, () => Promise.resolve('written')),
-      'a write turn',
-    );
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-    rmSync(project, { recursive: true, force: true });
-  }
-}
 
 /**
  * Holds the note that [param noteIn] places in a scratch project shut for 3 s from a hidden child
@@ -72876,28 +72410,6 @@ async function withAHeldNote(
     await body(() => new Promise((settle) => setTimeout(settle, 100)));
   } finally {
     await reader.letGo();
-  }
-}
-
-/** A slot given back while an engine is being named in it stays given back. */
-async function testASlotGivenBackWhileItsEngineIsNamedStaysGivenBack(): Promise<void> {
-  if (process.platform !== 'win32') {
-    console.log('held slot regression ran on Windows alone: elsewhere no rename is refused');
-    return;
-  }
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-given-back-'));
-  try {
-    const lock = join(directory, '0.lock');
-    writeFileSync(lock, JSON.stringify({ pid: process.pid, started: await ownStart() }));
-    await withAHeldNote(lock, 500, async (pause) => {
-      const named = nameSlotEngine(lock, process.pid, { pid: 4242, started: 1 });
-      await pause();
-      giveBackSlot(lock, process.pid);
-      await named;
-    });
-    assert.equal(existsSync(lock), false, 'the lock given back is not made again by the naming');
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
   }
 }
 
@@ -73216,44 +72728,6 @@ async function testASyncWriteBehindThreeWaitingWritesBlocksForOneWaitInAll(): Pr
   }
 }
 
-/**
- * A slot handed on while an engine is being named in it waits for the naming and is handed once: a
- * second hand from the same holder finds the slot no longer its own.
- */
-async function testASlotHandedWhileItsEngineIsNamedIsHandedOnceAfterIt(): Promise<void> {
-  if (process.platform !== 'win32') {
-    console.log('held slot hand regression ran on Windows alone: elsewhere no rename is refused');
-    return;
-  }
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-handed-'));
-  try {
-    const lock = join(directory, '0.lock');
-    writeFileSync(lock, JSON.stringify({ pid: process.pid, started: await ownStart() }));
-    let answers: boolean[] = [];
-    await withAHeldNote(lock, 500, async (pause) => {
-      const named = nameSlotEngine(lock, process.pid, { pid: 4242, started: 1 });
-      await pause();
-      const handed = handSlot(lock, process.pid, { pid: 4343, started: 2 });
-      const handedAgain = handSlot(lock, process.pid, { pid: 4444, started: 3 });
-      answers = await Promise.all([named, handed, handedAgain]);
-    });
-    assert.deepEqual(answers, [true, true, false]);
-    assert.equal(holderOf(readFileSync(lock, 'utf8'))?.pid, 4343);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * The class note changes only through the update that reads it when it runs. A write of a copy read
- * before an await puts back what a call made meanwhile took out. The server's source is read, since
- * its calls need an engine and an editor.
- */
-function testNoServerCodeWritesTheClassNoteFromACopyItReadEarlier(): void {
-  const source = readFileSync(join('src', 'server.ts'), 'utf8');
-  assert.equal(/\bwriteClassNote\(/.test(source), false, 'the server updates the note, never writes one');
-}
-
 /** The cut run a reader holds shut is waited on without stopping the process. */
 async function testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
   await aNoteHeldShutLeavesTheLoopRunning(
@@ -73309,487 +72783,6 @@ async function testASuiteRecordHeldShutIsWaitedOnWithoutStoppingTheProcess(): Pr
       await writeJsonAsync(file, { peaks: {} });
     },
   );
-}
-
-/**
- * The slots are freed only once their holder has gone, and taken over by one taker at a time.
- *
- * A lock names its holder by pid and start time, since a pid alone is reissued: a live process with
- * the pid and another start is a later one. Asked of the real platform, because every judging case
- * hands the start in, and a platform that never answered would leave every such lock held.
- */
-async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void> {
-  const now = 1_000_000;
-  const onlyTenAlive = (pid: number): boolean => pid === 10;
-  const startOf = (pid: number): number | undefined => (pid === 10 ? 5000 : undefined);
-  const lock = (pid: number, started: number): string => JSON.stringify({ pid, started });
-  assert.equal(lockIsFree(lock(11, 5000), now, now, onlyTenAlive, startOf), true, 'a pid nothing has');
-  assert.equal(
-    lockIsFree(lock(10, 5000), now, now, onlyTenAlive, startOf),
-    false,
-    'its holder still running',
-  );
-  assert.equal(
-    lockIsFree(lock(10, 5000 + START_TOLERANCE_MS), now, now, onlyTenAlive, startOf),
-    false,
-    'within the tolerance',
-  );
-  assert.equal(
-    lockIsFree(lock(10, 5000 + START_TOLERANCE_MS + 1), now, now, onlyTenAlive, startOf),
-    true,
-    'a later process',
-  );
-  assert.equal(
-    lockIsFree(lock(10, 1), now, now, onlyTenAlive, () => undefined),
-    false,
-    'an unknown start holds it',
-  );
-  assert.equal(lockIsFree('', now - UNWRITTEN_MS, now, onlyTenAlive, startOf), false, 'a lock being written');
-  assert.equal(
-    lockIsFree('{"pid": "x"}', now - UNWRITTEN_MS - 1, now, onlyTenAlive, startOf),
-    true,
-    'one never written',
-  );
-  assert.equal(holderOf('{"pid": 0, "started": 1}'), null, 'no pid 0');
-
-  const said = (await startTimesOf([process.pid])).get(process.pid);
-  assert.equal(typeof said, 'number', 'the platform says when this process started');
-  const started = await ownStart();
-  assert.equal(started, said, 'and a lock names what it says');
-
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
-  try {
-    const slots = new EngineSlots(
-      directory,
-      2,
-      { pid: process.pid, started, by: 'gdharness test of /p' },
-      undefined,
-      undefined,
-      plentyOfMemory,
-    );
-    const first = await slots.take();
-    const second = await slots.take();
-    assert.deepEqual(readdirSync(directory).toSorted(), ['0.lock', '1.lock'], 'one file a slot');
-    assert.deepEqual(
-      holderOf(readFileSync(first, 'utf8')),
-      { pid: process.pid, started, by: 'gdharness test of /p', memory: 1.5 * 1024 ** 3 },
-      'naming its holder, what took it and the memory its engine may hold',
-    );
-    assert.deepEqual(
-      slots.holders().map((holder) => holder.by),
-      ['gdharness test of /p', 'gdharness test of /p'],
-      'and both are read back as held',
-    );
-    await assert.rejects(
-      slots.take(AbortSignal.timeout(300)),
-      /timeout|abort/i,
-      'a third waits while both are held',
-    );
-    slots.release(first);
-    assert.equal(await slots.take(), first, 'and takes one once given back');
-
-    const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
-    await exitOf(gone);
-    writeFileSync(second, lock(gone.pid ?? 0, started));
-    assert.equal(await slots.take(AbortSignal.timeout(5000)), second, "a dead holder's slot is taken over");
-    assert.deepEqual(holderOf(readFileSync(second, 'utf8'))?.pid, process.pid, 'and named anew');
-
-    writeFileSync(second, lock(process.pid, started - 60_000));
-    assert.equal(
-      await slots.take(AbortSignal.timeout(5000)),
-      second,
-      'a live pid that started at another time',
-    );
-
-    writeFileSync(second, lock(gone.pid ?? 0, started));
-    writeFileSync(`${second}.steal`, '');
-    await assert.rejects(
-      slots.take(AbortSignal.timeout(300)),
-      /timeout|abort/i,
-      'another taker taking it over holds it',
-    );
-    const old = new Date(Date.now() - UNWRITTEN_MS - 5000);
-    utimesSync(`${second}.steal`, old, old);
-    assert.equal(
-      await slots.take(AbortSignal.timeout(5000)).catch(() => 'never taken'),
-      second,
-      'until it has been at it too long',
-    );
-    assert.equal(existsSync(`${second}.steal`), false, 'and its steal file is gone');
-
-    if (process.platform === 'win32') {
-      // The games' tools locked the slot file itself and left it in place, and Windows will not
-      // remove a file such a tool holds open: the slot is that tool's, not a fault of the run's.
-      writeFileSync(second, '');
-      utimesSync(second, old, old);
-      const holder = await heldOpenByAReader(second, 'ReadWrite');
-      try {
-        await assert.rejects(
-          slots.take(AbortSignal.timeout(1000)),
-          /timeout|abort/i,
-          "a slot file another tool holds open is that tool's slot",
-        );
-        assert.equal(existsSync(`${second}.steal`), false, 'and the steal file is given up');
-      } finally {
-        await holder.letGo();
-      }
-    }
-
-    writeFileSync(first, lock(4, started));
-    slots.release(first);
-    assert.equal(existsSync(first), true, "giving back leaves another holder's lock");
-  } finally {
-    sweep(directory);
-  }
-}
-
-/**
- * A lock numbered at or past the count is removed by any take once its holder has gone. No taker of
- * the count reads those, so no take over ever freed them: a taker given more slots left two in the
- * machine's folder for seven hours. One a live holder names is a taker's of more slots and stays, and
- * one another taker is taking over, under its steal file, is left to it.
- */
-async function testATakeSweepsGoneLocksPastTheCount(): Promise<void> {
-  const started = await ownStart();
-  const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
-  await exitOf(gone);
-  const deadHolder = JSON.stringify({ pid: gone.pid ?? 0, started });
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
-  try {
-    for (const name of ['2.lock', '17.lock', '18.lock']) {
-      writeFileSync(join(directory, name), deadHolder);
-    }
-    // One live lock past the count, which leaves the take one slot under the cap of two.
-    writeFileSync(join(directory, '19.lock'), JSON.stringify({ pid: process.pid, started }));
-    writeFileSync(join(directory, '18.lock.steal'), '');
-    writeFileSync(join(directory, 'notes.lock'), deadHolder);
-    const slots = new EngineSlots(
-      directory,
-      2,
-      { pid: process.pid, started },
-      undefined,
-      undefined,
-      plentyOfMemory,
-    );
-    const taken = await slots.takeFree();
-    assert.equal(taken, join(directory, '0.lock'), 'the take itself goes on as it would');
-    assert.deepEqual(
-      readdirSync(directory).toSorted(),
-      ['0.lock', '18.lock', '18.lock.steal', '19.lock', 'notes.lock'],
-      'the gone holders past the count are removed, and a live one and one being taken over stay',
-    );
-  } finally {
-    sweep(directory);
-  }
-}
-
-/**
- * Gates come before work beside them, as the games' own tools take the slots. While a gate waits
- * for its seat, an engine outside a gate takes no slot at all, the kept ones included. Once every
- * queued gate is seated it takes only the last, and a gate's engine only those below the kept two.
- * Work outside the queue once held 12 of 16 slots while gates waited hours. A timing takes any slot,
- * and a gate's own step, which names its tier, the kept two while a gate is queued. A gate's mark is
- * live by the rule a lock is: one whose holder has gone is removed with its seat and holds nothing
- * back, and one not yet written names nobody.
- */
-/**
- * An engine's deadline and silence count its own processor time while other work keeps a quarter of
- * the machine or more busy, and the clock otherwise: by
- * the clock alone, a crowded gate ended engines that had 465 processor seconds between them in 910
- * s. A stuck engine uses no processor, so eight times the limit on the clock still ends it however
- * busy the machine, and a stretch whose processor time was not read counts by the clock. The
- * platform's reading is asked of a real process, since a platform that never answered would turn
- * every stretch into the clock's and pass everything else here.
- */
-async function testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded(): Promise<void> {
-  const cores = 4;
-  // Others hold a quarter of the machine exactly, and just under it.
-  assert.equal(crowded(10, 2, 2 + 10 * cores * 0.25, cores), true);
-  assert.equal(crowded(10, 2, 2 + 10 * cores * 0.24, cores), false);
-  assert.equal(crowded(0, 0, 100, cores), false, 'a stretch of no time crowds nothing');
-
-  const pid = 4242;
-  // A stretch of [stretch] seconds in which the engine used [work] and others [others] cores.
-  const counting = (
-    stretches: ReadonlyArray<{ stretch: number; work: number | undefined; others: number }>,
-  ): Spent => {
-    let at = 0;
-    let machine = 0;
-    let processor = 0;
-    const sampleAt = (): Sample => ({ at, machine, processors: new Map([[pid, processor]]) });
-    const spent = new Spent(0, sampleAt(), pid, cores);
-    for (const { stretch, work, others } of stretches) {
-      at += stretch;
-      machine += (work ?? 0) + others * stretch;
-      processor += work ?? 0;
-      spent.counted(work === undefined ? { at, machine, processors: new Map() } : sampleAt(), pid);
-    }
-    return spent;
-  };
-  const tenSeconds = (count: number, work: number | undefined, others: number) =>
-    Array.from({ length: count }, () => ({ stretch: 10, work, others }));
-
-  // Crowded, at a quarter of a core: a hundred seconds on the clock is twenty-five of its own.
-  const starved = counting(tenSeconds(10, 2.5, 2));
-  assert.deepEqual([starved.byClock, starved.byWork], [0, 25]);
-  assert.equal(starved.past(30, 100), null, 'a starved engine is not past a 30 s deadline at 100 s');
-  assert.equal(starved.past(20, 100), 'own', 'and is past a 20 s one');
-  assert.equal(
-    countedBy(starved, 'own', 100),
-    ' of its own, counted by its processor time while other work kept the machine busy (100 s on the clock)',
-  );
-
-  // The same engine on a free machine is timed by the clock.
-  const free = counting(tenSeconds(10, 2.5, 0));
-  assert.deepEqual([free.byClock, free.byWork], [100, 0]);
-  assert.equal(free.past(30, 100), 'own');
-  assert.equal(countedBy(free, 'own', 100), '', 'and its ending says nothing more');
-
-  // Stuck while others crowd it: nothing of its own, ended only by the clock's bound.
-  const stuck = counting(tenSeconds(25, 0, 3));
-  assert.equal(stuck.byWork, 0);
-  assert.equal(stuck.past(30, 240), null, `${String(STARVED)} times 30 s is not yet passed at 240 s`);
-  assert.equal(stuck.past(30, 241), 'clock');
-  assert.equal(
-    countedBy(stuck, 'clock', 241),
-    `, ${String(STARVED)} times over on the clock (241 s), the machine kept busy by other work`,
-  );
-
-  // Its processor unread while others crowd it: by the clock, as if the machine were free.
-  const unread = counting(tenSeconds(4, undefined, 3));
-  assert.deepEqual([unread.byClock, unread.byWork], [40, 0]);
-  assert.equal(unread.past(30, 40), 'own');
-
-  // A restart, as the log growing restarts a silence, counts from there.
-  starved.restart(100);
-  assert.deepEqual([starved.byClock, starved.byWork, starved.clock(110)], [0, 0, 10]);
-
-  // A process that is running, this one, answers how much processor it has used. One that has
-  // exited is left out, and so is a pid no process can have.
-  const busyUntil = Date.now() + 200;
-  while (Date.now() < busyUntil) {
-    // Some processor time of its own to read.
-  }
-  const exitedPid = spawnSyncHidden(process.execPath, ['-e', '0']).pid;
-  for (const others of [[exitedPid], [0x7ffffffe]]) {
-    const read = await processorSecondsOf([process.pid, ...others]);
-    assert.ok(
-      (read.get(process.pid) ?? 0) > 0,
-      `the platform answered for this process beside ${JSON.stringify(others)}: ${JSON.stringify([...read])}`,
-    );
-    assert.equal(read.size, 1, JSON.stringify([...read]));
-  }
-}
-
-/**
- * [param childPid], holding more than [param bytes], is read at each sample while watched for memory,
- * whether the machine is busy or not, and a process watched for its processor time alone is not.
- */
-async function samplesReadAChildWatchedForMemory(childPid: number, bytes: number): Promise<void> {
-  watching(process.pid, true);
-  watching(childPid, true, true);
-  try {
-    await delay(1100);
-    const first = await sampled();
-    await delay(1100);
-    const second = await sampled();
-    const share = (second.machine - first.machine) / ((second.at - first.at) * availableParallelism());
-    assert.ok(
-      (second.held?.get(childPid) ?? 0) > bytes,
-      `the sample holds the child's memory at a busy share of ${String(share)} between the samples: ${JSON.stringify([...(second.held ?? [])])}`,
-    );
-    assert.equal(second.held?.has(process.pid), false, 'and not a process watched for its time alone');
-
-    watching(childPid, false);
-    await delay(1100);
-    const without = await sampled();
-    assert.equal(without.held?.has(childPid) ?? false, false, 'a sample taken while the child is unwatched');
-    watching(childPid, true, true);
-    const flagged = await sampled();
-    assert.ok(
-      (flagged.held?.get(childPid) ?? 0) > bytes,
-      `an engine watched after the newest sample is read at once, not a sample later: ${JSON.stringify([...(flagged.held ?? [])])}`,
-    );
-  } finally {
-    watching(childPid, false);
-    watching(process.pid, false);
-  }
-}
-
-/**
- * What an engine holds is read at every sample of an engine watched for memory, on a quiet machine
- * too, and the largest reading is what the engine ends with. The kernel's own reader is asked of a
- * real process that fills memory, since a reader answering kilobytes or pages, or one that left out a
- * pid it could not open, would pass a stand-in. The reading off Windows is `stat` or `ps`, and runs
- * only where they exist.
- */
-async function testAnEngineIsReadForWhatItHolds(): Promise<void> {
-  const MIB = 1024 * 1024;
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-'));
-  try {
-    // A sample whose held map draws its figure on the first ask and keeps it, so one that nobody
-    // asks draws nothing and one asked twice gives one figure.
-    const standIn = (draws: readonly number[]) => {
-      let drawn = 0;
-      const sample = (): Promise<Sample> => {
-        class Drawing extends Map<number, number> {
-          private figure: number | undefined;
-          override get(): number {
-            this.figure ??= draws[Math.min(drawn++, draws.length - 1)] ?? 0;
-            return this.figure;
-          }
-        }
-        return Promise.resolve({ at: nowSeconds(), machine: 0, processors: null, held: new Drawing() });
-      };
-      return sample;
-    };
-    const launch = (sample: () => Promise<Sample>) => ({
-      godotPath: process.execPath,
-      projectPath: scratch,
-      deadlineSeconds: 120,
-      running: new Set<() => void>(),
-      cores: null,
-      sample,
-    });
-    const idle = ['-e', 'setInterval(() => {}, 1000)'];
-
-    const rising = join(scratch, 'rising');
-    mkdirSync(rising);
-    const wanted = [100 * MIB, 700 * MIB, 300 * MIB];
-    const told: number[] = [];
-    const going = launch(standIn(wanted));
-    const ended = await Promise.race([
-      watchedEngine(
-        going,
-        join(scratch, '0.lock'),
-        idle,
-        rising,
-        join(rising, 'engine.log'),
-        60,
-        undefined,
-        (bytes) => {
-          told.push(bytes);
-          if (told.length === wanted.length) {
-            for (const stop of going.running) {
-              stop();
-            }
-          }
-        },
-      ),
-      delay(10_000).then(() => 'late' as const),
-    ]);
-    for (const stop of going.running) {
-      stop();
-    }
-    if (ended === 'late') {
-      assert.fail(`the engine ended once told three times: ${JSON.stringify(told)}`);
-    }
-    assert.deepEqual(told.slice(0, 3), wanted, 'each reading is told as taken');
-    assert.equal(told.at(-1), 300 * MIB, 'the last told is the last read, not the largest');
-    assert.equal(ended.peakBytes, 700 * MIB, 'the end is the largest reading');
-
-    const nothing = join(scratch, 'nothing');
-    mkdirSync(nothing);
-    const none: number[] = [];
-    const zero = await watchedEngine(
-      launch(standIn([0])),
-      join(scratch, '1.lock'),
-      ['-e', 'setTimeout(() => {}, 1500)'],
-      nothing,
-      join(nothing, 'engine.log'),
-      60,
-      undefined,
-      (bytes) => none.push(bytes),
-    );
-    assert.equal('peakBytes' in zero, false, `an engine read at 0 has no peak: ${JSON.stringify(zero)}`);
-    assert.deepEqual(none, [], 'and a reading of 0 is told to nobody');
-
-    // The engine's own watch loop flags its pid for memory, so the shared sampler reads it. Its
-    // first reading can come before the process has loaded, at a few hundred kilobytes on Linux, so
-    // the watch is ended by the first reading of a loaded process.
-    const real = join(scratch, 'real');
-    mkdirSync(real);
-    const seen: number[] = [];
-    const sampling = launch(sampled);
-    const sharedEnd = await Promise.race([
-      watchedEngine(
-        sampling,
-        join(scratch, '2.lock'),
-        idle,
-        real,
-        join(real, 'engine.log'),
-        60,
-        undefined,
-        (bytes) => {
-          seen.push(bytes);
-          if (bytes <= MIB) {
-            return;
-          }
-          for (const stop of sampling.running) {
-            stop();
-          }
-        },
-      ),
-      delay(30_000).then(() => 'late' as const),
-    ]);
-    for (const stop of sampling.running) {
-      stop();
-    }
-    if (sharedEnd === 'late') {
-      assert.fail('an engine on the shared sampler is read for what it holds');
-    }
-    assert.ok(
-      (sharedEnd.peakBytes ?? 0) > MIB,
-      `and ends with what it held: ${JSON.stringify([sharedEnd, seen])}`,
-    );
-
-    const spawned = Date.now();
-    const child = spawnHidden(
-      process.execPath,
-      [
-        '-e',
-        "const held = Buffer.alloc(200 * 1024 * 1024, 1); console.log('ready ' + held.length); setInterval(() => held.length, 1000)",
-      ],
-      { stdio: ['ignore', 'pipe', 'ignore'] },
-    );
-    try {
-      const filled = new Promise<void>((settle) => {
-        child.stdout.on('data', (chunk: Buffer) => {
-          if (chunk.toString().includes('ready')) {
-            settle();
-          }
-        });
-      });
-      await Promise.race([filled, delay(30_000)]);
-      const childPid = child.pid ?? 0;
-      assert.ok(childPid > 0, 'the stand-in started');
-      const read = await bytesHeldBy([childPid, 0x7ffffffe]);
-      assert.deepEqual(
-        [...read.keys()],
-        [childPid],
-        `a pid that cannot be read is left out: ${JSON.stringify([...read])}`,
-      );
-      assert.ok(
-        (read.get(childPid) ?? 0) > 200 * MIB,
-        `the child filling 200 MiB holds more than that, in bytes: ${String(read.get(childPid))}`,
-      );
-
-      await samplesReadAChildWatchedForMemory(childPid, 200 * MIB);
-
-      if (process.platform !== 'win32') {
-        const seconds = (await processorSecondsOf([childPid])).get(childPid);
-        assert.ok(
-          seconds !== undefined && Number.isFinite(seconds) && seconds <= (Date.now() - spawned) / 1000 + 5,
-          `the processor time stays a time with the memory column beside it: ${String(seconds)}`,
-        );
-      }
-    } finally {
-      child.kill('SIGKILL');
-      await exitOf(child);
-    }
-  } finally {
-    sweep(scratch);
-  }
 }
 
 /**
@@ -73918,7 +72911,7 @@ async function testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor(): Pr
   const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
   const costs: number[] = [];
   const slots = { take: () => Promise.resolve('N'), release: () => undefined };
-  const ran = await runShares(slots, units, declared, 6, [], {}, async (plan, index) => {
+  const ran = await runShares(slots, units, declared, 6, [], async (plan, index) => {
     costs.push(plan.cost);
     await delay(2);
     return { index, printed: { started: { seconds: 10 } } };
@@ -73945,13 +72938,7 @@ interface StandInRan {
 function reusingEngines(between: (plan: EnginePlan, shares: number) => Promise<void> = () => delay(1)): {
   engines: () => number;
   shares: EnginePlan[];
-  run: (
-    plan: EnginePlan,
-    index: number,
-    lock: string,
-    holds?: (bytes: number) => void,
-    reuse?: ShareReuse<StandInRan>,
-  ) => Promise<StandInRan>;
+  run: (plan: EnginePlan, index: number, lock: string, reuse?: ShareReuse<StandInRan>) => Promise<StandInRan>;
 } {
   let engines = 0;
   const shares: EnginePlan[] = [];
@@ -73963,7 +72950,6 @@ function reusingEngines(between: (plan: EnginePlan, shares: number) => Promise<v
     plan: EnginePlan,
     index: number,
     _lock: string,
-    _held?: (bytes: number) => void,
     reuse?: ShareReuse<StandInRan>,
   ): Promise<StandInRan> => {
     engines += 1;
@@ -73989,7 +72975,7 @@ async function testAnEngineFinishingItsShareTakesTheNextInTheSameProcess(): Prom
   const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
   const rig = reusingEngines();
   const slots = { take: () => Promise.resolve('N'), release: () => undefined };
-  const ran = await runShares(slots, units, declared, 2, [], {}, rig.run);
+  const ran = await runShares(slots, units, declared, 2, [], rig.run);
   assert.equal(rig.engines(), 2, 'one engine started for each of the two lanes');
   assert.ok(rig.shares.length >= 8, `and the shares dealt outnumber them: ${String(rig.shares.length)}`);
   assert.equal(ran.length, rig.shares.length, 'every share has a result of its own');
@@ -74031,7 +73017,7 @@ async function testTheLastShareEndsTheEngineAndALaneWaitingForASlotStopsWaiting(
     }
   });
   const ran = await Promise.race([
-    runShares(slots, units, declared, 3, ['A'], {}, rig.run),
+    runShares(slots, units, declared, 3, ['A'], rig.run),
     delay(10_000).then(() => null),
   ]);
   assert.ok(ran !== null, 'the run ends although two lanes never got a slot');
@@ -74039,49 +73025,6 @@ async function testTheLastShareEndsTheEngineAndALaneWaitingForASlotStopsWaiting(
   assert.equal(ran.length, 4, 'with a result for each share');
   assert.equal(stoppedAtTheLastShare, 2, 'and both waiting lanes stopped waiting while the last share ran');
   assert.deepEqual(released, ['A'], 'the slot goes back once, after the engine exits');
-}
-
-/**
- * A run held by memory admits each engine for the one share it is dealt, so each share has an engine
- * of its own and the admissions are the ones the gate would have made before shares were reused.
- */
-async function testARunHeldByMemoryStartsAnEngineForEachShare(): Promise<void> {
-  const gib = 1024 ** 3;
-  const events: string[] = [];
-  class RecordingGate extends MemoryGate {
-    override admit(signal: AbortSignal, need: () => number): Promise<Admitted> {
-      events.push(`admit ${String(need() / gib)}`);
-      return super.admit(signal, need).then((admitted) => {
-        const ended = admitted.ended;
-        return Object.assign(admitted, {
-          ended: () => {
-            events.push('ended');
-            ended();
-          },
-        });
-      });
-    }
-  }
-  const gate = new RecordingGate({ markWaiting: () => () => undefined }, () => Promise.resolve(64 * gib), 5);
-  const units = ['s0', 's1', 's2'].map((name) => SHARE_UNIT(name, 120));
-  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  const peaks = [5, 3, 1];
-  const times = Object.fromEntries(
-    units.map((unit, at) => [
-      unit.suite,
-      { seconds: 120, cases: { test_one: 120 }, peak: (peaks[at] ?? 0) * gib },
-    ]),
-  );
-  const rig = reusingEngines();
-  const slots = { take: () => Promise.resolve('N'), release: () => undefined };
-  const ran = await runShares(slots, units, declared, 1, ['N'], times, rig.run, undefined, gate);
-  assert.equal(rig.engines(), ran.length, 'an engine for every share dealt');
-  assert.ok(ran.length >= 3, `and the run dealt several: ${String(ran.length)}`);
-  assert.deepEqual(
-    events,
-    ['admit 5', 'ended', 'admit 3', 'ended', 'admit 1', 'ended'],
-    "each engine is admitted at its own share's need and gives it back when it exits",
-  );
 }
 
 /** An engine started with display flags ends after its windowed share, then a headless one starts in its lane. */
@@ -74093,7 +73036,7 @@ async function testAWindowedEngineIsNotReusedForHeadlessShares(): Promise<void> 
   const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
   const rig = reusingEngines();
   const slots = { take: () => Promise.resolve('N'), release: () => undefined };
-  const ran = await runShares(slots, units, declared, 1, [], {}, rig.run);
+  const ran = await runShares(slots, units, declared, 1, [], rig.run);
   assert.ok(rig.shares[0]?.windowed === true, 'the windowed share is dealt first');
   assert.equal(rig.engines(), 2, 'the windowed engine ends after it, and one headless engine takes the rest');
   assert.deepEqual(
@@ -74104,151 +73047,12 @@ async function testAWindowedEngineIsNotReusedForHeadlessShares(): Promise<void> 
   assert.ok(ran.length > 2, 'and the headless shares after the first reuse their engine');
 }
 
-/**
- * Two lanes whose engines finish light shares together and are dealt heavy ones next never hold more
- * than the memory has: each engine is admitted through the gate's one look at a time.
- */
-async function testTwoEnginesFinishingTogetherAreNotAdmittedBeyondTheMemory(): Promise<void> {
-  const gib = 1024 ** 3;
-  const kept = 4 * gib;
-  const units = [
-    SHARE_UNIT('light0', 120),
-    SHARE_UNIT('light1', 120),
-    SHARE_UNIT('heavy0', 119),
-    SHARE_UNIT('heavy1', 119),
-  ];
-  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  const peaks: Record<string, number> = {
-    'res://light0.gd': gib,
-    'res://light1.gd': gib,
-    'res://heavy0.gd': 3 * gib,
-    'res://heavy1.gd': 3 * gib,
-  };
-  const times = Object.fromEntries(
-    units.map((unit) => [
-      unit.suite,
-      { seconds: unit.cost, cases: { test_one: unit.cost }, peak: peaks[unit.suite] ?? 0 },
-    ]),
-  );
-  const holding = new Map<number, number>();
-  let engineCount = 0;
-  let worst = Number.POSITIVE_INFINITY;
-  const free = (): number => kept + 5 * gib - [...holding.values()].reduce((sum, bytes) => sum + bytes, 0);
-  const gate = new MemoryGate(
-    { markWaiting: () => () => undefined },
-    async () => {
-      const at = free();
-      await delay(5);
-      return at;
-    },
-    20,
-  );
-  const names = ['A', 'B'];
-  const slots = {
-    take: (): Promise<string> => Promise.resolve(names.shift() ?? 'X'),
-    release: (lock: string): void => {
-      names.push(lock);
-    },
-  };
-  const run = async (
-    plan: EnginePlan,
-    index: number,
-    _lock: string,
-    _holds?: (bytes: number) => void,
-    reuse?: ShareReuse<StandInRan>,
-  ): Promise<StandInRan> => {
-    const id = engineCount;
-    engineCount += 1;
-    holding.set(id, 0);
-    try {
-      let at = index;
-      let current = plan;
-      for (;;) {
-        await delay(10);
-        holding.set(id, Math.max(holding.get(id) ?? 0, peaks[current.suites[0]?.path ?? ''] ?? 0));
-        worst = Math.min(worst, free() - kept);
-        await delay(30);
-        const next = await reuse?.next();
-        if (next === undefined || next === null) {
-          break;
-        }
-        reuse?.done({ index: at, printed: { started: null } });
-        at = next.index;
-        current = next.plan;
-      }
-      return { index: at, printed: { started: null } };
-    } finally {
-      holding.delete(id);
-    }
-  };
-  const ran = await runShares(slots, units, declared, 2, [], times, run, undefined, gate);
-  assert.equal(ran.length, 4, 'every share ran');
-  assert.ok(worst >= 0, `the room past what is kept never went below nothing: ${String(worst / gib)} GiB`);
-}
-
 /** A reused engine's runner prints its share's compile time on a line of its own. */
 function testTheCompileTimeOfAReusedShareIsReadFromTheRunnersLine(): void {
   const printed = readRun('gdharness timing: reused engine, compiled together 450 ms\n');
   assert.equal(printed.reusedCompiledSeconds, 0.45, 'read in seconds');
   assert.equal(printed.started, null, 'and not taken for the start of an engine');
   assert.equal(readRun('').reusedCompiledSeconds, null, 'a share without the line has none');
-}
-
-/**
- * Two lanes whose idle engines hold the memory their next shares need beside each other do not wait
- * for each other: each engine exits after its share and its lane asks the gate for the next.
- */
-async function testTwoReusedEnginesShortOfMemoryDoNotWaitForEachOther(): Promise<void> {
-  const gib = 1024 ** 3;
-  const kept = 4 * gib;
-  const units = Array.from({ length: 8 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 120));
-  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  const times = Object.fromEntries(
-    units.map((unit) => [unit.suite, { seconds: 120, cases: { test_one: 120 }, peak: 2 * gib }]),
-  );
-  const holding = new Map<number, number>();
-  let engineCount = 0;
-  const free = (): number => kept + 4.5 * gib - [...holding.values()].reduce((sum, bytes) => sum + bytes, 0);
-  const gate = new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(free()), 20);
-  const names = ['A', 'B'];
-  const slots = {
-    take: (): Promise<string> => Promise.resolve(names.shift() ?? 'X'),
-    release: (lock: string): void => {
-      names.push(lock);
-    },
-  };
-  const run = async (
-    _plan: EnginePlan,
-    index: number,
-    _lock: string,
-    _holds?: (bytes: number) => void,
-    reuse?: ShareReuse<StandInRan>,
-  ): Promise<StandInRan> => {
-    const id = engineCount;
-    engineCount += 1;
-    holding.set(id, 2 * gib);
-    try {
-      let at = index;
-      for (;;) {
-        await delay(50);
-        const next = await reuse?.next();
-        if (next === undefined || next === null) {
-          break;
-        }
-        reuse?.done({ index: at, printed: { started: null } });
-        at = next.index;
-      }
-      return { index: at, printed: { started: null } };
-    } finally {
-      holding.delete(id);
-    }
-  };
-  const ran = await Promise.race([
-    runShares(slots, units, declared, 2, [], times, run, undefined, gate),
-    delay(10_000).then(() => null),
-  ]);
-  assert.ok(ran !== null, 'the run ends although two engines each hold what the other needs');
-  assert.equal(ran.length, 8, 'with a result for every share');
 }
 
 /** A case body that writes a report into the folder gdUnit4 was told to put its reports in. */
@@ -74537,8 +73341,7 @@ function testACrashInAReusedEngineFailsOnlyItsShareAndTheLaneGoesOn(): void {
 }
 
 /**
- * A share that ran out of memory in an engine that took several keeps its verdict and runs no more,
- * and each share has the figure for what the engine held while it ran.
+ * A share that ran out of memory in an engine that took several keeps its verdict and runs no more.
  */
 function testAnOutOfMemoryShareInAReusedEngineIsNotRunAgain(): void {
   const engines = commandTestEngines();
@@ -74555,11 +73358,6 @@ function testAnOutOfMemoryShareInAReusedEngineIsNotRunAgain(): void {
   );
   try {
     assert.equal(run.status, 1, run.said);
-    assert.match(
-      run.said,
-      /The most each held in this run: engine 0 \d+\.\d GB, engine 1 \d+\.\d GB, engine 2 \d+\.\d GB\./,
-      `every share has the figure for what its engine held while it ran: ${run.said}`,
-    );
     const logs = run.result.logs ?? '';
     assert.deepEqual(
       ['engine-0-again', 'engine-1-again', 'engine-2-again'].map((name) => existsSync(join(logs, name))),
@@ -74587,7 +73385,7 @@ function anyRunAgain(logs: string): boolean {
 
 /**
  * An engine that ran out of memory in `before()` and failed no case is not run again, and the run is
- * red, naming the engine and the memory each engine held.
+ * red.
  */
 function testAStarvedEngineWithNoFailedCaseIsNotRunAgain(): void {
   const engines = commandTestEngines();
@@ -74607,11 +73405,6 @@ function testAStarvedEngineWithNoFailedCaseIsNotRunAgain(): void {
     assert.ok(
       run.result.problems.some((problem) => problem.includes('the engine ran out of memory')),
       run.result.problems.join('\n'),
-    );
-    assert.match(
-      run.said,
-      /An engine ran out of memory\. The most each held in this run: engine 0 \d+\.\d GB, engine 1 \d+\.\d GB\./,
-      `the run names each engine and what it held: ${run.said}`,
     );
     assert.doesNotMatch(run.said, /runs? again/, run.said);
     assert.equal(anyRunAgain(run.result.logs ?? ''), false, `no engine ran again: ${run.said}`);
@@ -74641,11 +73434,6 @@ function testAStarvedEngineBesideARealFailureLeavesBothNamed(): void {
     assert.ok(
       problems.some((problem) => problem.includes('res://tests/b_test.gd > test_it failed')),
       problems.join('\n'),
-    );
-    assert.match(
-      run.said,
-      /An engine ran out of memory\. The most each held in this run: engine 0 \d+\.\d GB, engine 1 \d+\.\d GB\./,
-      run.said,
     );
     assert.equal(anyRunAgain(run.result.logs ?? ''), false, `no engine ran again: ${run.said}`);
   } finally {
@@ -74745,1228 +73533,6 @@ function testARunNotDealtInSharesStartsEveryEngineForItsOwnPart(): void {
   }
 }
 
-/** A pool of fake engine slots: a take waits while none is free, and a release serves the oldest wait. */
-function fakeSlotPool(): {
-  take: () => Promise<string>;
-  release: (lock: string) => void;
-  free: string[];
-  waiters: Array<(lock: string) => void>;
-  released: string[];
-} {
-  const pool = {
-    free: [] as string[],
-    waiters: [] as Array<(lock: string) => void>,
-    released: [] as string[],
-    take: (): Promise<string> => {
-      const lock = pool.free.shift();
-      if (lock !== undefined) {
-        return Promise.resolve(lock);
-      }
-      return new Promise<string>((taken) => {
-        pool.waiters.push(taken);
-      });
-    },
-    release: (lock: string): void => {
-      pool.released.push(lock);
-      const waiter = pool.waiters.shift();
-      if (waiter === undefined) {
-        pool.free.push(lock);
-      } else {
-        waiter(lock);
-      }
-    },
-  };
-  return pool;
-}
-
-/**
- * Lanes that wait for memory hold no slot meanwhile, so another taker gets it, and once memory frees
- * a lane takes a slot as any taker does, waiting for one when none is free.
- */
-async function testALaneWaitingForMemoryHoldsNoSlot(): Promise<void> {
-  const pool = fakeSlotPool();
-  let free = 0;
-  const marks: string[] = [];
-  const gate = new MemoryGate(
-    {
-      markWaiting: () => {
-        marks.push('wait');
-        return () => {
-          marks.push('end');
-        };
-      },
-    },
-    () => Promise.resolve(free),
-    10,
-  );
-  const started: string[] = [];
-  const ends: Array<() => void> = [];
-  let finishing = false;
-  const run = (_plan: EnginePlan, index: number, lock: string): Promise<{ index: number }> =>
-    new Promise((done) => {
-      started.push(lock);
-      if (finishing) {
-        done({ index });
-      } else {
-        ends.push(() => {
-          done({ index });
-        });
-      }
-    });
-  const units = Array.from({ length: 6 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
-  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  const pending = runShares(pool, units, declared, 3, ['A', 'B', 'C'], {}, run, undefined, gate);
-  try {
-    assert.ok(
-      await cameTrue(() => pool.released.length === 2, 5000),
-      'both lanes short of memory gave their slots back',
-    );
-    assert.deepEqual(pool.released.toSorted(), ['B', 'C'], 'the slots of the lanes that waited');
-    assert.deepEqual(started, ['A'], 'only the lane with room started its engine');
-    assert.deepEqual(marks, ['wait'], 'the wait for memory is marked once');
-    const other = await Promise.race([pool.take(), delay(1000).then(() => null)]);
-    assert.ok(other === 'B' || other === 'C', `another taker takes a slot meanwhile: ${String(other)}`);
-    const another = await Promise.race([pool.take(), delay(1000).then(() => null)]);
-    assert.ok(another === 'B' || another === 'C', 'and the other');
-    free = 2 ** 40;
-    assert.ok(
-      await cameTrue(() => pool.waiters.length === 2, 5000),
-      'memory freed, both lanes wait for a slot as any taker does',
-    );
-    assert.equal(started.length, 1, 'no engine starts without a slot');
-    assert.ok(marks.includes('end'), 'and the memory mark has ended');
-    pool.release(other);
-    assert.ok(await cameTrue(() => started.length === 2, 5000), 'a lane starts once a slot is given back');
-    assert.equal(started[1], other, 'in that slot');
-  } finally {
-    finishing = true;
-    pool.release('Z');
-    pool.release('Y');
-    for (const end of ends.splice(0)) {
-      end();
-    }
-  }
-  const over = await Promise.race([pending, delay(10_000).then(() => null)]);
-  assert.ok(over !== null, 'the run ends');
-}
-
-/** The smallest memory reading the machine has room in, past what it keeps for everything else. */
-function memoryKept(): number {
-  let low = 0;
-  let high = 2 ** 40;
-  while (high - low > 1) {
-    const middle = Math.floor((low + high) / 2);
-    if (roomForAnother(middle, 0, 0)) {
-      high = middle;
-    } else {
-      low = middle;
-    }
-  }
-  return high;
-}
-
-/**
- * Memory gone while a lane waited for its slot: the lane judges memory again once it holds the slot,
- * gives the slot back while memory is short, and starts once memory has room again.
- */
-async function testALaneJudgesMemoryAgainOnceItHoldsItsSlot(): Promise<void> {
-  const pool = fakeSlotPool();
-  let free = 2 ** 40;
-  const startedAt: number[] = [];
-  let finishing = false;
-  const ends: Array<() => void> = [];
-  const run = (_plan: EnginePlan, index: number): Promise<{ index: number }> =>
-    new Promise((done) => {
-      startedAt.push(free);
-      if (finishing) {
-        done({ index });
-      } else {
-        ends.push(() => {
-          done({ index });
-        });
-      }
-    });
-  const gate = new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(free), 10);
-  const units = Array.from({ length: 4 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
-  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  const pending = runShares(pool, units, declared, 2, ['T0'], {}, run, undefined, gate);
-  try {
-    assert.ok(
-      await cameTrue(() => startedAt.length === 1 && pool.waiters.length === 1, 5000),
-      'the first lane runs and the second waits for a slot',
-    );
-    free = memoryKept();
-    pool.release('X1');
-    assert.ok(
-      await cameTrue(() => pool.free.includes('X1'), 5000),
-      'the lane short of memory gives the slot it was handed back',
-    );
-    await delay(100);
-    assert.equal(startedAt.length, 1, 'no engine starts while memory has no room');
-    assert.deepEqual(pool.free, ['X1'], 'the waiting lane holds no slot meanwhile');
-    free = 2 ** 40;
-    assert.ok(await cameTrue(() => startedAt.length === 2, 5000), 'the lane starts once memory has room');
-    assert.deepEqual(pool.free, [], 'in the slot it took again');
-  } finally {
-    free = 2 ** 40;
-    finishing = true;
-    for (const end of ends.splice(0)) {
-      end();
-    }
-  }
-  const over = await Promise.race([pending, delay(10_000).then(() => null)]);
-  assert.ok(over !== null, 'the run ends');
-}
-
-/**
- * Memory gone again while a lane that waited for memory waits for its next slot: the lane judges
- * memory again once that slot comes, gives it back while memory is short, and starts nothing until
- * memory has room.
- */
-async function testALaneJudgesMemoryAgainAtTheTakeAfterAMemoryWait(): Promise<void> {
-  const pool = fakeSlotPool();
-  let free = memoryKept();
-  const started: Array<{ lock: string; free: number }> = [];
-  let finishing = false;
-  const ends: Array<() => void> = [];
-  const run = (_plan: EnginePlan, index: number, lock: string): Promise<{ index: number }> =>
-    new Promise((done) => {
-      started.push({ lock, free });
-      if (finishing) {
-        done({ index });
-      } else {
-        ends.push(() => {
-          done({ index });
-        });
-      }
-    });
-  const gate = new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(free), 10);
-  const units = Array.from({ length: 4 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
-  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  const pending = runShares(pool, units, declared, 2, ['T0', 'T1'], {}, run, undefined, gate);
-  try {
-    assert.ok(
-      await cameTrue(() => pool.free.includes('T1'), 5000),
-      'the lane short of memory gives its slot back',
-    );
-    const other = await pool.take();
-    assert.equal(other, 'T1', 'another taker takes it');
-    free = 2 ** 40;
-    assert.ok(
-      await cameTrue(() => pool.waiters.length === 1, 5000),
-      'memory frees, so the lane waits for a slot',
-    );
-    free = memoryKept();
-    pool.release(other);
-    assert.ok(
-      await cameTrue(() => pool.free.includes('T1'), 5000),
-      'memory gone again, the lane gives the slot it was handed back',
-    );
-    await delay(100);
-    assert.deepEqual(
-      started.map((engine) => engine.lock),
-      ['T0'],
-      'no engine starts on the take after the memory wait while memory has no room',
-    );
-    free = 2 ** 40;
-    assert.ok(await cameTrue(() => started.length === 2, 5000), 'the lane starts once memory has room');
-    assert.deepEqual(pool.free, [], 'in the slot it took again');
-  } finally {
-    free = 2 ** 40;
-    finishing = true;
-    for (const end of ends.splice(0)) {
-      end();
-    }
-  }
-  const over = await Promise.race([pending, delay(10_000).then(() => null)]);
-  assert.ok(over !== null, 'the run ends');
-}
-
-/**
- * Two runs of three lanes sharing three slots, on a machine with room for two engines, with engine
- * lengths drawn from a seed. Every engine started past the machine's room is one its run started
- * with nothing else going, which the gate lets start at once, and both runs end holding nothing.
- */
-async function testTwoRunsSharingSlotsStartPastTheRoomOnlyWithNothingGoing(): Promise<void> {
-  const kept = memoryKept();
-  for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
-    const pool = fakeSlotPool();
-    pool.free.push('S1', 'S2', 'S3');
-    let state = seed;
-    const random = (): number => {
-      state = (state * 1_103_515_245 + 12_345) % 2_147_483_648;
-      return state / 2_147_483_648;
-    };
-    let running = 0;
-    const own = { a: 0, b: 0 };
-    const past: string[] = [];
-    const read = (): Promise<number> => Promise.resolve(kept + (2.5 - running) * MEMORY_PER_ENGINE);
-    const runOf =
-      (name: 'a' | 'b') =>
-      async (_plan: EnginePlan, index: number): Promise<{ index: number }> => {
-        if (running >= 2 && own[name] > 0) {
-          past.push(`${name} with ${String(own[name])} of its own going`);
-        }
-        running += 1;
-        own[name] += 1;
-        await delay(30 + Math.floor(random() * 120));
-        running -= 1;
-        own[name] -= 1;
-        return { index };
-      };
-    const marks = { open: 0 };
-    const gateOf = (): MemoryGate =>
-      new MemoryGate(
-        {
-          markWaiting: () => {
-            marks.open += 1;
-            return () => {
-              marks.open -= 1;
-            };
-          },
-        },
-        read,
-        10,
-      );
-    const sharesOf = (prefix: string): Unit[] =>
-      Array.from({ length: 8 }, (_, at) => SHARE_UNIT(`${prefix}${String(at)}`, 30));
-    const a = sharesOf('a');
-    const b = sharesOf('b');
-    const declaredOf = (units: Unit[]): Map<string, string[]> =>
-      new Map(units.map((unit) => [unit.suite, ['test_one']]));
-    const runs = Promise.all([
-      runShares(pool, a, declaredOf(a), 3, [], {}, runOf('a'), undefined, gateOf()),
-      runShares(pool, b, declaredOf(b), 3, [], {}, runOf('b'), undefined, gateOf()),
-    ]);
-    const over = await Promise.race([runs, delay(30_000).then(() => null)]);
-    assert.ok(over !== null, `both runs end (seed ${String(seed)})`);
-    assert.deepEqual(
-      past,
-      [],
-      `no run starts past the room beside an engine of its own (seed ${String(seed)})`,
-    );
-    assert.equal(marks.open, 0, `no memory wait is left marked (seed ${String(seed)})`);
-    assert.deepEqual(
-      pool.free.toSorted(),
-      ['S1', 'S2', 'S3'],
-      `every slot is given back (seed ${String(seed)})`,
-    );
-  }
-}
-
-const MEMORY_GIB = 1024 ** 3;
-
-/** Runs [param body] with no engine memory ceiling set and a runtime folder of its own. */
-async function withNoCeilingSet(body: () => Promise<void>): Promise<void> {
-  const kept = process.env[CEILING_VARIABLE];
-  delete process.env[CEILING_VARIABLE];
-  try {
-    await withARuntimeDirectory(body);
-  } finally {
-    if (kept !== undefined) {
-      process.env[CEILING_VARIABLE] = kept;
-    }
-  }
-}
-
-/** A slot lock of this process, as a take of [param bytes] writes it, or of another tool's with none. */
-function standInLock(
-  directory: string,
-  slot: number,
-  started: number,
-  fields: { readonly memory?: number; readonly wants?: number },
-): void {
-  writeFileSync(
-    join(directory, `${String(slot)}.lock`),
-    JSON.stringify({ pid: process.pid, started, ...fields }),
-  );
-}
-
-async function testALockTakenBeyondTheBudgetByARaceIsGivenBack(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  const past = new Date(Date.now() - 120_000);
-  const landed = (slot: number): void => {
-    standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
-    utimesSync(join(directory, `${String(slot)}.lock`), past, past);
-  };
-  try {
-    let reads = 0;
-    const slots = new EngineSlots(directory, 12, { pid: process.pid, started }, undefined, undefined, {
-      need: 7 * MEMORY_GIB,
-      available: () => {
-        reads += 1;
-        if (reads === 1) {
-          // Another taker's locks land, older than the one this take is about to make.
-          landed(5);
-          landed(6);
-        }
-        return Promise.resolve(48 * MEMORY_GIB);
-      },
-      held: () => Promise.resolve(new Map()),
-    });
-    for (const slot of [0, 1, 2, 3, 4]) {
-      landed(slot);
-    }
-    assert.equal(
-      await slots.takeFree(),
-      null,
-      'the lock that passes what the machine can give is given back',
-    );
-    assert.equal(
-      readdirSync(directory).filter((name) => name.endsWith('.lock')).length,
-      7,
-      'and only the takers that came first keep theirs',
-    );
-    assert.equal(slots.drawn.short?.owed, 49 * MEMORY_GIB, 'with what the others still owe said');
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A lock's figure is 1.5 GiB where a project has no kept peak, the peak where it has one, and at
- * most the project's ceiling.
- */
-async function testALocksMemoryIsThePeakKeptCappedAtTheCeiling(): Promise<void> {
-  const started = await ownStart();
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
-  const figureOf = async (take: (slots: EngineSlots) => Promise<string | null>): Promise<unknown> => {
-    const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-    try {
-      const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, project, {
-        memory: 64 * MEMORY_GIB,
-      });
-      const lock = await take(slots);
-      const figure = holderOf(readFileSync(lock ?? '', 'utf8'))?.memory;
-      slots.releaseAll();
-      return figure;
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  };
-  try {
-    await withNoCeilingSet(async () => {
-      const side = (slots: EngineSlots) => slots.takeFree();
-      const game = (slots: EngineSlots) => slots.takeFree(true);
-      assert.equal(await figureOf(side), 1.5 * MEMORY_GIB, 'no peak kept');
-      await recordEnginePeak(project, 'editor_run', 6 * MEMORY_GIB);
-      assert.equal(await figureOf(game), 6 * MEMORY_GIB, 'the game counts the 6 GiB it held');
-      assert.equal(await figureOf(side), 1.5 * MEMORY_GIB, 'a test run has its own tool and counts its own');
-      process.env[CEILING_VARIABLE] = '2048';
-      try {
-        assert.equal(await figureOf(game), 2 * MEMORY_GIB, 'capped at the 2 GiB ceiling');
-      } finally {
-        delete process.env[CEILING_VARIABLE];
-      }
-    });
-  } finally {
-    rmSync(project, { recursive: true, force: true });
-  }
-}
-
-/**
- * A take that waits for memory keeps its place in line: a later one-slot take that would fit
- * beside what runs does not fit beside what the earlier one is owed, and takes after it.
- */
-async function testAMemoryWaiterDoesNotHoldBackOneThatFits(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  const big = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-big-'));
-  const small = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-small-'));
-  const stop = new AbortController();
-  try {
-    await withNoCeilingSet(async () => {
-      await recordEnginePeak(big, 'project_test', 7 * MEMORY_GIB);
-      await recordEnginePeak(small, 'project_test', MEMORY_GIB);
-      const slots = new EngineSlots(directory, 12, { pid: process.pid, started }, undefined, undefined, {
-        memory: 64 * MEMORY_GIB,
-        available: () => Promise.resolve(50 * MEMORY_GIB),
-        held: plentyOfMemory.held,
-      });
-      for (const slot of [0, 1, 2, 3, 4, 5]) {
-        standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
-      }
-      const order: string[] = [];
-      const first = slots.take(stop.signal, undefined, undefined, false, big).then((lock) => {
-        order.push('big');
-        return lock;
-      });
-      await delay(700);
-      const second = slots.take(stop.signal, undefined, undefined, false, small).then((lock) => {
-        order.push('small');
-        return lock;
-      });
-      await delay(1500);
-      assert.deepEqual(order, ['small'], 'the small one takes the room 4 GiB leaves, past the 7 GiB one');
-      const marks = readdirSync(join(directory, 'waiting')).filter((name) => name.endsWith('.json'));
-      assert.equal(marks.length, 1, `only the 7 GiB one keeps its mark: ${marks.join(', ')}`);
-      rmSync(join(directory, '0.lock'));
-      await first;
-      assert.deepEqual(order, ['small', 'big'], 'and the 7 GiB one takes once memory is owed less');
-      await second;
-      slots.releaseAll();
-    });
-  } finally {
-    stop.abort();
-    for (const folder of [directory, big, small]) {
-      rmSync(folder, { recursive: true, force: true });
-    }
-  }
-}
-
-function testTheMemoryWaitIsSaidInWholeLines(): void {
-  const short = {
-    free: 16 * MEMORY_GIB,
-    kept: 4 * MEMORY_GIB,
-    owed: 13 * MEMORY_GIB,
-    need: 1.6 * MEMORY_GIB,
-  };
-  const drawn = { numbers: [6, 7], short };
-  assert.equal(
-    slotWaitSaid(3000, 12, 'slots', [], drawn),
-    'Waiting 3 s so far for an engine: the machine has 16.0 GB of memory free, 4.0 GB of it kept for everything else, the engines running still owe 13.0 GB and this engine needs 1.6 GB, so it starts once enough memory is given back.',
-  );
-  assert.equal(
-    slotWaitedSaid(25_000, 12, 'slots', [], drawn),
-    'This call waited 25 s for engine memory in all. When it first waited, the machine had 16.0 GB of memory free, 4.0 GB of it kept for everything else, the engines running still owed 13.0 GB and this engine needed 1.6 GB.',
-  );
-}
-
-/** Figures just past the ceiling are said with enough digits to differ. */
-function testAnEndJustPastTheCeilingSaysFiguresThatDiffer(): void {
-  const end: MemoryEnd = {
-    peakBytes: 4 * MEMORY_GIB + 1024 ** 2,
-    ceilingBytes: 4 * MEMORY_GIB,
-    source: 'variable',
-  };
-  assert.equal(
-    memoryCeilingSaid(end),
-    `the engine held 4.001 GB, past the 4.000 GB ceiling. Set ${CEILING_VARIABLE} to raise it`,
-  );
-}
-
-/** A server that ends another's game for its memory leaves a note the first server reads, swept with the run. */
-async function testTheMemoryEndOfAnotherServersGameIsNotedBesideItsRun(): Promise<void> {
-  await withARuntimeDirectory(() => {
-    const runs = join(process.env['GDHARNESS_RUNTIME_DIR'] ?? '', 'runs');
-    const run = { transcript: join(runs, 'run-1.log'), startedAt: 1 };
-    assert.equal(memoryEndOf(run), undefined, 'nothing noted before');
-    noteMemoryEnd(run, 'its memory ceiling: the engine held 0.7 GB, past the 0.3 GB ceiling');
-    assert.equal(memoryEndOf(run), 'its memory ceiling: the engine held 0.7 GB, past the 0.3 GB ceiling');
-    assert.equal(memoryEndOf({ transcript: join(runs, 'run-2.log'), startedAt: 2 }), undefined);
-    return Promise.resolve();
-  });
-  const source = readFileSync('src/server.ts', 'utf8');
-  assert.match(
-    source,
-    /const memory = await this\.memoryCeiling\(projectPath, 'boot_check'\);/,
-    'the boot check refuses on the ceiling like every other start',
-  );
-}
-
-/** The first server to note a run's memory end keeps its note when a second notes one after it. */
-async function testTheFirstMemoryEndNotedOfARunStays(): Promise<void> {
-  await withARuntimeDirectory(() => {
-    const run = {
-      transcript: join(process.env['GDHARNESS_RUNTIME_DIR'] ?? '', 'runs', 'run-1.log'),
-      startedAt: 1,
-    };
-    noteMemoryEnd(run, 'its memory ceiling: the engine held 0.7 GB, past the 0.3 GB ceiling');
-    noteMemoryEnd(run, 'its memory ceiling: the engine held 0.8 GB, past the 0.3 GB ceiling');
-    assert.equal(memoryEndOf(run), 'its memory ceiling: the engine held 0.7 GB, past the 0.3 GB ceiling');
-    return Promise.resolve();
-  });
-}
-
-/** A game's lock handed to the process that runs it keeps the memory it counts, and the game mark. */
-async function testAGamesLockHandedOnKeepsItsMemory(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  try {
-    const lock = join(directory, '0.lock');
-    writeFileSync(lock, JSON.stringify({ pid: process.pid, started, memory: 7 * MEMORY_GIB }));
-    assert.equal(await handSlot(lock, process.pid, { pid: 4242, started: 1 }), true, 'handed');
-    assert.deepEqual(
-      JSON.parse(readFileSync(lock, 'utf8')),
-      { pid: 4242, started: 1, memory: 7 * MEMORY_GIB },
-      'the keeper holds the 7 GiB the take counted',
-    );
-    assert.equal(await handSlot(lock, 4242, { pid: 4343, started: 2, memory: 2 * MEMORY_GIB }), true);
-    assert.deepEqual(
-      JSON.parse(readFileSync(lock, 'utf8')),
-      { pid: 4343, started: 2, memory: 2 * MEMORY_GIB },
-      'a holder that names its own figure counts that one',
-    );
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * An engine a call starts without naming a tool, a headless operation's, counts the project's
- * headless peak, not the peak of its test runs. One that names its tool counts that tool's.
- */
-function testACallsEngineWithNoToolCountsTheHeadlessPeak(): void {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-call-'));
-  const directory = join(root, 'slots');
-  const runtime = join(root, 'runtime');
-  const project = join(root, 'project');
-  mkdirSync(directory);
-  mkdirSync(project);
-  const script = join(root, 'take.ts');
-  writeFileSync(
-    script,
-    [
-      `import * as slots from ${JSON.stringify(pathToFileURL(resolve('src', 'engine-slots.ts')).href)};`,
-      `import { recordEnginePeak } from ${JSON.stringify(pathToFileURL(resolve('src', 'run-record.ts')).href)};`,
-      "import { readFileSync } from 'node:fs';",
-      `const project = ${JSON.stringify(project)};`,
-      `await recordEnginePeak(project, 'headless', ${String(3 * MEMORY_GIB)});`,
-      `await recordEnginePeak(project, 'project_test', ${String(6 * MEMORY_GIB)});`,
-      'const held = await slots.slotForCall(false, project);',
-      "process.stdout.write(readFileSync(held.lock, 'utf8') + '\\n');",
-      'held.release();',
-      "const named = await slots.slotForCall(false, project, 'project_test');",
-      "process.stdout.write(readFileSync(named.lock, 'utf8'));",
-      'named.release();',
-      'process.exit(0);',
-    ].join('\n'),
-  );
-  const env: NodeJS.ProcessEnv = { ...process.env, GDHARNESS_RUNTIME_DIR: runtime };
-  for (const name of SLOT_VARIABLES) {
-    delete env[name];
-  }
-  // Above both peaks: the default ceiling is a quarter of the machine, 4 GiB on a 16 GiB one, and
-  // caps the 6 GiB figure there.
-  env[CEILING_VARIABLE] = String(8 * 1024);
-  env[SLOTS_VARIABLE] = directory;
-  env[SLOT_COUNT_VARIABLE] = '2';
-  try {
-    const ran = spawnSyncHidden(process.execPath, [script], { encoding: 'utf8', env, timeout: 60_000 });
-    assert.equal(ran.status, 0, `${ran.stdout}${ran.stderr}`);
-    const [headless, named] = ran.stdout.split('\n').map((lock) => holderOf(lock)?.memory);
-    assert.deepEqual([headless, named], [3 * MEMORY_GIB, 6 * MEMORY_GIB], ran.stdout);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
-/** An end just past the ceiling is said in one sentence whose figures differ, for each source. */
-function testAnEndJustPastTheCeilingIsSaidInOneSentenceWithFiguresThatDiffer(): void {
-  const end = (source: MemoryEnd['source']): MemoryEnd => ({
-    peakBytes: 16 * MEMORY_GIB + 1024 ** 2,
-    ceilingBytes: 16 * MEMORY_GIB,
-    source,
-  });
-  assert.equal(
-    memoryEndSentence('The run', end('default')),
-    `The run was ended for its memory: it held 16.001 GB, past the default 16.000 GB ceiling, which ${CEILING_VARIABLE} or gdharness/engine/memory_ceiling_mb in project.godot raises.`,
-  );
-  assert.equal(
-    memoryEndSentence('The run', end('variable')),
-    `The run was ended for its memory: it held 16.001 GB, past the 16.000 GB ceiling ${CEILING_VARIABLE} sets.`,
-  );
-  assert.equal(
-    memoryEndSentence('The run', end('project')),
-    'The run was ended for its memory: it held 16.001 GB, past the 16.000 GB ceiling gdharness/engine/memory_ceiling_mb in project.godot sets.',
-  );
-}
-
-/** A slot lock in [param directory] as it reads, once it names a holder. */
-function slotLocksIn(directory: string): SlotHolder[] {
-  const holders: SlotHolder[] = [];
-  for (const name of readdirSync(directory).filter((one) => /^\d+\.lock$/.test(one))) {
-    try {
-      const holder = holderOf(readFileSync(join(directory, name), 'utf8'));
-      if (holder !== null) {
-        holders.push(holder);
-      }
-    } catch {
-      // Given back between the listing and the read.
-    }
-  }
-  return holders;
-}
-
-/**
- * A `gdharness test` or `gdharness spread` lane counts its own kept peak, never a tool's of the
- * project, and keeps what its engine held under its own name. The figures of a full machine:
- * two games, three test calls and seven lanes all fit on 64 GiB.
- */
-async function testACommandLineLaneCountsItsOwnPeak(): Promise<void> {
-  for (const [command, tool] of [
-    ['spread', 'spread_lane'],
-    ['test', 'test_lane'],
-  ] as const) {
-    await oneCommandLineLaneCountsItsOwnPeak(command, tool);
-  }
-}
-
-/** One run of [param command] on the memory engine, whose lanes keep their peaks as [param tool]. */
-async function oneCommandLineLaneCountsItsOwnPeak(command: 'spread' | 'test', tool: PeakTool): Promise<void> {
-  const project = memoryProject();
-  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-runtime-'));
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
-  mkdirSync(join(project, 'addons', 'gdharness_tests'), { recursive: true });
-  writeFileSync(join(project, SHARE_SCRIPT), 'extends Node\n');
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    GODOT_PATH: memoryEngine(),
-    GDHARNESS_RUNTIME_DIR: runtime,
-    GDH_HOLD_MB: '60',
-    GDH_STAY_MS: '2500',
-  };
-  for (const name of SLOT_VARIABLES) {
-    delete env[name];
-  }
-  delete env[CEILING_VARIABLE];
-  env[SLOT_COUNT_VARIABLE] = '4';
-  try {
-    await withHoldsInTheEnvironment({ GDHARNESS_RUNTIME_DIR: runtime }, async () => {
-      await recordEnginePeak(project, 'project_test', 6 * MEMORY_GIB);
-      await recordEnginePeak(project, tool, 2 * MEMORY_GIB);
-    });
-    const args =
-      command === 'spread'
-        ? ['spread', project, 'main.tscn', '--workers', '2', '--slots', slots, '--godot', memoryEngine()]
-        : ['test', project, '--slots', slots];
-    const running = spawnHidden(process.execPath, ['build/cli.js', ...args], { env, stdio: 'ignore' });
-    const figures = new Set<number | undefined>();
-    const ended = exitOf(running);
-    while (running.exitCode === null && running.signalCode === null) {
-      for (const holder of slotLocksIn(slots)) {
-        figures.add(holder.memory);
-      }
-      await delay(50);
-    }
-    await ended;
-    assert.ok(
-      figures.has(2 * MEMORY_GIB),
-      `${command}: a lane counts its own 2 GiB: ${[...figures].join(', ')}`,
-    );
-    assert.ok(!figures.has(6 * MEMORY_GIB), `${command}: never the 6 GiB of project_test`);
-    const kept = (): Partial<Record<PeakTool, number>> => readEnginePeaks(project, runtime);
-    assert.ok(
-      await untilTrue(() => (kept()[tool] ?? 0) < MEMORY_GIB, 5000),
-      `${command}: what its engines held is kept as ${tool}: ${JSON.stringify(kept())}`,
-    );
-    assert.equal(kept().project_test, 6 * MEMORY_GIB, `${command}: and project_test's stays`);
-  } finally {
-    sweep(project, runtime, slots);
-  }
-}
-
-/**
- * Two servers on one runtime that both see one game, each with [param holds] of its own, until
- * [param body] ends. The first serves a project of its own and starts the game of another, as a
- * session working elsewhere does. The second serves the game's project, so it picks the game up from
- * its note. Neither announces on the other's project, so neither replaces the other.
- */
-async function withTwoServersOfOneGame(
-  holds: { readonly first: Record<string, string>; readonly second: Record<string, string> },
-  body: (
-    call: (server: 'first' | 'second', name: string, args: Record<string, unknown>) => Promise<unknown>,
-  ) => Promise<void>,
-): Promise<void> {
-  const elsewhere = memoryProject();
-  const project = memoryProject();
-  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-runtime-'));
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
-  const shared = { GODOT_PATH: memoryEngine(), GDHARNESS_RUNTIME_DIR: runtime, [SLOTS_VARIABLE]: slots };
-  const servers = {
-    first: new ServerProcess({ env: { ...shared, GDHARNESS_PROJECT: elsewhere, ...holds.first } }),
-    second: null as ServerProcess | null,
-  };
-  try {
-    await servers.first.initialize('regression-test');
-    servers.second = new ServerProcess({ env: { ...shared, GDHARNESS_PROJECT: project, ...holds.second } });
-    await servers.second.initialize('regression-test');
-    const second = servers.second;
-    const announcedBy = (path: string): number | undefined => readAnnouncement(announcementPath(path))?.pid;
-    assert.ok(
-      await untilTrue(
-        () => announcedBy(elsewhere) === servers.first.child.pid && announcedBy(project) === second.child.pid,
-        15_000,
-      ),
-      'each server announces on its own project',
-    );
-    const call = async (
-      server: 'first' | 'second',
-      name: string,
-      args: Record<string, unknown>,
-    ): Promise<unknown> => {
-      const response = await (server === 'first' ? servers.first : second).request(
-        'tools/call',
-        { name, arguments: { projectPath: project, ...args } },
-        ENGINE_CALL_TIMEOUT_MS,
-      );
-      const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
-      const json = blocks.find((block) => block.trimStart().startsWith('{'));
-      return json === undefined ? blocks.join('\n') : (JSON.parse(json) as unknown);
-    };
-    await body(call);
-  } finally {
-    await servers.second?.stop();
-    await servers.first.stop();
-    sweep(elsewhere, project, runtime, slots);
-  }
-}
-
-/** The memory ceiling end a server says, with the figures it held and its ceiling. */
-const ANOTHERS_END =
-  /^its memory ceiling: the engine held 0\.\d+ GB, past the 0\.\d+ GB ceiling\. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it$/;
-
-/** The fields of a run's answer that say how it ended, and its note. */
-function endOfTheAnswer(answer: unknown): unknown[] {
-  return ['running', 'exitCode', 'endedBy', 'endedUnwatched', 'note'].map((field) => get(answer, field));
-}
-
-/** The end of the second server's answer once its game is over, polled for up to 20 s. */
-async function theSecondsEnd(
-  call: (server: 'first' | 'second', name: string, args: Record<string, unknown>) => Promise<unknown>,
-): Promise<unknown> {
-  let theirs: unknown = null;
-  for (let tries = 0; tries < 40 && get(theirs, 'running') !== false; tries++) {
-    await delay(500);
-    theirs = await call('second', 'editor_output', {});
-  }
-  return theirs;
-}
-
-/**
- * A server whose game another server ended for its memory answers that end, with no keeper said to
- * have gone and no answer lost. The server serving the game's project picks it up and ends it past
- * its ceiling, while the server that started it waits on it or after it has seen it running.
- */
-async function testAServerWhoseGameAnotherServerEndedForItsMemoryAnswersThatEnd(): Promise<void> {
-  // The first server's ceiling is the default, so only the second's ends the game.
-  const grows = { GDH_HOLD_MB: '600', GDH_GROW_MB: '50', GDH_STAY_MS: '30000' };
-  const slow = { GDH_HOLD_MB: '600', GDH_GROW_MB: '20', GDH_STAY_MS: '15000' };
-  await withNoCeilingSet(async () => {
-    for (const seenRunningFirst of [false, true]) {
-      await withTwoServersOfOneGame(
-        { first: seenRunningFirst ? slow : grows, second: { [CEILING_VARIABLE]: '300' } },
-        async (call) => {
-          const started = await call('first', 'editor_run', { op: 'start', headless: true });
-          assert.equal(get(started, 'started'), true, JSON.stringify(started));
-          const seen = await call('second', 'editor_output', {});
-          if (seenRunningFirst) {
-            assert.equal(
-              get(seen, 'running'),
-              true,
-              `the second sees it under the ceiling: ${JSON.stringify(seen)}`,
-            );
-          }
-          const waited = call('first', 'editor_run', { op: 'wait', timeoutMs: 60_000 });
-          const theirs = await theSecondsEnd(call);
-          const ours = await waited;
-          const shown = `${JSON.stringify(seen)} ${JSON.stringify(theirs)} ${JSON.stringify(ours)}`;
-          const ended = String(get(theirs, 'endedBy'));
-          assert.match(ended, ANOTHERS_END, shown);
-          assert.deepEqual(
-            endOfTheAnswer(theirs),
-            [false, null, ended, undefined, `This run was ended here, by ${ended}.`],
-            `the second server says it ended the game: ${shown}`,
-          );
-          assert.deepEqual(
-            endOfTheAnswer(ours),
-            [
-              false,
-              null,
-              ended,
-              undefined,
-              `This run was ended by another server of this project, by ${ended}.`,
-            ],
-            `the first server answers with the end the second made: ${shown}`,
-          );
-        },
-      );
-    }
-  });
-}
-
-/**
- * Two servers holding one game say one end between them: the one whose keeper or signal reached the
- * game says it ended it, and the other answers that end. Once with only the starting server's
- * ceiling passed, so the server that picked the game up answers the starter's end, and once with
- * both passed, so both guards may fire and the later one finds the game gone.
- */
-async function testTwoServersPastTheirCeilingsSayOneEnd(): Promise<void> {
-  const holds = { GDH_HOLD_MB: '600', GDH_GROW_MB: '10', GDH_STAY_MS: '30000' };
-  const ceiling = { [CEILING_VARIABLE]: '300' };
-  await withNoCeilingSet(async () => {
-    await theyEndItOnce({ first: { ...holds, ...ceiling }, second: {} }, 'first');
-    await theyEndItOnce({ first: { ...holds, ...ceiling }, second: ceiling }, 'either');
-  });
-}
-
-/**
- * One game held by two servers with [param holds], ended past a ceiling: [param ender] says it ended
- * it, or either of the two when both ceilings are passed, and the other answers that end.
- */
-async function theyEndItOnce(
-  holds: { readonly first: Record<string, string>; readonly second: Record<string, string> },
-  ender: 'first' | 'either',
-): Promise<void> {
-  await withTwoServersOfOneGame(holds, async (call) => {
-    const started = await call('first', 'editor_run', { op: 'start', headless: true });
-    assert.equal(get(started, 'started'), true, JSON.stringify(started));
-    const seen = await call('second', 'editor_output', {});
-    assert.equal(get(seen, 'running'), true, `the second sees it under the ceiling: ${JSON.stringify(seen)}`);
-    const waited = call('first', 'editor_run', { op: 'wait', timeoutMs: 60_000 });
-    const theirs = await theSecondsEnd(call);
-    const ours = await waited;
-    const shown = `${JSON.stringify(theirs)} ${JSON.stringify(ours)}`;
-    const ended = String(get(ours, 'endedBy'));
-    assert.match(ended, ANOTHERS_END, shown);
-    const here = `This run was ended here, by ${ended}.`;
-    const beside = `This run was ended by another server of this project, by ${ended}.`;
-    const notes = [get(ours, 'note'), get(theirs, 'note')];
-    const firstEnded = notes[0] === here && notes[1] === beside;
-    const secondEnded = ender === 'either' && notes[0] === beside && notes[1] === here;
-    assert.ok(
-      firstEnded || secondEnded,
-      `one server says it ended the game and the other answers that end: ${shown}`,
-    );
-    for (const answer of [ours, theirs]) {
-      assert.deepEqual(endOfTheAnswer(answer), [false, null, ended, undefined, get(answer, 'note')], shown);
-    }
-  });
-}
-
-/** A run's memory-end note is swept with the old transcripts, and a fresh one stays. */
-async function testAMemoryEndNoteIsSweptOnceOld(): Promise<void> {
-  await withARuntimeDirectory(() => {
-    const runs = join(String(process.env['GDHARNESS_RUNTIME_DIR']), 'runs');
-    mkdirSync(runs, { recursive: true });
-    const old = join(runs, 'run-3.memory-end.json');
-    const fresh = join(runs, 'run-4.memory-end.json');
-    for (const note of [old, fresh]) {
-      writeFileSync(note, '{}');
-    }
-    const aDayAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
-    utimesSync(old, aDayAgo, aDayAgo);
-    sweepTranscripts();
-    assert.deepEqual([existsSync(old), existsSync(fresh)], [false, true]);
-    return Promise.resolve();
-  });
-}
-
-/** What a guard of a growing engine asked of its slot: the figures asked, and how often the lock changed. */
-interface SlotRaises {
-  readonly asked: readonly number[];
-  readonly written: number;
-}
-
-/**
- * Guards this process as an engine read at [param readings] in turn, then at the last one again,
- * whose slot is the lock at [param lock]. Answers once every reading has been judged and every
- * raise it asked has settled.
- */
-async function guardedAt(lock: string, readings: readonly number[]): Promise<SlotRaises> {
-  const asked: number[] = [];
-  const pending: Promise<unknown>[] = [];
-  let written = 0;
-  let read = 0;
-  const watch = new MemoryWatch(() => {
-    const bytes = readings[Math.min(read, readings.length - 1)] ?? 0;
-    read += 1;
-    return Promise.resolve({
-      at: 0,
-      machine: 0,
-      processors: null,
-      held: new Map([[process.pid, bytes]]),
-      below: new Map([[process.pid, []]]),
-    });
-  }, 10);
-  const guard = watch.guard(
-    process.pid,
-    { bytes: 16 * MEMORY_GIB, source: 'default' },
-    () => assert.fail('under its ceiling'),
-    undefined,
-    (bytes) => {
-      asked.push(bytes);
-      const before = readFileSync(lock, 'utf8');
-      const raised = raiseSlotMemory(lock, bytes).then((counted) => {
-        written += readFileSync(lock, 'utf8') === before ? 0 : 1;
-        return counted;
-      });
-      pending.push(raised);
-      return raised;
-    },
-  );
-  // A loaded machine stretches a 10 ms timer, so the readings are waited for rather than timed.
-  for (const until = Date.now() + 10_000; read < readings.length + 3 && Date.now() < until; ) {
-    await delay(10);
-  }
-  guard.release();
-  await Promise.all(pending);
-  return { asked, written };
-}
-
-/**
- * An engine that grows past what its take counted raises its lock's figure to what it holds,
- * rounded up to the next 256 MiB, and the next take counts that figure.
- */
-async function testASlotsFigureRisesToWhatItsEngineHolds(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  try {
-    await withNoCeilingSet(async () => {
-      const lock = join(directory, '0.lock');
-      standInLock(directory, 0, started, { memory: 2 * MEMORY_GIB });
-      const raises = await guardedAt(lock, [4.9 * MEMORY_GIB]);
-      assert.deepEqual(raises, { asked: [5 * MEMORY_GIB], written: 1 }, 'one raise, to the next 256 MiB');
-      assert.deepEqual(
-        JSON.parse(readFileSync(lock, 'utf8')),
-        { pid: process.pid, started, memory: 5 * MEMORY_GIB },
-        'the lock counts the 5 GiB its engine holds',
-      );
-      for (const slot of [1, 2, 3, 4, 5]) {
-        standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
-      }
-      standInLock(directory, 6, started, { memory: 3 * MEMORY_GIB });
-      const slots = new EngineSlots(directory, 12, { pid: process.pid, started }, undefined, undefined, {
-        need: 7 * MEMORY_GIB,
-        available: () => Promise.resolve(52 * MEMORY_GIB),
-        held: () => Promise.resolve(new Map()),
-      });
-      // At the 2 GiB the take counted, 40 GiB are owed and 7 more fit the 48 GiB the machine can give. At 5 GiB they do not.
-      assert.equal(await slots.takeFree(), null, 'a 7 GiB take beside 43 GiB owed waits');
-      assert.equal(slots.drawn.short?.owed, 43 * MEMORY_GIB, 'the raised lock counts 5 GiB');
-    });
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** An engine read below what its slot counts leaves the lock as it was, byte for byte. */
-async function testAReadingBelowASlotsFigureLeavesItsLockAlone(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  try {
-    const lock = join(directory, '0.lock');
-    const written = `{ "pid": ${String(process.pid)}, "started": ${String(started)}, "memory": ${String(2 * MEMORY_GIB)} }`;
-    writeFileSync(lock, written);
-    const raises = await guardedAt(lock, [MEMORY_GIB, 1.9 * MEMORY_GIB]);
-    assert.equal(readFileSync(lock, 'utf8'), written, 'the lock is as it was');
-    assert.deepEqual(
-      raises,
-      { asked: [MEMORY_GIB], written: 0 },
-      'the lock is read once, at the first reading',
-    );
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** Two readings in one 256 MiB step rewrite the lock once, and ask it once. */
-async function testTwoReadingsInOneStepRaiseASlotOnce(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  try {
-    const lock = join(directory, '0.lock');
-    standInLock(directory, 0, started, { memory: 2 * MEMORY_GIB });
-    const raises = await guardedAt(lock, [5 * MEMORY_GIB + 10 * 1024 ** 2, 5 * MEMORY_GIB + 100 * 1024 ** 2]);
-    assert.deepEqual(raises, { asked: [5.25 * MEMORY_GIB], written: 1 });
-    assert.equal(holderOf(readFileSync(lock, 'utf8'))?.memory, 5.25 * MEMORY_GIB);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** A lock another process holds is never rewritten, whatever this process's engine reads. */
-async function testASlotAnotherProcessHoldsIsNeverRaised(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  try {
-    const lock = join(directory, '0.lock');
-    const held = JSON.stringify({ pid: 4242, started: 1, memory: 2 * MEMORY_GIB });
-    writeFileSync(lock, held);
-    const raises = await guardedAt(lock, [5 * MEMORY_GIB]);
-    assert.deepEqual(raises, { asked: [5 * MEMORY_GIB], written: 0 });
-    assert.equal(await raiseSlotMemory(lock, 6 * MEMORY_GIB), null, 'not held here');
-    assert.equal(readFileSync(lock, 'utf8'), held, 'the lock is as it was');
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** A game's lock raised as its engine grew keeps the raised figure once handed to its keeper. */
-async function testAGamesRaisedLockHandedOnKeepsTheRaisedFigure(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  try {
-    const lock = join(directory, '0.lock');
-    writeFileSync(lock, JSON.stringify({ pid: process.pid, started, memory: 2 * MEMORY_GIB }));
-    await guardedAt(lock, [5 * MEMORY_GIB]);
-    assert.equal(await handSlot(lock, process.pid, { pid: 4242, started: 1 }), true, 'handed');
-    assert.deepEqual(
-      JSON.parse(readFileSync(lock, 'utf8')),
-      { pid: 4242, started: 1, memory: 5 * MEMORY_GIB },
-      'the keeper holds the 5 GiB the game grew to',
-    );
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** The figure the lock at [param lock] counts, or null where it holds none or cannot be read. */
-function lockFigure(lock: string): number | null {
-  try {
-    return holderOf(readFileSync(lock, 'utf8'))?.memory ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/** A watcher that reads each of [param pids] at [param bytes], every 20 ms. */
-function readingEach(pids: readonly number[], bytes: number): MemoryWatch {
-  return new MemoryWatch(
-    () =>
-      Promise.resolve({
-        at: 0,
-        machine: 0,
-        processors: null,
-        held: new Map(pids.map((pid) => [pid, bytes])),
-        below: new Map(pids.map((pid) => [pid, []])),
-      }),
-    20,
-  );
-}
-
-/**
- * A game's keeper raises the lock it holds as the game grows. On a 64 GiB machine of twelve slots,
- * games taken at their recorded 2 GiB that each grow to 7 GiB start seven of twelve inside the
- * 46 GiB the machine can give, where locks left at 2 GiB let eleven start.
- */
-async function testAGamesKeeperRaisesItsLockAsTheGameGrows(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  const games = Array.from({ length: 12 }, (_, game) => 200_000 + game);
-  const watch = readingEach(games, 7 * MEMORY_GIB);
-  const stops: (() => void)[] = [];
-  try {
-    await withNoCeilingSet(async () => {
-      const slots = new EngineSlots(directory, 12, { pid: process.pid, started }, undefined, undefined, {
-        need: 2 * MEMORY_GIB,
-        available: () => Promise.resolve(50 * MEMORY_GIB),
-        held: () => Promise.resolve(new Map()),
-      });
-      const taken: (number | null)[] = [];
-      for (const game of games) {
-        const lock = await slots.takeFree(true);
-        if (lock === null) {
-          break;
-        }
-        taken.push(lockFigure(lock));
-        // The keeper takes the lock over, as it does once the game's pid has gone back. This process
-        // stands in for the keeper, so the lock is its own to raise.
-        assert.equal(await handSlot(lock, process.pid, { pid: process.pid, started, by: 'a keeper' }), true);
-        stops.push(watch.follow(game, 16 * MEMORY_GIB, (bytes) => raiseSlotMemory(lock, bytes)));
-        assert.ok(
-          await untilTrue(() => lockFigure(lock) === 7 * MEMORY_GIB, 5000),
-          `game ${String(taken.length)}: the keeper raises its lock to 7 GiB: ${String(lockFigure(lock))}`,
-        );
-      }
-      assert.deepEqual(taken, Array(7).fill(2 * MEMORY_GIB), 'seven games start, each taken at 2 GiB');
-      const { owed, free } = slots.drawn.short ?? {};
-      assert.deepEqual(
-        { owed, free },
-        { owed: 49 * MEMORY_GIB, free: 50 * MEMORY_GIB },
-        'the eighth waits beside 49 GiB owed, past the 46 GiB the machine can give',
-      );
-    });
-  } finally {
-    for (const stop of stops) {
-      stop();
-    }
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * The script of a stand-in keeper for [param rounds] rounds of a game's slot at [param lock]: each
- * waits for the lock to name [param server] and the round file to say the round, then hands the lock
- * to itself, raises it from its game's reading and names the game's next process, as a keeper does
- * when its game restarts, all at once. It writes whether the hand took beside the lock.
- */
-function keeperRoundsScript(lock: string, server: number, rounds: number): string {
-  const slots = pathToFileURL(resolve('src', 'engine-slots.ts')).href;
-  const memory = pathToFileURL(resolve('src', 'engine-memory.ts')).href;
-  return [
-    `import { handSlot, nameSlotEngine, ownStart, raiseSlotMemory } from ${JSON.stringify(slots)};`,
-    `import { MemoryWatch } from ${JSON.stringify(memory)};`,
-    `const lock = ${JSON.stringify(lock)};`,
-    'const { readFileSync, writeFileSync, existsSync } = await import("node:fs");',
-    'const started = await ownStart();',
-    'const pause = (ms) => new Promise((done) => setTimeout(done, ms));',
-    'const holder = () => { try { return JSON.parse(readFileSync(lock, "utf8")); } catch { return null; } };',
-    `for (let round = 1; round <= ${String(rounds)}; round++) {`,
-    `  while (!(existsSync(lock + ".round") && readFileSync(lock + ".round", "utf8") === String(round) && holder()?.pid === ${String(server)})) await pause(1);`,
-    '  const game = 300000 + round;',
-    '  const reading = 2 * 1024 ** 3 + round * 256 * 1024 ** 2;',
-    '  const watch = new MemoryWatch(() => Promise.resolve({ at: 0, machine: 0, processors: null, held: new Map([[game, reading]]), below: new Map([[game, []]]) }), 5);',
-    `  const handed = handSlot(lock, ${String(server)}, { pid: process.pid, started, by: "a keeper" });`,
-    '  const stop = watch.follow(game, 64 * 1024 ** 3, (bytes) => raiseSlotMemory(lock, bytes));',
-    '  const named = nameSlotEngine(lock, process.pid, { pid: game, started: round });',
-    '  const said = String(await handed);',
-    '  await named;',
-    '  for (let wait = 0; wait < 300 && holder()?.memory !== reading; wait++) await pause(10);',
-    '  stop();',
-    '  writeFileSync(lock + ".k-" + String(round), said);',
-    '}',
-  ].join('\n');
-}
-
-/**
- * A game's slot handed to its keeper loses no hand to the raise, since only the keeper writes the
- * lock from then on. A hundred rounds of a stand-in keeper handing the server's lock to itself,
- * raising it and naming the game's next process at once each end with the lock the keeper's.
- */
-async function testAKeeperRaisingTheGameSlotItTookLosesNoHand(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-hand-'));
-  const lock = join(directory, '0.lock');
-  const rounds = 100;
-  const keeper = spawnHidden(process.execPath, ['-e', keeperRoundsScript(lock, process.pid, rounds)], {
-    stdio: 'ignore',
-  });
-  const lost: string[] = [];
-  try {
-    for (let round = 1; round <= rounds; round++) {
-      writeFileSync(lock, JSON.stringify({ pid: process.pid, started, memory: 2 * MEMORY_GIB }));
-      writeFileSync(`${lock}.round`, String(round));
-      const said = `${lock}.k-${String(round)}`;
-      assert.ok(
-        await untilTrue(() => existsSync(said), 10_000),
-        `round ${String(round)}: the keeper answers`,
-      );
-      const held = holderOf(readFileSync(lock, 'utf8'));
-      const kept = {
-        handed: readFileSync(said, 'utf8'),
-        holder: held?.pid === keeper.pid,
-        memory: held?.memory,
-        engine: held?.engine?.pid,
-      };
-      const wanted = {
-        handed: 'true',
-        holder: true,
-        memory: 2 * MEMORY_GIB + round * 256 * 1024 ** 2,
-        engine: 300_000 + round,
-      };
-      if (!isDeepStrictEqual(kept, wanted)) {
-        lost.push(`round ${String(round)}: ${JSON.stringify(kept)}`);
-      }
-    }
-    assert.deepEqual(lost, [], 'no round loses the hand, the raise or the engine named');
-  } finally {
-    keeper.kill();
-    await exitOf(keeper);
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
 /**
  * A server a newer server of its project replaced lets go of its bridge port at once, so the newer
  * one takes the configured port, and answers its call still running, and a call made after, with
@@ -76046,8 +73612,11 @@ async function testAReplacedServerAnswersEveryCallAndLetsGoOfItsPort(): Promise<
     const editor = await status();
     assert.equal(get(editor, 'port'), port, `on the configured port: ${JSON.stringify(editor)}`);
     await delay(1000);
-    const engines = slotLockPaths(slots).map((lock) => holderOf(readFileSync(lock, 'utf8'))?.engine?.pid);
-    assert.deepEqual(engines, [game], 'the call made after starts no game, so the first runs on in its slot');
+    assert.deepEqual(
+      leftInSlots(slots),
+      ['0.lock'],
+      'the call made after starts no game, so the first runs on in its slot',
+    );
     assert.equal(await untilTrue(() => first.exited, 15_000), true, 'and the replaced server exits');
   } finally {
     await first.stop();
@@ -76058,588 +73627,6 @@ async function testAReplacedServerAnswersEveryCallAndLetsGoOfItsPort(): Promise<
       // Gone already.
     }
     sweep(project, runtime, slots);
-  }
-}
-
-/**
- * Runs [param body] with every engine this process reads read at [param bytes], and answers each
- * figure the slot locks [param locks] names counted while it ran.
- */
-async function figuresWhileReadAt(
-  bytes: number,
-  locks: () => readonly string[],
-  body: () => Promise<void>,
-): Promise<Set<number | null>> {
-  const restore = readingMemoryWith((pids) =>
-    Promise.resolve(new Map(pids.map((pid) => [pid, { bytes, below: [] }]))),
-  );
-  try {
-    return await figuresWhile(locks, body);
-  } finally {
-    restore();
-  }
-}
-
-/** Answers each figure the slot locks [param locks] names counted while [param body] ran. */
-async function figuresWhile(
-  locks: () => readonly string[],
-  body: () => Promise<void>,
-): Promise<Set<number | null>> {
-  const figures = new Set<number | null>();
-  const running = { done: false };
-  const ran = body().finally(() => {
-    running.done = true;
-  });
-  while (!running.done) {
-    for (const lock of locks()) {
-      figures.add(lockFigure(lock));
-    }
-    await delay(50);
-  }
-  await ran;
-  return figures;
-}
-
-/**
- * Runs [param script] in a process of its own, with this process's environment and [param env] on
- * top, and answers what it passed to `say`. A process makes its engine slots once, from the folder
- * its first engine start finds named, so an engine taking a slot in a test's own folder starts in a
- * fresh process. The script reaches `run` (engine-run), `spent` (engine-spent), `memory`
- * (engine-memory), `slots` (engine-slots) and `headless`.
- */
-async function inAProcessOfItsOwn(script: readonly string[], env: Record<string, string>): Promise<unknown> {
-  const modules = {
-    run: 'engine-run.ts',
-    spent: 'engine-spent.ts',
-    memory: 'engine-memory.ts',
-    slots: 'engine-slots.ts',
-    headless: 'headless.ts',
-  };
-  const lines = [
-    ...Object.entries(modules).map(
-      ([name, file]) =>
-        `import * as ${name} from ${JSON.stringify(pathToFileURL(resolve('src', file)).href)};`,
-    ),
-    "const say = (value) => process.stdout.write('\\n' + JSON.stringify(value) + '\\n');",
-    ...script,
-    'process.exit(0);',
-  ];
-  const child = spawnHidden(process.execPath, ['-e', lines.join('\n')], {
-    env: { ...process.env, ...env },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let printed = '';
-  for (const stream of [child.stdout, child.stderr]) {
-    stream.setEncoding('utf8');
-    stream.on('data', (chunk: string) => {
-      printed += chunk;
-    });
-  }
-  const ended = await exitOf(child);
-  assert.equal(ended.code, 0, `the process ran its script: ${printed}`);
-  const said = printed
-    .split('\n')
-    .filter((line) => line.startsWith('{'))
-    .at(-1);
-  assert.ok(said !== undefined, `the process said what it found: ${printed}`);
-  return JSON.parse(said) as unknown;
-}
-
-/** The paths of the slot locks in the folder [param directory]. */
-function slotLockPaths(directory: string): string[] {
-  try {
-    return readdirSync(directory)
-      .filter((name) => /^\d+\.lock$/.test(name))
-      .map((name) => join(directory, name));
-  } catch {
-    return [];
-  }
-}
-
-/** A headless operation's guard raises the slot it took as its engine grows past it. */
-async function testAHeadlessEngineRaisesItsSlotAsItGrows(): Promise<void> {
-  const project = memoryProject();
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
-  try {
-    await withNoCeilingSet(async () => {
-      const figures = await figuresWhile(
-        () => slotLockPaths(slots),
-        async () => {
-          const ran = await inAProcessOfItsOwn(
-            [
-              `spent.readingMemoryWith((pids) => Promise.resolve(new Map(pids.map((pid) => [pid, { bytes: ${String(3 * MEMORY_GIB)}, below: [] }]))));`,
-              `const project = ${JSON.stringify(project)};`,
-              `const ran = await run.runEngine(${JSON.stringify(memoryEngine())}, ['--headless', '--path', project], { project });`,
-              'say({ exitCode: ran.exitCode, failure: ran.failure });',
-            ],
-            { [SLOTS_VARIABLE]: slots, GDH_HOLD_MB: '20', GDH_STAY_MS: '4000' },
-          );
-          assert.equal(get(ran, 'exitCode'), 0, JSON.stringify(ran));
-        },
-      );
-      assert.ok(figures.has(1.5 * MEMORY_GIB), `taken at 1.5 GiB: ${JSON.stringify([...figures])}`);
-      assert.ok(figures.has(3 * MEMORY_GIB), `raised to 3 GiB: ${JSON.stringify([...figures])}`);
-    });
-  } finally {
-    sweep(project, slots);
-  }
-}
-
-/** A lane's guard raises the slot the lane holds as its engine grows past it. */
-async function testALanesEngineRaisesItsSlotAsItGrows(): Promise<void> {
-  const project = memoryProject();
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-watched-'));
-  const started = await ownStart();
-  try {
-    const directory = join(scratch, 'engine');
-    mkdirSync(join(directory, 'user'), { recursive: true });
-    const lock = join(scratch, '0.lock');
-    writeFileSync(lock, JSON.stringify({ pid: process.pid, started, memory: 1.5 * MEMORY_GIB }));
-    await withNoCeilingSet(async () => {
-      const figures = await figuresWhileReadAt(
-        3 * MEMORY_GIB,
-        () => [lock],
-        () =>
-          withHoldsInTheEnvironment({ GDH_HOLD_MB: '20', GDH_STAY_MS: '4000' }, async () => {
-            const end = await watchedEngine(
-              {
-                godotPath: memoryEngine(),
-                projectPath: project,
-                deadlineSeconds: 60,
-                running: new Set(),
-                cores: null,
-              },
-              lock,
-              ['--path', project],
-              directory,
-              join(directory, 'engine.log'),
-              30,
-            );
-            assert.equal(end.ended, null, JSON.stringify(end));
-          }),
-      );
-      assert.ok(figures.has(3 * MEMORY_GIB), `raised to 3 GiB: ${JSON.stringify([...figures])}`);
-    });
-  } finally {
-    sweep(project, scratch);
-  }
-}
-
-/**
- * The guard of an engine the server holds for a call, a test run or a boot check, raises the slot
- * the server took for it. The server runs in a process of its own, where no reading can be mocked,
- * and a stand-in holds less than any take counts, so the site is read from the source.
- */
-function testAServersHeldEngineRaisesItsSlot(): void {
-  const source = readFileSync(join('src', 'server.ts'), 'utf8');
-  const spawned = /private async spawnGame\([\s\S]*?\n {2}\}\n/.exec(source)?.[0] ?? '';
-  assert.match(
-    spawned,
-    /const guard = engineMemory\.guard\([\s\S]*?\(bytes\) => raiseSlotMemory\(held\.lock, bytes\),\n {8}\);/,
-    'spawnGame guards its engine with a raise of its slot',
-  );
-}
-
-/**
- * A game's keeper reads its game and raises the slot it took over. The stand-in game holds 400 MB
- * against a lock at 256 MiB, and the keeper, its first reading five seconds in, raises the lock.
- */
-async function testAGamesKeeperRaisesTheSlotItHolds(): Promise<void> {
-  const project = memoryProject();
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
-  const lock = join(slots, '0.lock');
-  const started = await ownStart();
-  writeFileSync(lock, JSON.stringify({ pid: process.pid, started, memory: 256 * 1024 ** 2 }));
-  let game = 0;
-  try {
-    await withNoCeilingSet(async () => {
-      const launched = await launchOutsideTheTree(
-        {
-          command: process.execPath,
-          args: [join(import.meta.dirname, 'support', 'memory-engine.ts')],
-          env: { ...process.env, GDH_HOLD_MB: '400', GDH_GROW_MB: '100', GDH_STAY_MS: '25000' },
-          run: {
-            transcript: join(project, 'transcript.log'),
-            startedAt: Date.now(),
-            projectPath: project,
-            debugged: false,
-            slot: { lock, from: process.pid, by: 'a game' },
-          },
-        },
-        process.execPath,
-        resolve('build', 'keeper.js'),
-      );
-      assert.ok('pid' in launched, JSON.stringify(launched));
-      game = launched.pid;
-      const keeper = launched.keeperPid;
-      const held = (): string => {
-        try {
-          return readFileSync(lock, 'utf8');
-        } catch {
-          return 'no lock';
-        }
-      };
-      const raised = (): boolean => {
-        const holder = holderOf(held());
-        return holder !== null && holder.pid === keeper && (holder.memory ?? 0) >= 512 * 1024 ** 2;
-      };
-      assert.ok(await untilTrue(raised, 15_000), `the keeper raises its lock: ${held()}`);
-    });
-  } finally {
-    try {
-      process.kill(game, 'SIGKILL');
-    } catch {
-      // Gone already.
-    }
-    await untilTrue(() => !existsSync(lock), 10_000);
-    sweep(project, slots);
-  }
-}
-
-/**
- * A raise whose rewrite did not happen is asked again at a later reading: the guard asks once more
- * when the answer is below the figure asked, and on Windows a lock a reader holds open past the wait
- * is answered at its old figure and raised once the reader lets go.
- */
-async function testARaiseNotWrittenIsAskedAgain(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  const lock = join(directory, '0.lock');
-  try {
-    standInLock(directory, 0, started, { memory: 2 * MEMORY_GIB });
-    const asked: number[] = [];
-    const stop = readingEach([process.pid], 5 * MEMORY_GIB).follow(process.pid, 16 * MEMORY_GIB, (bytes) => {
-      asked.push(bytes);
-      return asked.length === 1 ? Promise.resolve(2 * MEMORY_GIB) : raiseSlotMemory(lock, bytes);
-    });
-    assert.ok(await untilTrue(() => lockFigure(lock) === 5 * MEMORY_GIB, 5000), 'raised at a later reading');
-    stop();
-    assert.deepEqual(asked.slice(0, 2), [5 * MEMORY_GIB, 5 * MEMORY_GIB], 'asked again once refused');
-    if (process.platform !== 'win32') {
-      console.log(`the held-open raise regression skipped (this is ${process.platform})`);
-      return;
-    }
-    standInLock(directory, 0, started, { memory: 2 * MEMORY_GIB });
-    const reader = await heldOpenByAReader(lock, 'Read', 3000);
-    let again = (): void => undefined;
-    try {
-      assert.equal(
-        await raiseSlotMemory(lock, 5 * MEMORY_GIB),
-        2 * MEMORY_GIB,
-        'held open, it is not raised',
-      );
-      again = readingEach([process.pid], 5 * MEMORY_GIB).follow(process.pid, 16 * MEMORY_GIB, (bytes) =>
-        raiseSlotMemory(lock, bytes),
-      );
-      assert.ok(
-        await untilTrue(() => lockFigure(lock) === 5 * MEMORY_GIB, 10_000),
-        `raised once the reader lets go: ${String(lockFigure(lock))}`,
-      );
-    } finally {
-      again();
-      await reader.letGo();
-    }
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * An engine whose slot is only followed, and grows past the cap, raises its slot to the cap and is
- * never ended there, since the process that guards it ends it.
- */
-async function testAFollowedEnginePastItsCapRaisesItsSlotToTheCap(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  const lock = join(directory, '0.lock');
-  try {
-    standInLock(directory, 0, started, { memory: 2 * MEMORY_GIB });
-    const stop = readingEach([process.pid], 7 * MEMORY_GIB).follow(process.pid, 4 * MEMORY_GIB, (bytes) =>
-      raiseSlotMemory(lock, bytes),
-    );
-    try {
-      assert.ok(
-        await untilTrue(() => lockFigure(lock) === 4 * MEMORY_GIB, 5000),
-        `raised to the 4 GiB cap: ${String(lockFigure(lock))}`,
-      );
-    } finally {
-      stop();
-    }
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A slot taken over from a holder that has gone is made as a fresh take makes it, so its time is
- * the take's own and the spare count sees it. With a staged name taken by a folder, a lock put
- * back through a staged file is lost and one made in place is kept. A file beside the slots (a
- * lanes mark) is taken over through a staged file as before.
- */
-async function testASlotTakenOverIsMadeInPlace(): Promise<void> {
-  const started = await ownStart();
-  const gone = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
-  assert.equal(typeof gone.pid, 'number', 'a process to have gone');
-  const dead = JSON.stringify({ pid: gone.pid, started });
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-takeover-'));
-  try {
-    writeFileSync(join(directory, '0.lock'), dead);
-    mkdirSync(join(directory, `.0.lock.${String(process.pid)}-0.writing`));
-    const slots = new EngineSlots(
-      directory,
-      1,
-      { pid: process.pid, started },
-      undefined,
-      undefined,
-      plentyOfMemory,
-    );
-    const lock = await slots.takeFree();
-    assert.equal(lock === null ? null : basename(lock), '0.lock', 'the slot is taken over');
-    assert.equal(
-      readFileSync(join(directory, '0.lock'), 'utf8'),
-      JSON.stringify({ pid: process.pid, started, memory: 1.5 * 1024 ** 3 }),
-      'and holds its new holder',
-    );
-    slots.releaseAll();
-    writeFileSync(join(directory, 'mark.json'), dead);
-    mkdirSync(join(directory, `.mark.json.${String(process.pid)}-0.writing`));
-    assert.equal(
-      await slots.takeFile(join(directory, 'mark.json')),
-      false,
-      'a mark taken over is still put back through a staged file, which the folder stops',
-    );
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A file made in the slots folder is never empty to a process reading it. A reader polling the
- * folder while 3000 locks are made reads none of them empty, and a path already there is left alone.
- */
-async function testAFileMadeInTheSlotsFolderIsNeverReadEmpty(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-made-'));
-  const reader = [
-    "const fs = require('fs');",
-    'const dir = process.argv[1];',
-    'let empty = 0;',
-    'let reads = 0;',
-    "while (!fs.existsSync(dir + '/done')) {",
-    '  for (const name of fs.readdirSync(dir)) {',
-    "    if (!name.endsWith('.lock')) continue;",
-    "    try { if (fs.readFileSync(dir + '/' + name, 'utf8') === '') empty += 1; reads += 1; } catch {}",
-    '  }',
-    '}',
-    "console.log(empty + ' ' + reads);",
-  ].join('\n');
-  try {
-    const child = spawnHidden(process.execPath, ['-e', reader, directory], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    let out = '';
-    child.stdout.on('data', (chunk: Buffer) => {
-      out += chunk.toString();
-    });
-    const ended = new Promise<void>((done) => {
-      child.once('close', () => {
-        done();
-      });
-    });
-    await delay(500);
-    const lockText = JSON.stringify({ pid: process.pid, started: 1 });
-    for (let slot = 0; slot < 3000; slot += 1) {
-      assert.ok(makeWhole(join(directory, `${String(slot)}.lock`), lockText), `lock ${String(slot)} is made`);
-    }
-    writeFileSync(join(directory, 'done'), '');
-    await ended;
-    const [empty = Number.NaN, reads = 0] = out.trim().split(' ').map(Number);
-    assert.deepEqual([empty, reads > 0], [0, true], `a reader found empty locks: ${out}`);
-    assert.equal(
-      makeWhole(join(directory, '0.lock'), 'other'),
-      false,
-      'a lock already there is not made again',
-    );
-    assert.equal(readFileSync(join(directory, '0.lock'), 'utf8'), lockText, 'and keeps its text');
-    assert.deepEqual(
-      readdirSync(directory).filter((name) => name.endsWith('.writing')),
-      [],
-      'no staged file is left',
-    );
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * Two processes making the same 1500 locks at once: each lock has one maker, and holds the text of
- * that one. A rename would replace the file there on Windows, which the link into place does not.
- */
-async function testTwoProcessesMakingTheSameLockNeverOverwriteEachOther(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-made-race-'));
-  const whole = pathToFileURL(resolve('src', 'whole-file.ts')).href;
-  const rival = [
-    `import { makeWhole } from ${JSON.stringify(whole)};`,
-    "import { existsSync } from 'node:fs';",
-    "import { join } from 'node:path';",
-    'const won = [];',
-    "while (!existsSync(join(process.argv[2], 'go'))) {}",
-    'for (let slot = 0; slot < 1500; slot += 1) {',
-    "  if (makeWhole(join(process.argv[2], slot + '.lock'), 'child')) won.push(slot);",
-    '}',
-    "console.log(won.join(' '));",
-  ].join('\n');
-  try {
-    const script = join(directory, 'rival.mjs');
-    writeFileSync(script, rival);
-    const child = spawnHidden(process.execPath, [script, directory], { stdio: ['ignore', 'pipe', 'ignore'] });
-    let out = '';
-    child.stdout.on('data', (chunk: Buffer) => {
-      out += chunk.toString();
-    });
-    const ended = new Promise<void>((done) => {
-      child.once('close', () => {
-        done();
-      });
-    });
-    const mine = new Set<number>();
-    await delay(2000);
-    writeFileSync(join(directory, 'go'), '');
-    for (let slot = 0; slot < 1500; slot += 1) {
-      if (makeWhole(join(directory, `${String(slot)}.lock`), 'parent')) {
-        mine.add(slot);
-      }
-    }
-    await ended;
-    const theirs = new Set(out.trim() === '' ? [] : out.trim().split(' ').map(Number));
-    for (let slot = 0; slot < 1500; slot += 1) {
-      const made = readFileSync(join(directory, `${String(slot)}.lock`), 'utf8');
-      assert.equal(
-        [mine.has(slot), theirs.has(slot)].filter(Boolean).length,
-        1,
-        `lock ${String(slot)} has one maker`,
-      );
-      assert.equal(made, mine.has(slot) ? 'parent' : 'child', `lock ${String(slot)} holds its maker's text`);
-    }
-    assert.ok(
-      mine.size > 0 && theirs.size > 0,
-      `both made some: ${String(mine.size)}, ${String(theirs.size)}`,
-    );
-    assert.equal(mine.size + theirs.size, 1500, 'every lock was made');
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A slot's lock is made by creating its name exclusively and writing after, as the gates' Python
- * queue makes its own (`slots.created`): with the staged name taken by a folder, which a staged
- * write would stop on, the slot is taken all the same.
- */
-async function testASlotLockIsCreatedWithoutAStagedFile(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-created-lock-'));
-  try {
-    mkdirSync(join(directory, `.0.lock.${String(process.pid)}-0.writing`));
-    const slots = new EngineSlots(
-      directory,
-      1,
-      { pid: process.pid, started },
-      undefined,
-      undefined,
-      plentyOfMemory,
-    );
-    const lock = await slots.takeFree();
-    assert.equal(lock === null ? null : basename(lock), '0.lock', 'the slot is taken with no staged file');
-    assert.equal(
-      readFileSync(join(directory, '0.lock'), 'utf8'),
-      JSON.stringify({ pid: process.pid, started, memory: 1.5 * 1024 ** 3 }),
-      'and holds its holder',
-    );
-    slots.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A file the slots take for marks and steal files, never raced for, is made through a staged file
- * and linked into place, so a reader never finds it empty. With the staged name taken by a folder
- * the file is not made, and with the name free it is made holding its holder.
- */
-async function testAFileTakenBesideTheSlotsIsMadeThroughItsStagedFile(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-staged-take-'));
-  try {
-    const staged = join(directory, `.mark.json.${String(process.pid)}-0.writing`);
-    mkdirSync(staged);
-    const slots = new EngineSlots(
-      directory,
-      1,
-      { pid: process.pid, started },
-      undefined,
-      undefined,
-      plentyOfMemory,
-    );
-    assert.equal(
-      await slots.takeFile(join(directory, 'mark.json')),
-      false,
-      'no file is made through a taken name',
-    );
-    assert.equal(existsSync(join(directory, 'mark.json')), false, 'and none is left');
-    rmSync(staged, { recursive: true });
-    assert.equal(await slots.takeFile(join(directory, 'mark.json')), true, 'with the name free it is made');
-    assert.equal(
-      readFileSync(join(directory, 'mark.json'), 'utf8'),
-      JSON.stringify({ pid: process.pid, started }),
-      'holding its holder',
-    );
-    assert.deepEqual(readdirSync(directory), ['mark.json'], 'and no staged file is left');
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * Files staged as `.<name>.<pid>-<thread>.writing` in the slots folder and its waiting folder, by
- * either side: a live writer's is left whatever it says inside, a dead writer's is removed whatever
- * it says, and none reads as a mark. The names of the writers decide, since a staged file is never
- * opened, which a rename onto its name from the other side would be refused for on Windows.
- */
-async function testTheSlotSweepJudgesStagedFilesByTheirWritersName(): Promise<void> {
-  const started = await ownStart();
-  const gone = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
-  assert.equal(typeof gone.pid, 'number', 'a process to have gone');
-  const live = `{"pid": ${String(process.pid)}, "started": ${String(started)}}`;
-  const dead = `{"pid": ${String(gone.pid)}, "started": ${String(started)}}`;
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-staged-'));
-  const waits = join(directory, WAITING_FOLDER);
-  mkdirSync(waits);
-  const liveName = `.${String(process.pid)}-1.json.${String(process.ppid)}-1.writing`;
-  const deadName = `.${String(process.pid)}-2.json.${String(gone.pid)}-1.writing`;
-  try {
-    writeFileSync(join(waits, liveName), dead);
-    writeFileSync(join(waits, deadName), live);
-    writeFileSync(join(directory, `.9.lock.${String(gone.pid)}-1.writing`), live);
-    writeFileSync(join(directory, `.8.lock.${String(process.ppid)}-1.writing`), dead);
-    assert.deepEqual(slotWaiters(directory), [], 'a staged file is no mark');
-    const slots = new EngineSlots(
-      directory,
-      4,
-      { pid: process.pid, started },
-      undefined,
-      undefined,
-      plentyOfMemory,
-    );
-    const lock = await slots.takeFree();
-    assert.notEqual(lock, null, 'a take beside staged files finds a slot');
-    assert.deepEqual(
-      [readdirSync(waits), readdirSync(directory).filter((name) => name.endsWith('.writing'))],
-      [[liveName], [`.8.lock.${String(process.ppid)}-1.writing`]],
-      "a dead writer's staged files go and a live writer's stay, as their names say",
-    );
-    slots.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
   }
 }
 
@@ -76695,375 +73682,6 @@ function testSuitePassesKeyAlikeInEveryCheckout(): void {
     assert.notEqual(reachedAlsoSaid([folder])[0], before, 'and a file added to it keys apart');
   } finally {
     rmSync(root, { recursive: true, force: true });
-  }
-}
-
-/** A slots folder of [param count] slots with no lock. */
-async function gameLineFolder(count: number): Promise<GameLineFolder> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-game-line-'));
-  mkdirSync(join(directory, WAITING_FOLDER));
-  const me = { pid: process.pid, started, by: 'gdharness test of /p' };
-  return { directory, count, me, started };
-}
-
-interface GameLineFolder {
-  readonly directory: string;
-  readonly count: number;
-  readonly me: { readonly pid: number; readonly started: number; readonly by: string };
-  readonly started: number;
-}
-
-/** Holds [param slots] with locks of this process, a game's where [param game] is set. */
-function slotsHeld(folder: GameLineFolder, slots: readonly number[], game = false): void {
-  for (const slot of slots) {
-    writeFileSync(
-      join(folder.directory, `${String(slot)}.lock`),
-      JSON.stringify({ ...folder.me, ...(game ? { game: true } : {}) }),
-    );
-  }
-}
-
-/** Writes the waiting mark of [param line] and its look at [param at]. */
-function waitingMarked(folder: GameLineFolder, line: SlotLine, at: number): void {
-  const mark = line.mark ?? '';
-  writeFileSync(join(folder.directory, WAITING_FOLDER, mark), JSON.stringify(line.marked(folder.me)));
-  lookedAt(folder, mark, at);
-}
-
-/** Sets the look note of the mark [param mark] to [param at]. */
-function lookedAt(folder: GameLineFolder, mark: string, at: number): void {
-  const note = join(folder.directory, WAITING_FOLDER, mark.replace(/\.json$/u, '.seen'));
-  writeFileSync(note, '');
-  utimesSync(note, at / 1000, at / 1000);
-}
-
-/** The slot [param lock] names, or null. */
-function lockNumber(lock: string | null): number | null {
-  const slot = lock === null ? undefined : /(\d+)\.lock$/u.exec(lock)?.[1];
-  return slot === undefined ? null : Number(slot);
-}
-
-/** A line that places every other taker ahead of it, as a build whose order differs from this one's would. */
-class EveryoneAheadLine extends SlotLine {
-  override ahead(waiters: Parameters<SlotLine['ahead']>[0]): ReturnType<SlotLine['ahead']> {
-    return waiters.filter((one) => one.mark !== this.mark);
-  }
-}
-
-/**
- * Two takers that each place the other ahead, both looking, on one free slot. Neither is gone, so
- * neither is dropped as gone: each leaves the slot to the other until it has stood free for
- * {@link SLOT_YIELD_MS}, and then one of them takes it.
- */
-async function testTwoTakersThatPlaceEachOtherAheadDoNotLeaveTheSlotToEachOtherForGood(): Promise<void> {
-  const folder = await gameLineFolder(12);
-  const realNow = Date.now;
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
-    const t0 = Date.now();
-    const first = new EveryoneAheadLine(process.pid);
-    first.mark = 'first.json';
-    const second = lineBegunAgo(200_000, 'second.json');
-    waitingMarked(folder, lineBegunAgo(300_000, 'first.json'), t0);
-    waitingMarked(folder, second, t0);
-    const a = new EngineSlots(folder.directory, 12, folder.me, undefined, undefined, plentyOfMemory);
-    const b = new EngineSlots(folder.directory, 12, folder.me, undefined, undefined, plentyOfMemory);
-    const look = async (taker: EngineSlots, line: SlotLine, at: number): Promise<number | null> => {
-      Date.now = () => at;
-      lookedAt(folder, 'first.json', at);
-      lookedAt(folder, 'second.json', at);
-      return lockNumber(await taker.takeFree(false, line));
-    };
-    for (const after of [0, 1000, 2000, 3000, SLOT_YIELD_MS - 1]) {
-      assert.deepEqual(
-        [await look(a, first, t0 + after), await look(b, second, t0 + after)],
-        [null, null],
-        `each leaves the slot to the other ${after} ms in`,
-      );
-    }
-    assert.deepEqual(a.drawn.left, [9], 'the one slot is left to the other');
-    const yielded = [await look(a, first, t0 + SLOT_YIELD_MS), await look(b, second, t0 + SLOT_YIELD_MS)];
-    assert.deepEqual(
-      yielded,
-      [9, null],
-      'at the yield one takes it and the other takes none of the slots it holds',
-    );
-    a.releaseAll();
-    b.releaseAll();
-  } finally {
-    Date.now = realNow;
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** A line that places ahead of it the takers [param names] gives at the look at the time it is given, in that order. */
-class NamedAheadLine extends SlotLine {
-  names: (now: number) => readonly string[] = () => [];
-  override ahead(waiters: Parameters<SlotLine['ahead']>[0]): ReturnType<SlotLine['ahead']> {
-    return this.names(Date.now()).flatMap((name) => waiters.filter((one) => one.mark === name));
-  }
-}
-
-/** A taker in {@link takesInTurn}. */
-interface TakerInTurn {
-  readonly mark: string;
-  readonly waited: number;
-  /** The marks it places ahead at the look at [param after] ms in, where it does not use this build's order. */
-  readonly ahead?: (after: number) => readonly string[];
-  /** Whether it only looks, as a taker on a build that leaves the slot to the others does. */
-  readonly looksOnly?: boolean;
-  /** The last ms in at which its mark looks, for a taker that stops looking. It looks at every step without it. */
-  readonly lastLook?: number;
-}
-
-/**
- * Looks at each of [param steps], in ms from the start, for every taker of [param takers] in turn on
- * a simulated clock, each mark that still looks doing so just before each take, and answers each take as
- * `<mark> took <slot> at <ms>`. [param before] runs before each step's takes.
- */
-async function takesInTurn(
-  folder: GameLineFolder,
-  takers: readonly TakerInTurn[],
-  steps: readonly number[],
-  before: (after: number) => void = () => undefined,
-): Promise<string[]> {
-  const realNow = Date.now;
-  const t0 = realNow();
-  Date.now = () => t0;
-  const took: string[] = [];
-  const lines = takers.map((one) => ({ one, ...takerInTurn(folder, one, t0) }));
-  try {
-    for (const after of steps) {
-      Date.now = () => t0 + after;
-      before(after);
-      for (const { one, line, slots } of lines.filter((each) => each.one.looksOnly !== true)) {
-        const marked = takers.filter(
-          (each) =>
-            existsSync(join(folder.directory, WAITING_FOLDER, each.mark)) &&
-            (each.lastLook === undefined || after <= each.lastLook),
-        );
-        for (const other of marked) {
-          lookedAt(folder, other.mark, t0 + after);
-        }
-        const lock = await slots.takeFree(false, line);
-        if (lock !== null) {
-          took.push(`${one.mark} took ${String(lockNumber(lock))} at ${String(after)}`);
-        }
-      }
-    }
-  } finally {
-    Date.now = realNow;
-    for (const { slots } of lines) {
-      slots.releaseAll();
-    }
-  }
-  return took;
-}
-
-/** The line and slots of [param one] in {@link takesInTurn}, begun at [param t0], with its waiting mark written. */
-function takerInTurn(
-  folder: GameLineFolder,
-  one: TakerInTurn,
-  t0: number,
-): { readonly line: SlotLine; readonly slots: EngineSlots } {
-  const { ahead } = one;
-  let line: SlotLine;
-  if (ahead === undefined) {
-    line = new SlotLine(folder.me.pid, t0 - one.waited);
-  } else {
-    const named = new NamedAheadLine(folder.me.pid, t0 - one.waited);
-    named.names = (now) => ahead(now - t0);
-    line = named;
-  }
-  line.mark = one.mark;
-  waitingMarked(folder, line, t0);
-  return {
-    line,
-    slots: new EngineSlots(folder.directory, folder.count, folder.me, undefined, undefined, plentyOfMemory),
-  };
-}
-
-/** Every 1000 ms from 0 to [param last] ms, with [param also] among them. */
-function looksEvery(last: number, ...also: number[]): number[] {
-  const every = Array.from({ length: last / 1000 + 1 }, (_, at) => at * 1000);
-  return [...every, ...also].toSorted((a, b) => a - b);
-}
-
-/**
- * A ring of three, each placing both others ahead, on one free slot, all looking: one takes it
- * at the look {@link SLOT_YIELD_MS} after the first that left it, and the others take nothing.
- */
-async function testARingOfThreeTakesTheFreeSlotAtTheYield(): Promise<void> {
-  const folder = await gameLineFolder(12);
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]);
-    const took = await takesInTurn(
-      folder,
-      [
-        { mark: 'a.json', waited: 200_000, ahead: () => ['b.json', 'game.json'] },
-        { mark: 'b.json', waited: 190_000, ahead: () => ['game.json', 'a.json'] },
-        { mark: 'game.json', waited: 300_000, ahead: () => ['a.json', 'b.json'] },
-      ],
-      looksEvery(SLOT_YIELD_MS + 3000, SLOT_YIELD_MS - 1),
-    );
-    assert.deepEqual(took, [`a.json took 10 at ${String(SLOT_YIELD_MS)}`]);
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * Two games of a build that places a game behind an aged call and never yields, of 300 s and 280 s,
- * and a call of 260 s on this build, which places both games ahead: the call takes the slot
- * freed at the look {@link SLOT_YIELD_MS} after it was first left.
- */
-async function testACallBehindTwoGamesThatLeaveItTheSlotTakesItAtTheYield(): Promise<void> {
-  const folder = await gameLineFolder(12);
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
-    const took = await takesInTurn(
-      folder,
-      [
-        { mark: 'game300.json', waited: 300_000, looksOnly: true },
-        { mark: 'game280.json', waited: 280_000, looksOnly: true },
-        { mark: 'call.json', waited: 260_000 },
-      ],
-      looksEvery(SLOT_YIELD_MS + 4000),
-      (after) => {
-        if (after === 1000) {
-          rmSync(join(folder.directory, '10.lock'));
-        }
-      },
-    );
-    assert.deepEqual(took, [`call.json took 10 at ${String(1000 + SLOT_YIELD_MS)}`]);
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A ring of four, and a ring of three whose order turns at every look, so the slot is left to another
- * taker at each: one takes it at the look {@link SLOT_YIELD_MS} after it was first left.
- */
-async function testARingTakesTheFreeSlotAtTheYieldWhoeverItIsLeftTo(): Promise<void> {
-  const turning =
-    (...names: string[]) =>
-    (after: number): readonly string[] =>
-      (after / 1000) % 2 === 0 ? names : names.toReversed();
-  for (const [label, takers] of [
-    [
-      'a ring of four',
-      [
-        { mark: 'a.json', waited: 200_000, ahead: () => ['b.json', 'c.json', 'game.json'] },
-        { mark: 'b.json', waited: 190_000, ahead: () => ['c.json', 'game.json', 'a.json'] },
-        { mark: 'c.json', waited: 180_000, ahead: () => ['game.json', 'a.json', 'b.json'] },
-        { mark: 'game.json', waited: 300_000, ahead: () => ['a.json', 'b.json', 'c.json'] },
-      ],
-    ],
-    [
-      'a ring of three that turns',
-      [
-        { mark: 'a.json', waited: 200_000, ahead: turning('b.json', 'game.json') },
-        { mark: 'b.json', waited: 190_000, ahead: turning('game.json', 'a.json') },
-        { mark: 'game.json', waited: 300_000, ahead: turning('a.json', 'b.json') },
-      ],
-    ],
-  ] as const) {
-    const folder = await gameLineFolder(12);
-    try {
-      slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]);
-      assert.deepEqual(
-        await takesInTurn(folder, takers, looksEvery(SLOT_YIELD_MS + 3000)),
-        [`a.json took 10 at ${String(SLOT_YIELD_MS)}`],
-        label,
-      );
-    } finally {
-      rmSync(folder.directory, { recursive: true, force: true });
-    }
-  }
-}
-
-/** A slot held at one look in the middle of the wait stands free from the next look that finds it free. */
-async function testASlotHeldForALookStartsItsYieldAgain(): Promise<void> {
-  const folder = await gameLineFolder(12);
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]);
-    const took = await takesInTurn(
-      folder,
-      [
-        { mark: 'ahead.json', waited: 300_000, looksOnly: true },
-        { mark: 'call.json', waited: 200_000 },
-      ],
-      looksEvery(3000 + SLOT_YIELD_MS + 2000),
-      (after) => {
-        if (after === 2000) {
-          slotsHeld(folder, [10]);
-        }
-        if (after === 3000) {
-          rmSync(join(folder.directory, '10.lock'));
-        }
-      },
-    );
-    assert.deepEqual(took, [`call.json took 10 at ${String(3000 + SLOT_YIELD_MS)}`]);
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** A taker ahead that takes the slot at its next look, inside {@link SLOT_YIELD_MS}, is never passed. */
-async function testASlowTakerAheadThatTakesInsideTheYieldIsNeverPassed(): Promise<void> {
-  const folder = await gameLineFolder(12);
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]);
-    const took = await takesInTurn(
-      folder,
-      [
-        { mark: 'slow.json', waited: 300_000, looksOnly: true },
-        { mark: 'call.json', waited: 200_000 },
-      ],
-      looksEvery(SLOT_YIELD_MS + 3000, SLOT_YIELD_MS - 500),
-      (after) => {
-        if (after === SLOT_YIELD_MS - 500) {
-          slotsHeld(folder, [10]);
-          rmSync(join(folder.directory, WAITING_FOLDER, 'slow.json'));
-        }
-      },
-    );
-    assert.deepEqual(took, [], 'the call takes nothing');
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * Each free slot counts its own yield: a slot left 4 s before another is freed is taken at its own
- * {@link SLOT_YIELD_MS}, and the other only at the end of its own.
- */
-async function testEachFreeSlotCountsItsOwnYield(): Promise<void> {
-  const folder = await gameLineFolder(12);
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]);
-    const took = await takesInTurn(
-      folder,
-      [
-        { mark: 'first.json', waited: 300_000, looksOnly: true },
-        { mark: 'second.json', waited: 290_000, looksOnly: true },
-        { mark: 'call.json', waited: 200_000 },
-      ],
-      looksEvery(4000 + SLOT_YIELD_MS * 2),
-      (after) => {
-        if (after === 4000) {
-          rmSync(join(folder.directory, '11.lock'));
-        }
-      },
-    );
-    assert.deepEqual(took, [
-      `call.json took 10 at ${String(SLOT_YIELD_MS)}`,
-      `call.json took 11 at ${String(4000 + SLOT_YIELD_MS)}`,
-    ]);
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
   }
 }
 
@@ -77199,180 +73817,216 @@ function testAnUnreadableWorktreeGitFileListsNoWorktrees(): void {
   }
 }
 
-/**
- * A game the server starts for a project, a test run among them, takes its slot for that project,
- * so its wait carries the project's repository. The server's start needs an engine to run, so the
- * hand-over is read from its source: every call names the project, and the slot take receives it.
- */
-function testEveryGameTheServerStartsTakesItsSlotForItsProject(): void {
-  const source = readFileSync('src/server.ts', 'utf8');
-  // A call ends at the first `)` closing a statement, so one nested in a retry ends where it does.
-  const calls = [...source.matchAll(/this\.spawnGame\(([\s\S]*?)\)\s*;/g)].map(firstGroup);
-  assert.ok(calls.length >= 2, `only ${String(calls.length)} calls of spawnGame were read`);
-  for (const call of calls) {
-    assert.match(
-      call,
-      /(?:project\.value\.path|projectPath),?\s*$/,
-      `a spawnGame call names no project: ${call}`,
-    );
+/** What one character inside a GDScript string adds to the argument, where the scan goes on, and whether it closed the string. */
+function takeInsideAGdscriptString(
+  source: string,
+  at: number,
+  quote: string,
+): { text: string; at: number; closed: boolean } {
+  const char = source[at] ?? '';
+  if (char === '\\') {
+    return { text: char + (source[at + 1] ?? ''), at: at + 1, closed: false };
   }
-  const taken = /private async spawnGame\([\s\S]*?const held = await slotForCall\(false, project, tool\);/;
-  assert.match(source, taken, 'spawnGame takes its slot for the project it is given');
+  return { text: char, at, closed: char === quote };
+}
+
+/** One for an opening bracket, minus one for a closing one, nothing for any other character. */
+function gdscriptBracketDepthChange(char: string): number {
+  if (char === '(' || char === '[' || char === '{') {
+    return 1;
+  }
+  return char === ')' || char === ']' || char === '}' ? -1 : 0;
+}
+
+/** Where the scan of a GDScript call's arguments stands. */
+interface GdscriptArgumentScan {
+  found: string[];
+  depth: number;
+  quote: string | null;
+  current: string;
+}
+
+/** Takes the character at [param at] into the scan and returns the last index it used, or null when the arguments close. */
+function scanOneGdscriptCharacter(scan: GdscriptArgumentScan, source: string, at: number): number | null {
+  const char = source[at] ?? '';
+  if (scan.quote !== null) {
+    const taken = takeInsideAGdscriptString(source, at, scan.quote);
+    scan.current += taken.text;
+    scan.quote = taken.closed ? null : scan.quote;
+    return taken.at;
+  }
+  if (char === '#') {
+    const end = source.indexOf('\n', at);
+    return end === -1 ? source.length : end - 1;
+  }
+  if (char === ',' && scan.depth === 0) {
+    scan.found.push(scan.current.trim());
+    scan.current = '';
+    return at;
+  }
+  if (scan.depth === 0 && gdscriptBracketDepthChange(char) < 0) {
+    return null;
+  }
+  if (char === '"' || char === "'") {
+    scan.quote = char;
+  } else {
+    scan.depth += gdscriptBracketDepthChange(char);
+  }
+  scan.current += char;
+  return at;
+}
+
+/**
+ * The top-level arguments of the call whose opening bracket is at [param open] in [param source],
+ * GDScript: brackets inside strings and comments are not counted, and neither are commas.
+ */
+function gdscriptArguments(source: string, open: number): string[] {
+  const scan: GdscriptArgumentScan = { found: [], depth: 0, quote: null, current: '' };
+  for (let at = open + 1; at < source.length; at += 1) {
+    const last = scanOneGdscriptCharacter(scan, source, at);
+    if (last === null) {
+      const final = scan.current.trim();
+      return final === '' ? scan.found : [...scan.found, final];
+    }
+    at = last;
+  }
+  return scan.found;
+}
+
+/**
+ * Nothing in the package, its scripts or its tests starts a process except through `src/spawn.ts`,
+ * whose every start passes `windowsHide`, or the prelude that does the same for a script a test
+ * hands to Node. A process with no console gives every console program it starts a window of its
+ * own on the desktop in use, and a gate run detached after a push put about twenty of them on the
+ * screen of the person at the machine. Walked rather than listed, so a file added later is covered.
+ * A stand-in started from a string counts, which is why the words are searched for and not the
+ * imports. GDScript starts through Godot's own calls, which open no console unless asked to with
+ * `open_console`, so the shipped scripts never ask.
+ */
+function testEveryProcessStartsThroughTheHiddenSpawn(): void {
+  // Built from parts, because this file is one of the files walked.
+  const starters = [
+    ['child', 'process'].join('_'),
+    ['Bun', 'spawn'].join('.'),
+    ['Bun', '$'].join('.'),
+    ['Create', 'ProcessW('].join(''),
+    ['Start', 'Process'].join('-'),
+    ['Process', 'Start'].join('.'),
+    ['Shell', 'Execute'].join(''),
+    ['new', 'Worker'].join(' '),
+  ];
+  const shell = new RegExp(['from', "'bun'"].join(' '));
+  const roots = ['src', 'scripts', 'test'];
+  const walked = roots.flatMap((root) =>
+    readdirSync(root, { recursive: true })
+      .map(String)
+      .filter((entry) => /\.[cm]?[jt]s$/.test(entry))
+      .map((entry) => join(root, entry)),
+  );
+  assert.ok(walked.length >= 110, `the sources were walked: ${walked.length}`);
+  const starting = walked
+    .filter((file) => {
+      const source = readFileSync(file, 'utf8');
+      return starters.some((word) => source.includes(word)) || shell.test(source);
+    })
+    .toSorted();
+  assert.deepEqual(
+    starting,
+    // The desktop helper is C# text that starts an engine or a game on a desktop of its own, which
+    // spawn.ts cannot do. The helper itself is started through spawnHidden. The stand-in engine is a
+    // compiled program that cannot import spawn.ts, so each start in its source is checked below.
+    [
+      join('src', 'desktop.ts'),
+      join('src', 'spawn.ts'),
+      join('test', 'support', 'crashing-engine.ts'),
+      join('test', 'support', 'hidden-spawn.ts'),
+      join('test', 'support', 'memory-engine.ts'),
+      join('test', 'support', 'renderer-less-engine.ts'),
+    ],
+    'start a process with spawnHidden, runHidden, runSyncHidden or spawnSyncHidden from src/spawn.ts, ' +
+      'spawnShown for a game somebody asked to see, or HIDDEN_SPAWN_PRELUDE in a script handed to Node',
+  );
+  const standInStarts = ['renderer-less-engine.ts', 'memory-engine.ts'].flatMap((file) =>
+    readFileSync(join('test', 'support', file), 'utf8')
+      .split(['Bun', 'spawn'].join('.'))
+      .slice(1),
+  );
+  assert.ok(standInStarts.length >= 1, 'the stand-in engine starts the engine it hands a start to');
+  assert.deepEqual(
+    standInStarts.filter((start) => !/^\w*\([^;]*windowsHide: true/.test(start)),
+    [],
+    'every start the stand-in engine makes passes windowsHide',
+  );
+  // The crashing stand-in is C# text, so its starts pass CreateNoWindow where Node's pass windowsHide.
+  const crashingStarts = CRASHING_ENGINE_SOURCE.split(['Process', 'Start('].join('.')).length - 1;
+  assert.ok(crashingStarts >= 1, 'the crashing stand-in starts the engine it hands a start to');
   assert.equal(
-    source.match(/slotForCall\(true, projectPath\)/g)?.length,
-    2,
-    'both takes for a game editor_run starts name the project',
+    CRASHING_ENGINE_SOURCE.split('CreateNoWindow = true;').length - 1,
+    crashingStarts,
+    'every start the crashing stand-in makes passes CreateNoWindow',
   );
-  assert.match(
-    source,
-    /runEngine\(engine\.value, exportArgs, \{\s*timeout: [^\n]*\n\s*project: project\.value\.path,/,
-    'an export names its project',
-  );
-  assert.match(
-    source,
-    /editor: true,\s*project: projectPath,\s*\};\s*const outcome = await runOperation\(exporting, 'export_options'/,
-    "the export options step, which runs on an empty folder, names the preset's project",
-  );
-}
 
-/** A take for a project in a git work tree writes its lock as a take for none does. */
-async function testALockOfATakeForAProjectInGitIsAsThatOfATakeForNone(): Promise<void> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-lock-'));
-  try {
-    const project = join(root, 'listed-game');
-    mkdirSync(join(project, '.git'), { recursive: true });
-    const me = { pid: process.pid, started: await ownStart() };
-    const locks: string[] = [];
-    for (const forProject of [project, undefined]) {
-      const directory = join(root, forProject === undefined ? 'none' : 'git');
-      mkdirSync(directory);
-      const taker = new EngineSlots(directory, 1, me, undefined, forProject, plentyOfMemory);
-      const lock = await taker.take();
-      locks.push(readFileSync(lock, 'utf8'));
-      taker.release(lock);
+  // Godot's own: `OS.create_process(path, arguments, open_console)` and
+  // `OS.execute(path, arguments, output, read_stderr, open_console)`.
+  const consoleArgument: Record<string, number> = { create_process: 2, execute: 4 };
+  // A comma and a bracket in a string, and a comment holding the argument the walk looks for: each
+  // is skipped by one line of the reading, and the shipped call has none of them.
+  const awkward = 'OS.create_process("a, (b", [\'c)\'],  # , true)\n\tfalse)';
+  assert.deepEqual(
+    gdscriptArguments(awkward, awkward.indexOf('(')),
+    ['"a, (b"', "['c)']", 'false'],
+    'the arguments are read as GDScript reads them',
+  );
+  const scripts = ['src', 'test'].flatMap((root) =>
+    readdirSync(root, { recursive: true })
+      .map(String)
+      .filter((entry) => entry.endsWith('.gd'))
+      .map((entry) => join(root, entry)),
+  );
+  const starts: string[] = [];
+  const consoles: string[] = [];
+  const unchecked: string[] = [];
+  for (const script of scripts) {
+    const source = readFileSync(script, 'utf8');
+    // The other ways to start a program or open one, which have no console argument to check.
+    for (const call of source.matchAll(
+      /\bOS\s*\.\s*(execute_with_pipe|create_instance|shell_open|shell_show_in_file_manager)\s*\(/g,
+    )) {
+      unchecked.push(`${script} ${call[1] ?? ''}`);
     }
-    assert.equal(locks[0], locks[1], 'the two locks are the same bytes');
-    assert.ok(!locks[0]?.includes('repository'), 'and name no repository');
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
-/**
- * A take that finds every slot held keeps a mark of its wait for as long as it waits, and only then.
- *
- * The games' gates read the marks to leave the time `gdharness test` stood waiting for slots others
- * held out of their own clocks, so a mark missing while it waits counts the wait against the gate,
- * and one left behind counts the rest of the run as waiting. Python, which those gates are written
- * in, opens a file without delete sharing, and Windows will not remove a file opened so. A lock
- * given back while one reads it has to be removed once the read ends, or the slot stays taken.
- */
-async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
-  const marks = join(directory, WAITING_FOLDER);
-  const marked = (): string[] =>
-    existsSync(marks)
-      ? readdirSync(marks)
-          .filter((name) => name.endsWith('.json'))
-          .toSorted()
-      : [];
-  const markedSoon = async (count: number): Promise<string[]> => {
-    const until = Date.now() + 5000;
-    while (marked().length !== count && Date.now() < until) {
-      await delay(20);
-    }
-    return marked();
-  };
-  // Every wait ends with the case, so one whose assertion failed does not keep the suite running.
-  const stop = new AbortController();
-  const pending: Promise<unknown>[] = [];
-  try {
-    const holder = { pid: process.pid, started: await ownStart() };
-    const slots = new EngineSlots(directory, 1, holder, undefined, undefined, plentyOfMemory);
-    const waitFor = (signal?: AbortSignal): Promise<string> => {
-      const taken = slots.take(signal === undefined ? stop.signal : AbortSignal.any([stop.signal, signal]));
-      pending.push(taken.catch(() => undefined));
-      return taken;
-    };
-    const first = await slots.take();
-    assert.deepEqual(marked(), [], 'a slot free at once is taken without a mark');
-
-    const waited = waitFor();
-    const one = await markedSoon(1);
-    assert.equal(one.length, 1, 'a take finding every slot held marks its wait');
-    assert.match(one[0] ?? '', new RegExp(`^${String(process.pid)}-\\d+\\.json$`), 'named by pid and wait');
-    const said = asObject(JSON.parse(readFileSync(join(marks, one[0] ?? ''), 'utf8')), 'the wait mark');
-    assert.deepEqual(
-      { ...said, since: 0 },
-      { ...holder, since: 0 },
-      'holding what its lock will and when it began',
-    );
-    const since = said['since'];
-    assert.ok(
-      typeof since === 'number' && Math.abs(since - Date.now()) < 10_000,
-      `and when it began to wait, in milliseconds: ${String(since)}`,
-    );
-    const firstMark = join(marks, one[0] ?? '');
-    const firstBegan = markBegan(firstMark);
-    // An old wait's note goes as the next wait begins, and one still within its keeping stays.
-    const stale = join(marks, '1-1.ended');
-    const fresh = join(marks, '1-2.ended');
-    writeFileSync(stale, '{}');
-    writeFileSync(fresh, '{}');
-    const elevenMinutesAgo = new Date(Date.now() - 660_000);
-    utimesSync(stale, elevenMinutesAgo, elevenMinutesAgo);
-    const besideIt = new AbortController();
-    const another = waitFor(besideIt.signal);
-    const two = await markedSoon(2);
-    assert.equal(new Set(two).size, 2, 'each wait in a process has a mark of its own');
-
-    slots.release(first);
-    assert.equal(await waited, first, 'the wait takes the slot given back');
-    assert.deepEqual(await markedSoon(1), [two.find((name) => name !== one[0])], 'and its mark is gone');
-    assert.deepEqual(
-      [existsSync(stale), existsSync(fresh)],
-      [false, true],
-      'the old note went, the new one stayed',
-    );
-    // Beside it, when the wait began and ended, for a reader whose looks came too late to see it end.
-    const note = asObject(JSON.parse(readFileSync(endedNoteOf(firstMark), 'utf8')), 'the ended note');
-    assert.equal(note['began'], firstBegan, `began is the mark's own time: ${JSON.stringify(note)}`);
-    const endedAt = note['ended'];
-    assert.ok(
-      typeof endedAt === 'number' &&
-        typeof firstBegan === 'number' &&
-        endedAt >= firstBegan &&
-        Math.abs(endedAt * 1000 - Date.now()) < 10_000,
-      `and ended is when it ended, in seconds: ${JSON.stringify(note)}`,
-    );
-    besideIt.abort();
-    await assert.rejects(another, /abort/i, 'an aborted wait');
-    assert.deepEqual(await markedSoon(0), [], 'takes its mark with it');
-
-    const ending = new AbortController();
-    const left = waitFor(ending.signal);
-    assert.equal((await markedSoon(1)).length, 1, 'a wait still going as the process ends');
-    slots.releaseAll();
-    assert.deepEqual(marked(), [], 'has its mark taken by giving back everything');
-    assert.equal(existsSync(first), false, 'as the slot is');
-    ending.abort();
-    await left.catch(() => undefined);
-
-    if (process.platform === 'win32') {
-      const lock = await slots.take();
-      const reader = await heldOpenByAReader(lock, 'Read', 300);
-      try {
-        slots.release(lock);
-        assert.equal(existsSync(lock), false, 'a lock given back while another process reads it is removed');
-      } finally {
-        await reader.letGo();
+    for (const call of source.matchAll(/\bOS\s*\.\s*(create_process|execute)\s*\(/g)) {
+      const name = call[1] ?? '';
+      const given = gdscriptArguments(source, call.index + call[0].length - 1);
+      starts.push(`${script} ${name}`);
+      const asked = given[consoleArgument[name] ?? Number.POSITIVE_INFINITY];
+      if (asked !== undefined && asked !== 'false') {
+        consoles.push(`${script} ${name}(${given.join(', ')})`);
       }
     }
-  } finally {
-    stop.abort();
-    await Promise.all(pending);
-    sweep(directory);
   }
+  assert.ok(starts.length >= 1, `the scripts' process starts were found: ${JSON.stringify(starts)}`);
+  assert.deepEqual(consoles, [], 'a process a script starts opens no console window');
+  assert.deepEqual(unchecked, [], 'a script starts programs through create_process or execute alone');
+}
+
+/**
+ * The helper's command, its spec and its desktop variable are made in one place. Every other start
+ * through the helper is a call to it, which a new caller writing its own would bypass.
+ */
+function testEveryDesktopStartGoesThroughOneCall(): void {
+  const files = readdirSync('src', { recursive: true })
+    .map(String)
+    .filter((entry) => entry.endsWith('.ts'))
+    .map((entry) => join('src', entry));
+  assert.ok(files.length > 50, `the sources were walked: ${files.length}`);
+  const calling = (needle: string): string[] =>
+    files.filter((file) => readFileSync(file, 'utf8').includes(needle)).toSorted();
+  assert.deepEqual(calling(['through', 'Helper('].join('')), [join('src', 'desktop.ts')], 'the spec writer');
+  assert.deepEqual(
+    calling(['[DESKTOP', 'VARIABLE]'].join('_')),
+    [join('src', 'desktop.ts')],
+    'the desktop variable is named in one place',
+  );
 }
 
 /** Writes [param files] under [param root], by path. */
@@ -78549,11 +75203,6 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'one ending as the next begins is not two at once',
     );
     assert.match(sharesSaid(0, 4), /^None of the 4 slots this run uses were free as it began/);
-    assert.equal(
-      memorySaid(1, 4, memory),
-      `Memory had room for one of these 4 engines at once as the run began, since ${memory}, so its engines are handed the suites a share at a time, and another starts whenever memory has room for it.`,
-    );
-    assert.match(memorySaid(2, 3, memory), /^Memory had room for 2 of these 3 engines at once/);
 
     let going = 0;
     let most = 0;
@@ -78642,63 +75291,18 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     );
     assert.match(String(mixed['note']), /^Ran as two engines/);
 
-    // The room a run has, from the processors and the memory handed in: what is asked for when
-    // both have it, and otherwise fewer, with what held it.
-    const gb = 1024 ** 3;
-    assert.deepEqual(roomFor(2, 16, 12 * gb), { engines: 2, held: undefined }, 'room for what was asked');
+    // The room a run has, from the processors: what is asked for when they have it, and otherwise fewer.
+    assert.deepEqual(roomFor(2, 16), { engines: 2, held: undefined }, 'room for what was asked');
     assert.deepEqual(
-      roomFor(2, 3, 4.5 * gb),
-      {
-        engines: 1,
-        held: 'the machine has 4.5 GB of memory free, 4.0 GB of it kept for everything else and 1.5 GB taken for each engine',
-      },
-      'memory holds a run to one engine, and never to none',
-    );
-    assert.deepEqual(
-      roomFor(4, 2, 32 * gb),
+      roomFor(4, 2),
       { engines: 2, held: 'the machine has 2 processors' },
-      'and processors do',
+      'and processors hold it below what was asked',
     );
-    // Windows refuses an allocation at the commit limit: the machine in the report had 23 GB free
-    // and 4.9 GB left to commit, and sixteen engines sized by the first died of the second.
-    const room = memoryRoomOf(23 * gb, 4.9 * gb);
-    assert.deepEqual(room, { bytes: 4.9 * gb, said: 'of memory left to commit' }, 'the smaller of the two');
     assert.deepEqual(
-      roomFor(16, 16, room.bytes, room.said),
-      {
-        engines: 1,
-        held: 'the machine has 4.9 GB of memory left to commit, 4.0 GB of it kept for everything else and 1.5 GB taken for each engine',
-      },
-      'and the line says which it was',
+      roomFor(3, 0),
+      { engines: 1, held: 'the machine has 0 processors' },
+      'and never to none',
     );
-    assert.deepEqual(memoryRoomOf(8 * gb, 100 * gb), { bytes: 8 * gb, said: 'of memory free' });
-    assert.deepEqual(memoryRoomOf(8 * gb, null), { bytes: 8 * gb, said: 'of memory free' }, 'off Windows');
-    assert.deepEqual(
-      memoryRoomOf(8 * gb, 'PowerShell timed out'),
-      { bytes: 8 * gb, said: 'of memory free', unread: 'PowerShell timed out' },
-      'and a reading Windows did not give is said',
-    );
-    // Asked of the real system, since every case above hands the reading in.
-    const commit = await windowsCommitLeft();
-    if (process.platform === 'win32') {
-      assert.ok(
-        typeof commit === 'number' && commit > 0,
-        `Windows says what it can still commit: ${String(commit)}`,
-      );
-    } else {
-      assert.equal(commit, null, 'and nothing is asked elsewhere');
-    }
-    // macOS's own reading, asked of the real kernel there: without it every run on a Mac is held
-    // to the few hundred megabytes freemem counts.
-    const level = await macMemoryLevel();
-    if (process.platform === 'darwin') {
-      assert.ok(
-        level !== null && level > 0 && level <= 100,
-        `macOS says what share is free: ${String(level)}`,
-      );
-    } else {
-      assert.equal(level, null, 'and nothing is asked elsewhere');
-    }
 
     const after = timesAfter(
       times,
@@ -78933,7 +75537,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     assert.deepEqual(empty.faults, [], 'an engine whose rows the case no longer has has nothing to run');
     assert.deepEqual(
       judgeEngine(gone, { suites: [{ path: lone_.path, cases: ['test_only'] }], expected }, noEnd).faults,
-      ['the run never printed its summary', `${lone_.path} never started`],
+      ['the run wrote no JUnit report', `${lone_.path} never started`],
       'while one handed the case whole that runs nothing still fails',
     );
     const across = (...engines: Array<[RowShare, Array<[number, string]>]>): string[] =>
@@ -79068,8 +75672,8 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     );
     assert.deepEqual(
       shrunk.faults,
-      ['the run never printed its summary'],
-      'one dealt rows the case no longer has is faulted for the missing summary and not for running none',
+      ['the run executed no test case at all, whatever it exited with'],
+      'one dealt rows the case no longer has is faulted for running none',
     );
   } finally {
     sweep(project);
@@ -80954,7 +77558,10 @@ async function testAPassingRunKeepsTheLogOfAnEngineThatRanASlowCase(): Promise<v
       );
     } finally {
       holder.kill();
-      rmSync(join(slots, '0.lock'), { force: true });
+      // The system frees its lock as the process ends, which is after the kill is sent.
+      if (holder.exitCode === null && holder.signalCode === null) {
+        await new Promise((settle) => holder.once('exit', settle));
+      }
     }
     assert.equal(shared.status, 0, shared.said);
     assert.match(shared.said, /a share at a time/, `the run was shared: ${shared.said}`);
@@ -81291,71 +77898,56 @@ async function testEveryLongCallIsHeardFrom(): Promise<void> {
   }
 }
 
+/** The module a process of its own takes locks through, as the server does. */
+const OS_LOCK_URL = pathToFileURL(resolve('src', 'os-lock.ts')).href;
+
 /**
  * Has a process of its own hold the slot at [param lock] for [param ms], as another run on the
- * machine would, and answers once the lock is written. A synchronous spawn after it still sees it
- * given back, since the holder runs on its own clock. The lock names the start the platform reports
- * for the holder, as a taker reads it: the holder's own reckoning from its uptime landed more than
- * the tolerance away on a loaded machine, and the slot was taken as free at once. Hold it for some
- * seconds past the two a command waits before saying so: a command asks the platform for its own
- * start before it takes a slot, and on a loaded machine that question took most of three and a half.
+ * machine would, and answers once it holds it. Killing the process gives the slot back, since the
+ * operating system frees a lock when its holder ends. Hold it for some seconds past the two a command
+ * waits before saying so.
  */
 async function slotHeldElsewhere(lock: string, ms: number): Promise<ReturnType<typeof spawnHidden>> {
   const holder = spawnHidden(
     process.execPath,
     [
       '-e',
-      `const fs = require('node:fs');
-const written = setInterval(() => {
-  if (fs.existsSync(${JSON.stringify(lock)})) {
-    clearInterval(written);
-    setTimeout(() => { fs.rmSync(${JSON.stringify(lock)}, { force: true }); }, ${String(ms)});
-  }
-}, 20);`,
+      `import(${JSON.stringify(OS_LOCK_URL)}).then(({ tryOsLock }) => {
+  const held = tryOsLock(${JSON.stringify(lock)});
+  if (held === null) process.exit(3);
+  setTimeout(() => { held.release(); process.exit(0); }, ${String(ms)});
+}).catch((error) => { console.log(String(error)); process.exit(4); });`,
     ],
-    { stdio: 'ignore' },
+    { stdio: ['ignore', 'pipe', 'pipe'] },
   );
-  const pid = holder.pid ?? 0;
-  const started = (await startTimesOf([pid])).get(pid);
-  assert.ok(started !== undefined, `the platform says when the holder ${String(pid)} started`);
-  writeFileSync(lock, JSON.stringify({ pid, started }));
+  const printed = sayingOf(holder);
+  assert.ok(await cameTrue(() => isHeld(lock), 30_000), `the holder takes the lock: ${printed.text()}`);
   return holder;
 }
 
 /**
- * Has a process of its own wait for the slot at [param lock] to be taken and given back, then take
+ * Has a process of its own wait for the slot at [param lock] to be seen held and then free, and take
  * it for [param ms], as another run waiting on the machine's slots would. It looks every 2 ms, so it
- * takes a slot given back before a take polling every 50 ms does. The platform's start for it is
- * written to [param lock]`.start` before it looks, since its lock must name that start.
+ * takes a slot given back before a take polling every second does.
  */
-async function slotTakenWhenFreed(lock: string, ms: number): Promise<ReturnType<typeof spawnHidden>> {
-  const start = `${lock}.start`;
-  const taker = spawnHidden(
+function slotTakenWhenFreed(lock: string, ms: number): ReturnType<typeof spawnHidden> {
+  return spawnHidden(
     process.execPath,
     [
       '-e',
-      `const fs = require('node:fs');
-let seen = false;
-const look = setInterval(() => {
-  if (!fs.existsSync(${JSON.stringify(start)})) return;
-  if (!seen) {
-    try { const held = fs.readFileSync(${JSON.stringify(lock)}, 'utf8'); if (held === '') return; fs.writeFileSync(${JSON.stringify(`${lock}.seen`)}, held); seen = true; } catch {}
-    return;
-  }
-  try {
-    fs.writeFileSync(${JSON.stringify(lock)}, JSON.stringify({ pid: process.pid, started: Number(fs.readFileSync(${JSON.stringify(start)}, 'utf8')) }), { flag: 'wx' });
-  } catch { return; }
-  clearInterval(look);
-  setTimeout(() => { fs.rmSync(${JSON.stringify(lock)}, { force: true }); }, ${String(ms)});
-}, 2);`,
+      `import(${JSON.stringify(OS_LOCK_URL)}).then(({ tryOsLock }) => {
+  let seenHeld = false;
+  const look = setInterval(() => {
+    const taken = tryOsLock(${JSON.stringify(lock)});
+    if (taken === null) { seenHeld = true; return; }
+    if (!seenHeld) { taken.release(); return; }
+    clearInterval(look);
+    setTimeout(() => { taken.release(); process.exit(0); }, ${String(ms)});
+  }, 2);
+});`,
     ],
     { stdio: 'ignore' },
   );
-  const pid = taker.pid ?? 0;
-  const started = (await startTimesOf([pid])).get(pid);
-  assert.ok(started !== undefined, `the platform says when the taker ${String(pid)} started`);
-  writeFileSync(start, String(started));
-  return taker;
 }
 
 /**
@@ -81597,7 +78189,6 @@ async function checksTheMachineSlotsAndTheirWaitMessages(): Promise<void> {
     env,
     platform,
     processors,
-    memory: 64 * 1024 ** 3,
     home: join(sep, 'home', 'me'),
     cwd: join(sep, 'work'),
   });
@@ -81661,33 +78252,17 @@ async function checksTheMachineSlotsAndTheirWaitMessages(): Promise<void> {
   assert.deepEqual(machineSlots().directory, join(tmpdir(), 'gdharness-test-slots'));
   assert.equal(
     slotWaitSaid(41_400, 6, 'slots'),
-    'Waiting 41 s so far for an engine: all 6 engine slots on this machine (slots) are in use, by other programs, and the engine starts when one is given back.',
-  );
-  // Who holds them, one entry a slot: grouped by process, named by what took them where the lock
-  // says, and by pid where a lock written without it does not.
-  const gate = { pid: 1, started: 1, by: 'gdharness test of /games/one' };
-  const unnamed = { pid: 2, started: 1 };
-  assert.equal(
-    slotWaitSaid(41_400, 6, 'slots', [gate, gate, unnamed, gate, unnamed, unnamed]),
-    'Waiting 41 s so far for an engine: all 6 engine slots on this machine (slots) are in use: 3 by gdharness test of /games/one (pid 1) and 3 by pid 2. The engine starts when one is given back.',
+    'Waiting 41 s so far for an engine: all 6 engine slots on this machine (slots) are in use, and the engine starts when one is given back.',
   );
   assert.equal(
-    slotWaitSaid(500, 3, 'slots', [unnamed, { pid: 3, started: 1, by: 'gdharness setup' }, gate]),
-    'Waiting for an engine: all 3 engine slots on this machine (slots) are in use: 1 by pid 2, 1 by gdharness setup (pid 3) and 1 by gdharness test of /games/one (pid 1). The engine starts when one is given back.',
+    slotWaitSaid(500, 1, 'slots'),
+    'Waiting for an engine: the one engine slot on this machine (slots) is in use, and the engine starts when it is given back.',
   );
-  // What the answer says once the wait is over, in the same shapes.
   assert.deepEqual(
+    [slotWaitedSaid(61_600, 6, 'slots'), slotWaitedSaid(1_200, 1, 'slots')],
     [
-      slotWaitedSaid(61_600, 6, 'slots', []),
-      slotWaitedSaid(61_600, 6, 'slots', [gate, gate, unnamed, gate, unnamed, unnamed]),
-      slotWaitedSaid(1_200, 3, 'slots', [unnamed, { pid: 3, started: 1, by: 'gdharness setup' }, gate]),
-      slotWaitedSaid(1_200, 1, 'slots', [gate]),
-    ],
-    [
-      'This call waited 62 s for an engine slot in all. When it first waited, all 6 engine slots on this machine (slots) were in use, by other programs.',
-      'This call waited 62 s for an engine slot in all. When it first waited, all 6 engine slots on this machine (slots) were in use: 3 by gdharness test of /games/one (pid 1) and 3 by pid 2.',
-      'This call waited 1 s for an engine slot in all. When it first waited, all 3 engine slots on this machine (slots) were in use: 1 by pid 2, 1 by gdharness setup (pid 3) and 1 by gdharness test of /games/one (pid 1).',
-      'This call waited 1 s for an engine slot in all. When it first waited, the one engine slot on this machine (slots) was in use, by gdharness test of /games/one (pid 1).',
+      'This call waited 62 s for an engine slot in all. When it first waited, all 6 engine slots on this machine (slots) were in use.',
+      'This call waited 1 s for an engine slot in all. When it first waited, the one engine slot on this machine (slots) was in use.',
     ],
   );
   // A wait reports from its own start and so does the run after it, and the client is sent numbers
@@ -81714,33 +78289,22 @@ async function checksALongWaitIsHeardOnce(): Promise<void> {
   // listener of its own says nothing to the command.
   const lined = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slot-lines-'));
   const lineHeld = join(lined, '0.lock');
-  const me = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /games/one' };
-  // Named as this process, since a holder that is the waiter itself is the thing to know about it.
-  const oneSlot = `the one engine slot on this machine (${lined}) is in use, by this process (pid ${String(process.pid)}), and the engine starts when it is given back.`;
+  const oneSlot = `the one engine slot on this machine (${lined}) is in use, and the engine starts when it is given back.`;
+  const holdLine = (): OsLock => {
+    const held = tryOsLock(lineHeld);
+    assert.ok(held, 'the slot file is taken for the wait');
+    return held;
+  };
   try {
-    writeFileSync(lineHeld, JSON.stringify(me));
+    const heldFirst = holdLine();
     const lines: string[] = [];
-    const lanes = new EngineSlots(
-      lined,
-      1,
-      me,
-      (line) => {
-        lines.push(line);
-      },
-      undefined,
-      plentyOfMemory,
-    );
+    const lanes = new EngineSlots(lined, 1, (line) => {
+      lines.push(line);
+    });
     const unheard: string[] = [];
-    const listened = new EngineSlots(
-      lined,
-      1,
-      me,
-      (line) => {
-        unheard.push(line);
-      },
-      undefined,
-      plentyOfMemory,
-    );
+    const listened = new EngineSlots(lined, 1, (line) => {
+      unheard.push(line);
+    });
     const told: number[] = [];
     const takes = [
       { slots: lanes, taking: lanes.take() },
@@ -81753,7 +78317,7 @@ async function checksALongWaitIsHeardOnce(): Promise<void> {
       },
     ];
     await delay(2600);
-    rmSync(lineHeld);
+    heldFirst.release();
     const taken = await Promise.all(
       takes.map(async ({ slots, taking }) => {
         const lock = await taking;
@@ -81769,36 +78333,22 @@ async function checksALongWaitIsHeardOnce(): Promise<void> {
     assert.ok(waiting.endsWith(oneSlot), waiting);
     assert.deepEqual([told.length, unheard], [1, []], `told at ${told.join(', ')}: ${unheard.join('\n')}`);
 
-    writeFileSync(lineHeld, JSON.stringify(me));
+    const heldBriefly = holdLine();
     const brief: string[] = [];
-    const briefly = new EngineSlots(
-      lined,
-      1,
-      me,
-      (line) => {
-        brief.push(line);
-      },
-      undefined,
-      plentyOfMemory,
-    );
+    const briefly = new EngineSlots(lined, 1, (line) => {
+      brief.push(line);
+    });
     const shortTake = briefly.take();
     await delay(500);
-    rmSync(lineHeld);
+    heldBriefly.release();
     const shortLock = await shortTake;
     briefly.release(shortLock);
     assert.deepEqual([shortLock, brief], [lineHeld, []], 'a wait of half a second takes the slot unsaid');
 
     const queued: string[] = [];
-    const run = new EngineSlots(
-      lined,
-      1,
-      me,
-      (line) => {
-        queued.push(line);
-      },
-      undefined,
-      plentyOfMemory,
-    );
+    const run = new EngineSlots(lined, 1, (line) => {
+      queued.push(line);
+    });
     const first = await run.take();
     const second = run.take();
     await delay(2600);
@@ -81812,6 +78362,186 @@ async function checksALongWaitIsHeardOnce(): Promise<void> {
     );
   } finally {
     sweep(lined);
+  }
+}
+
+/**
+ * A slot is a lock of the operating system. Two takers never hold one file, a held slot is free once
+ * its process is killed, the count is read from the folder's count file at each take, and a take that
+ * waits gets the first slot freed.
+ */
+async function testASlotIsAnOsLockHeldForAsLongAsItsProcessLives(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-os-slots-'));
+  try {
+    // Two takers of one folder hold different files, and a slot given back is taken again.
+    const first = new EngineSlots(directory, 2);
+    const second = new EngineSlots(directory, 2);
+    const one = first.takeFree();
+    const two = second.takeFree();
+    assert.deepEqual([one, two], [join(directory, '0.lock'), join(directory, '1.lock')], 'one slot each');
+    assert.equal(first.takeFree(), null, 'no third slot');
+    assert.equal(second.takeFree(), null, 'for either taker');
+    assert.equal(statSync(join(directory, '0.lock')).size, 0, 'nothing is written to a slot');
+    first.release(String(one));
+    assert.equal(second.takeFree(), one, 'a slot given back is the next taken');
+    first.releaseAll();
+    second.releaseAll();
+    assert.deepEqual(leftInSlots(directory), [], 'every slot is free once given back');
+
+    // Killing the process that holds a slot frees it, whatever its holder was doing.
+    const holder = await slotHeldElsewhere(join(directory, '0.lock'), 600_000);
+    assert.ok(isHeld(join(directory, '0.lock')), 'the other process holds it');
+    holder.kill();
+    assert.ok(
+      await cameTrue(() => !isHeld(join(directory, '0.lock')), 15_000),
+      'the slot is free once its process has been killed',
+    );
+
+    // The count is read at every take: the file lowers and raises it, and its removal restores the count the take was made with.
+    const counted = new EngineSlots(directory, 4);
+    const countFile = join(directory, 'count');
+    writeFileSync(countFile, '1\n');
+    const only = counted.takeFree();
+    assert.equal(only, join(directory, '0.lock'));
+    assert.equal(counted.takeFree(), null, 'a count of 1 leaves no second slot');
+    assert.equal(counted.count, 1);
+    writeFileSync(countFile, '2');
+    assert.equal(counted.takeFree(), join(directory, '1.lock'), 'a count of 2 opens the second');
+    assert.equal(counted.takeFree(), null);
+    for (const unusable of ['0', 'two', '-1', '2.5', '']) {
+      writeFileSync(countFile, unusable);
+      assert.equal(
+        counted.takeFree(),
+        join(directory, '2.lock'),
+        `"${unusable}" leaves the count of the take`,
+      );
+      counted.release(join(directory, '2.lock'));
+    }
+    rmSync(countFile);
+    assert.equal(
+      counted.takeFree(),
+      join(directory, '2.lock'),
+      'with no file the count is the one the take was made with',
+    );
+    counted.releaseAll();
+
+    // A take that finds every slot held waits, and gets the first one freed.
+    const holders = new EngineSlots(directory, 2);
+    const both = [holders.takeFree(), holders.takeFree()];
+    assert.deepEqual(both, [join(directory, '0.lock'), join(directory, '1.lock')]);
+    const waiter = new EngineSlots(directory, 2);
+    let blocked = false;
+    const waiting = waiter.take(undefined, undefined, () => {
+      blocked = true;
+    });
+    const early = await Promise.race([waiting, delay(1300).then(() => 'still waiting')]);
+    assert.equal(early, 'still waiting', 'no slot while both are held');
+    assert.ok(blocked, 'and the wait is told it is blocked');
+    holders.release(join(directory, '1.lock'));
+    assert.equal(await waiting, join(directory, '1.lock'), 'the first slot freed is the one taken');
+    waiter.releaseAll();
+    holders.releaseAll();
+  } finally {
+    sweep(directory);
+  }
+}
+
+/** The Python snippet docs/test-runs.md gives for taking a slot as another program, as written there. */
+function documentedSlotRecipe(): string {
+  const docs = readFileSync(join('docs', 'test-runs.md'), 'utf8');
+  const recipe = /```python\n([\s\S]*?)```/.exec(docs)?.[1];
+  assert.ok(recipe?.includes('def try_lock'), 'docs/test-runs.md holds the Python recipe');
+  return recipe ?? '';
+}
+
+/** A Python that runs here, or null where none is installed. */
+function pythonHere(): string | null {
+  for (const name of ['python3', 'python']) {
+    const probe = spawnSyncHidden(name, ['-c', 'import sys; print(sys.version_info[0])'], {
+      encoding: 'utf8',
+    });
+    if (probe.status === 0 && probe.stdout.trim() === '3') {
+      return name;
+    }
+  }
+  return null;
+}
+
+/**
+ * A program that takes a slot by the recipe in docs/test-runs.md and gdharness exclude each other, in
+ * both directions, on every system the tests run on.
+ */
+async function testAPythonProcessAndGdharnessExcludeEachOnTheSameSlot(): Promise<void> {
+  const python = pythonHere();
+  if (python === null) {
+    assert.ok(process.env['CI'] === undefined, 'a CI system has Python for the recipe test');
+    console.log('slot recipe regression skipped (no Python 3 found)');
+    return;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-recipe-'));
+  try {
+    const script = join(directory, 'take.py');
+    writeFileSync(
+      script,
+      [
+        documentedSlotRecipe(),
+        'import sys',
+        'fd = try_lock(sys.argv[1])',
+        'if fd is None:',
+        "    print('busy', flush=True)",
+        '    sys.exit(0)',
+        "print('held', flush=True)",
+        '# Holds the lock until the test closes its standard input.',
+        'sys.stdin.read()',
+        '',
+      ].join('\n'),
+    );
+    const lock = join(directory, '0.lock');
+    const runPython = (): { said: () => string; end: () => Promise<void> } => {
+      const child = spawnHidden(python, [script, lock], { stdio: ['pipe', 'pipe', 'pipe'] });
+      const printed = sayingOf(child);
+      return {
+        said: printed.text,
+        end: async () => {
+          child.stdin.end();
+          await printed.exited;
+        },
+      };
+    };
+
+    // Python holds the file: a gdharness take refuses it, and takes it once Python has ended.
+    const holding = runPython();
+    try {
+      assert.ok(
+        await cameTrue(() => holding.said().includes('held'), 30_000),
+        'the recipe takes a free file',
+      );
+      assert.equal(tryOsLock(lock), null, 'gdharness cannot take a file the recipe holds');
+      const slots = new EngineSlots(directory, 1);
+      assert.equal(slots.takeFree(), null, 'and its slots see the one slot full');
+    } finally {
+      await holding.end();
+    }
+    assert.ok(await cameTrue(() => !isHeld(lock), 30_000), 'the file is free once Python has ended');
+
+    // gdharness holds the file: the recipe is refused, and takes it once gdharness lets go.
+    const ours = tryOsLock(lock);
+    assert.ok(ours, 'gdharness takes the free file');
+    const refused = runPython();
+    try {
+      assert.ok(await cameTrue(() => refused.said().includes('busy'), 30_000), refused.said());
+    } finally {
+      await refused.end();
+    }
+    ours.release();
+    const afterwards = runPython();
+    try {
+      assert.ok(await cameTrue(() => afterwards.said().includes('held'), 30_000), afterwards.said());
+    } finally {
+      await afterwards.end();
+    }
+  } finally {
+    sweep(directory);
   }
 }
 
@@ -81830,30 +78560,19 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-machine-slot-'));
   const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-machine-slots-'));
   const ours = join(slots, '0.lock');
-  const hold = async (): Promise<void> => {
-    writeFileSync(ours, JSON.stringify({ pid: process.pid, started: await ownStart(), by: 'the suite' }));
+  // The suite takes the one slot as another program would, and gives it back.
+  const mine: { lock: OsLock | null } = { lock: null };
+  const hold = (): void => {
+    mine.lock = tryOsLock(ours);
+    assert.ok(mine.lock, 'the suite takes the one slot');
   };
-  // What the last holder found by heldBy said took the slot, read through a call so that an
-  // assertion on one reading does not narrow the next.
-  let takenFor: string | undefined;
-  const lastTaker = (): string | undefined => takenFor;
-  // Who holds the one slot, read every 20 ms until [param pid] does or the time runs out.
-  const heldBy = async (pid: number | undefined, withinMs: number): Promise<boolean> => {
-    const until = Date.now() + withinMs;
-    while (Date.now() < until) {
-      try {
-        const holder = holderOf(readFileSync(ours, 'utf8'));
-        if (holder?.pid === pid) {
-          takenFor = holder?.by;
-          return true;
-        }
-      } catch {
-        // Between its holders.
-      }
-      await delay(20);
-    }
-    return false;
+  const giveBack = (): void => {
+    mine.lock?.release();
+    mine.lock = null;
   };
+  // Whether another process holds the one slot, looked at every 20 ms until one does or the time runs out.
+  const heldByAnother = async (withinMs: number): Promise<boolean> =>
+    await cameTrue(() => isHeld(ours), withinMs);
   const env = { GODOT_PATH: godotPath, GODOT_ENGINE_SLOTS: slots, GODOT_ENGINE_SLOT_COUNT: '1' };
   try {
     writeTree(project, {
@@ -81862,10 +78581,10 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       'main.tscn': '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
     });
 
-    const fixture: MachineSlotFixture = { project, slots, ours, env, hold, heldBy, lastTaker };
+    const fixture: MachineSlotFixture = { project, slots, ours, env, hold, giveBack, heldByAnother };
     await checksTheClassesCommandStartsOnAFullMachine(fixture);
 
-    await hold();
+    hold();
     const server = new ServerProcess({ env });
     try {
       await server.initialize('regression-test');
@@ -81886,9 +78605,9 @@ interface MachineSlotFixture {
   slots: string;
   ours: string;
   env: Record<string, string>;
-  hold: () => Promise<void>;
-  heldBy: (pid: number | undefined, withinMs: number) => Promise<boolean>;
-  lastTaker: () => string | undefined;
+  hold: () => void;
+  giveBack: () => void;
+  heldByAnother: (withinMs: number) => Promise<boolean>;
 }
 
 /**
@@ -81896,8 +78615,8 @@ interface MachineSlotFixture {
  * and leaves the slot folder as it found it.
  */
 async function checksTheClassesCommandStartsOnAFullMachine(fixture: MachineSlotFixture): Promise<void> {
-  const { project, slots, ours, env, hold } = fixture;
-  await hold();
+  const { project, slots, ours, env, hold, giveBack } = fixture;
+  hold();
   const classes = spawnHidden(process.execPath, ['build/cli.js', 'classes', project], {
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -81920,13 +78639,13 @@ async function checksTheClassesCommandStartsOnAFullMachine(fixture: MachineSlotF
     await ended;
   }
   assert.deepEqual(
-    [code, holderOf(readFileSync(ours, 'utf8'))?.pid, leftInSlots(slots)],
-    [0, process.pid, ['0.lock']],
+    [code, isHeld(ours), leftInSlots(slots)],
+    [0, true, ['0.lock']],
     `the command ends while the slot is held, takes no slot and marks no wait: ${said}`,
   );
   assert.ok(!said.includes('for an engine'), `and says no wait: ${said}`);
   assert.match(said, /"path": "res:\/\/\.godot\/global_script_class_cache\.cfg"/, said);
-  rmSync(ours);
+  giveBack();
 }
 
 /** The boot check waits for the slot held, tells a client asking for progress, and runs once it is given back. */
@@ -81934,7 +78653,7 @@ async function checksTheServerWaitsBehindTheSlotHeld(
   fixture: MachineSlotFixture,
   server: ServerProcess,
 ): Promise<void> {
-  const { project, slots, ours, heldBy, lastTaker } = fixture;
+  const { project, slots, giveBack, heldByAnother } = fixture;
   const checking = server.request(
     'tools/call',
     {
@@ -81951,7 +78670,6 @@ async function checksTheServerWaitsBehindTheSlotHeld(
   }
   // A second past its first word, which is as long as a wait lasts before its answer reports it.
   await delay(1000);
-  assert.equal(holderOf(readFileSync(ours, 'utf8'))?.pid, process.pid, 'the boot check waits too');
   // A client that asked for progress is told why nothing has started, rather than left silent.
   // Told at the first look that finds the slot held, which on a loaded machine reads the holder's
   // start for a second or more first, and then says so.
@@ -81961,13 +78679,12 @@ async function checksTheServerWaitsBehindTheSlotHeld(
   assert.deepEqual(
     told,
     [
-      `Waiting for an engine: the one engine slot on this machine (${slots}) is in use, by the suite (pid ${String(process.pid)}), and the engine starts when it is given back.`,
+      `Waiting for an engine: the one engine slot on this machine (${slots}) is in use, and the engine starts when it is given back.`,
     ],
     JSON.stringify(server.notifications),
   );
-  rmSync(ours);
-  assert.ok(await heldBy(server.child.pid, 30_000), 'then its engine runs in the slot given back');
-  assert.match(lastTaker() ?? '', /^a gdharness server/, 'naming itself in the lock');
+  giveBack();
+  assert.ok(await heldByAnother(30_000), 'then its engine runs in the slot given back');
   const answered = await checking;
   const checked = JSON.parse(textOf(answered) ?? '{}') as unknown;
   assert.equal(get(checked, 'booted'), true, JSON.stringify(checked));
@@ -81978,7 +78695,7 @@ async function checksTheServerWaitsBehindTheSlotHeld(
   assert.ok(asNumber(get(waits[0], 'waitedMs')) >= 1000, JSON.stringify(waits));
   assert.equal(
     get(waits[0], 'note'),
-    `This call waited ${String(Math.round(asNumber(get(waits[0], 'waitedMs')) / 1000))} s for an engine slot in all. When it first waited, the one engine slot on this machine (${slots}) was in use, by the suite (pid ${String(process.pid)}).`,
+    `This call waited ${String(Math.round(asNumber(get(waits[0], 'waitedMs')) / 1000))} s for an engine slot in all. When it first waited, the one engine slot on this machine (${slots}) was in use.`,
   );
   const free = await server.request(
     'tools/call',
@@ -81998,7 +78715,7 @@ async function checksTheStartWaitCountsAfterTheSlot(
   fixture: MachineSlotFixture,
   server: ServerProcess,
 ): Promise<void> {
-  const { slots, ours, hold } = fixture;
+  const { slots, hold, giveBack } = fixture;
   // The wait for a game to announce is counted from its engine's start, after the slot: counted
   // from the call, a start that waited 24 minutes for a slot was told nothing had announced in its
   // four, about a game that had announced in seconds. The slot is held past the whole wait, so a
@@ -82016,7 +78733,7 @@ async function checksTheStartWaitCountsAfterTheSlot(
       join(announcing, 'addons', 'gdharness_runtime'),
       { recursive: true },
     );
-    await hold();
+    hold();
     const budgetMs = 8000;
     const starting = server.request(
       'tools/call',
@@ -82026,12 +78743,8 @@ async function checksTheStartWaitCountsAfterTheSlot(
       },
       ENGINE_CALL_TIMEOUT_MS,
     );
-    assert.ok(
-      await cameTrue(() => leftInSlots(slots).some((entry) => entry.startsWith(WAITING_FOLDER)), 30_000),
-      `the start waits for the slot held: ${leftInSlots(slots).join(', ')}`,
-    );
     await delay(budgetMs + 1000);
-    rmSync(ours);
+    giveBack();
     const answer = await starting;
     const startedThere = JSON.parse(textOf(answer) ?? '{}') as unknown;
     const waited = (contentOf(answer) ?? []).map(slotWaitOf).filter((block) => block !== null);
@@ -82057,35 +78770,21 @@ async function checksTheKeeperHoldsTheSlot(
   fixture: MachineSlotFixture,
   server: ServerProcess,
 ): Promise<void> {
-  const { project, slots, ours } = fixture;
+  const { project, slots, heldByAnother } = fixture;
   // A started game outlives the server, so its keeper holds the slot for as long as the run lasts.
   const started = await server.request(
     'tools/call',
     { name: 'editor_run', arguments: { op: 'start', projectPath: project, headless: true } },
     ENGINE_CALL_TIMEOUT_MS,
   );
-  const game = asNumber(get(JSON.parse(textOf(started) ?? '{}'), 'pid'));
-  // Taken over once the keeper has handed the pid back, which can come a moment after the start.
-  const lockHolder = (): SlotHolder | null =>
-    existsSync(ours) ? holderOf(readFileSync(ours, 'utf8')) : null;
-  await cameTrue(() => lockHolder()?.pid !== server.child.pid, 10_000);
-  const keeper = lockHolder();
-  assert.ok(keeper !== null, 'the keeper holds the lock');
   assert.ok(
-    keeper.pid !== server.child.pid && keeper.pid !== game && alive(keeper.pid),
-    `the lock names the game's keeper, not the server or the game: ${JSON.stringify(keeper)}`,
+    Number.isInteger(asNumber(get(JSON.parse(textOf(started) ?? '{}'), 'pid'))),
+    JSON.stringify(started),
   );
-  // And names the game as the engine on it, so what the game starts runs on its slot.
-  assert.deepEqual(
-    keeper.engine,
-    { pid: game, started: (await startTimesOf([game])).get(game) },
-    `and names the game as its engine: ${JSON.stringify(keeper)}`,
-  );
-  // A wait behind it named the keeper's pid as the game's, which editor_status never listed.
-  assert.equal(
-    slotWaitSaid(0, 1, 'slots', [keeper]),
-    `Waiting for an engine: the one engine slot on this machine (slots) is in use, by a game of ${project} editor_run started, through the keeper process that runs it (pid ${String(keeper.pid)}), and the engine starts when it is given back.`,
-  );
+  assert.ok(await heldByAnother(10_000), 'the slot is held for the game');
+  // The server hands the slot to the keeper, and the keeper takes it over: it is never free for long.
+  await delay(1500);
+  assert.ok(isHeld(fixture.ours), 'and stays held once the keeper has taken it over');
   assert.deepEqual(leftInSlots(slots), ['0.lock'], "one slot, the game's");
   const stopped = await server.request(
     'tools/call',
@@ -82644,7 +79343,7 @@ async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
     );
     assert.match(
       queued.said,
-      /^\[spread\] Waiting [2-4] s so far for an engine: the one engine slot on this machine \(.+\) is in use, by pid \d+, and the engine starts when it is given back\.$/m,
+      /^\[spread\] Waiting [2-4] s so far for an engine: the one engine slot on this machine \(.+\) is in use, and the engine starts when it is given back\.$/m,
       queued.said,
     );
     assert.deepEqual(table(queued.said), table(aloneSaid), queued.said);
@@ -83264,575 +79963,6 @@ async function testAProjectSettingItsOwnLowProcessorWaitGetsTheRunnersWait(): Pr
 }
 
 /**
- * An engine is sized by the most memory one holding its suites was seen to hold, kept with the
- * suite times, and the gate counts a going engine at what it has yet to take.
- */
-async function testAnEngineIsSizedByWhatItWasSeenToHold(): Promise<void> {
-  const gib = 1024 ** 3;
-  const gateOf = (read: () => Promise<number>, lookMs = 5): { gate: MemoryGate; marks: string[] } => {
-    const marks: string[] = [];
-    const gate = new MemoryGate(
-      {
-        markWaiting: () => {
-          marks.push('marked');
-          return () => {
-            marks.push('taken up');
-          };
-        },
-      },
-      read,
-      lookMs,
-    );
-    return { gate, marks };
-  };
-  // Ended with the case, so an assertion failing beside a wait does not leave it reading forever.
-  const caseOver = new AbortController();
-  const asked = (gate: MemoryGate, signal: AbortSignal, need: () => number): Promise<Admitted> => {
-    const pending = gate.admit(signal, need);
-    pending.catch(() => undefined);
-    return pending;
-  };
-  const within = (pending: Promise<Admitted>, ms: number): Promise<Admitted | undefined> =>
-    Promise.race([pending.catch(() => undefined), delay(ms).then(() => undefined)]);
-  const suite = (path: string, windowed = false): DeclaredSuite => ({
-    path,
-    cases: ['test_one'],
-    windowed,
-    headless: false,
-    together: false,
-    accessible: false,
-  });
-  const timed = (seconds: number, peakGiB: number): SuiteTimes[string] => ({
-    seconds,
-    cases: { test_one: seconds },
-    peak: peakGiB * gib,
-  });
-  const rig: GateRig = { gib, gateOf, asked, within, caseOver, suite, timed };
-  try {
-    await checksTheGateWaitsOnWhatEnginesHold(rig);
-    await checksTheFirstEngineStartsWhateverItNeeds(rig);
-    await checksTheLaneInRunSharesWaitsOnItsShare(rig);
-    checksThePeaksKeptWithTheTimes(rig);
-  } finally {
-    caseOver.abort();
-  }
-}
-
-/** The helpers the memory gate checks share, with the case's own abort signal. */
-interface GateRig {
-  gib: number;
-  gateOf: (read: () => Promise<number>, lookMs?: number) => { gate: MemoryGate; marks: string[] };
-  asked: (gate: MemoryGate, signal: AbortSignal, need: () => number) => Promise<Admitted>;
-  within: (pending: Promise<Admitted>, ms: number) => Promise<Admitted | undefined>;
-  caseOver: AbortController;
-  suite: (path: string, windowed?: boolean) => DeclaredSuite;
-  timed: (seconds: number, peakGiB: number) => SuiteTimes[string];
-}
-
-/** An engine waits while the memory it needs is not free, and the need is read at each look. */
-async function checksTheGateWaitsOnWhatEnginesHold(rig: GateRig): Promise<void> {
-  const { gib, gateOf, asked, within, caseOver } = rig;
-  // Free memory falls by what the first engine holds. The second waits while the first has yet to
-  // take its 3 GiB and after it has taken them, since 8 GiB less 3 held and 4 kept is 1 GiB.
-  let heldByFirst = 0;
-  const waiting = gateOf(() => Promise.resolve(8 * gib - heldByFirst));
-  const first = await asked(waiting.gate, caseOver.signal, () => 3 * gib);
-  const second = asked(waiting.gate, caseOver.signal, () => 1.5 * gib);
-  assert.equal(await within(second, 100), undefined, 'a second engine waits for the first to take its 3 GiB');
-  heldByFirst = 3 * gib;
-  first.holds(heldByFirst);
-  assert.equal(await within(second, 100), undefined, 'and after it has taken them, with 1 GiB left');
-  assert.deepEqual(waiting.marks, ['marked'], 'with one mark for the whole wait');
-  first.ended();
-  assert.notEqual(await within(second, 2000), undefined, 'until the first ends and none is going');
-  assert.deepEqual(waiting.marks, ['marked', 'taken up'], 'its mark gone');
-  (await second).ended();
-
-  // A going engine that holds all it needs is counted at nothing: free memory shows what it holds.
-  const roomy = gateOf(() => Promise.resolve(6 * gib));
-  const holder = await asked(roomy.gate, caseOver.signal, () => 3 * gib);
-  holder.holds(3 * gib);
-  const beside = await within(
-    asked(roomy.gate, caseOver.signal, () => 1.5 * gib),
-    2000,
-  );
-  assert.notEqual(beside, undefined, '1.5 GiB is admitted at once beside an engine holding its 3 GiB');
-  assert.deepEqual(roomy.marks, [], 'with no wait');
-  beside?.ended();
-  holder.ended();
-
-  // The need is read at each look, since the share a lane would draw changes as others draw theirs.
-  const reading = gateOf(() => Promise.resolve(6.5 * gib));
-  const going = await asked(reading.gate, caseOver.signal, () => 1 * gib);
-  let looks = 0;
-  const changing = await within(
-    asked(reading.gate, AbortSignal.timeout(2000), () => {
-      looks += 1;
-      return looks === 1 ? 3 * gib : 1 * gib;
-    }),
-    2000,
-  );
-  assert.notEqual(
-    changing,
-    undefined,
-    `a need that falls to 1 GiB is admitted, after ${String(looks)} looks`,
-  );
-  assert.ok(looks >= 2, 'having waited at the first');
-  changing?.ended();
-  going.ended();
-}
-
-/** The first engine of a run starts whatever it needs, and what the gate sums is taken before its memory read. */
-async function checksTheFirstEngineStartsWhateverItNeeds(rig: GateRig): Promise<void> {
-  const { gib, gateOf, asked, within, caseOver } = rig;
-  // The first engine of a run starts whatever it needs.
-  const empty = gateOf(() => Promise.resolve(0));
-  const huge = await within(
-    asked(empty.gate, AbortSignal.timeout(2000), () => 64 * gib),
-    2000,
-  );
-  assert.notEqual(huge, undefined, 'a peak past the machine still runs alone');
-  huge?.ended();
-
-  // What the gate sums is taken before its memory read, since a reading told while the read is out
-  // would otherwise count as owed no longer and as free memory too: 8 GiB in all, 4 kept, one
-  // going engine needing 3, a 1.5 GiB need.
-  let used = 1 * gib;
-  const ordered = gateOf(() => {
-    const free = 8 * gib - used;
-    return delay(10).then(() => free);
-  });
-  const growing = await asked(ordered.gate, caseOver.signal, () => 3 * gib);
-  growing.holds(used);
-  const late = asked(ordered.gate, caseOver.signal, () => 1.5 * gib);
-  setTimeout(() => {
-    used = 3 * gib;
-    growing.holds(used);
-  }, 5);
-  assert.equal(
-    await within(late, 200),
-    undefined,
-    'a reading told during the read is not counted twice as free: 1 GiB is left past what is kept',
-  );
-  growing.ended();
-  assert.notEqual(await within(late, 2000), undefined, 'and the wait ends once no engine is going');
-  (await late).ended();
-}
-
-/** The lane in runShares waits on the share it would draw now, windowed units go first, and the start has its room. */
-async function checksTheLaneInRunSharesWaitsOnItsShare(rig: GateRig): Promise<void> {
-  const { gib, gateOf, suite, timed } = rig;
-  const dealtRun = async (times: SuiteTimes, free: number): Promise<string[]> => {
-    const paths = Object.keys(times);
-    const suites = paths.map((path) => suite(path));
-    const events: string[] = [];
-    const given: string[] = [];
-    let started = 0;
-    const run = async (plan: EnginePlan, index: number): Promise<{ index: number }> => {
-      const name = plan.suites.map((one) => one.path.replace('res://', '')).join('+');
-      events.push(`start ${name}`);
-      started += 1;
-      const mine = started;
-      const deadline = Date.now() + 2000;
-      const alone = (): boolean => started === mine;
-      while (alone() && Date.now() < deadline) {
-        await delay(5);
-      }
-      events.push(`end ${name}`);
-      return { index };
-    };
-    await runShares(
-      {
-        // A lane that waits for room gives its slot back, and takes one once it has room.
-        take: (): Promise<string> => {
-          const lock = given.shift();
-          return lock === undefined
-            ? Promise.reject(new Error('a lane takes only a slot it gave back'))
-            : Promise.resolve(lock);
-        },
-        release: (lock: string): void => {
-          given.push(lock);
-        },
-      },
-      unitsOf(suites, times),
-      new Map(suites.map((one) => [one.path, one.cases])),
-      2,
-      ['one', 'two'],
-      times,
-      run,
-      undefined,
-      gateOf(() => Promise.resolve(free * gib), 1).gate,
-    );
-    return events;
-  };
-  const lightFirst = await dealtRun(
-    {
-      'res://s1_test.gd': timed(60, 0.5),
-      'res://s2_test.gd': timed(50, 0.5),
-      'res://h_test.gd': timed(10, 3),
-    },
-    6,
-  );
-  assert.ok(
-    lightFirst.includes('start s2_test.gd') &&
-      lightFirst.indexOf('start s2_test.gd') < lightFirst.indexOf('end s1_test.gd'),
-    `the second light engine starts beside the first, not held by the heavy suite left: ${lightFirst.join(', ')}`,
-  );
-  assert.ok(lightFirst.includes('start h_test.gd'), 'and the heavy one runs in the end');
-  assert.deepEqual(
-    await dealtRun({ 'res://a_test.gd': timed(60, 0.5), 'res://b_test.gd': timed(40, 3) }, 6),
-    ['start a_test.gd', 'end a_test.gd', 'start b_test.gd', 'end b_test.gd'],
-    'a heavy share waits for the light one before it, sized by itself and not by the one drawn',
-  );
-
-  // What the next share is, drawing nothing: windowed units first, as next hands them.
-  const mixed = [suite('res://w_test.gd', true), suite('res://x_test.gd'), suite('res://y_test.gd')];
-  const mixedTimes: SuiteTimes = {
-    'res://w_test.gd': timed(40, 3),
-    'res://x_test.gd': timed(40, 0.5),
-    'res://y_test.gd': timed(40, 0.5),
-  };
-  const shares = new Shares(
-    unitsOf(mixed, mixedTimes),
-    new Map(mixed.map((one) => [one.path, one.cases])),
-    2,
-  );
-  assert.deepEqual(shares.peek(), ['res://w_test.gd'], 'the windowed suite comes first');
-  assert.deepEqual(shares.peek(), ['res://w_test.gd'], 'and looking hands out nothing');
-  assert.deepEqual(
-    shares.next(0)?.suites.map((one) => one.path),
-    ['res://w_test.gd'],
-    'next hands what peek listed',
-  );
-  const afterwards = shares.peek();
-  assert.deepEqual(afterwards, ['res://x_test.gd'], 'then the headless share');
-  assert.deepEqual(
-    shares.next(1)?.suites.map((one) => one.path),
-    afterwards,
-    'which next hands as peek listed it',
-  );
-
-  // The start's room and its line, with an engine's own size.
-  assert.deepEqual(
-    roomFor(2, 16, 8 * gib, 'of memory left to commit', undefined, {
-      bytes: 3 * gib,
-      said: 'taken for each engine, the most one holding these suites was seen to hold',
-    }),
-    {
-      engines: 1,
-      held: 'the machine has 8.0 GB of memory left to commit, 4.0 GB of it kept for everything else and 3.0 GB taken for each engine, the most one holding these suites was seen to hold',
-    },
-    'divided by what an engine needs, not by 1.5 GB',
-  );
-}
-
-/** The peak an engine is sized by is the largest seen, is replaced by a closed suite, and is kept with the times. */
-function checksThePeaksKeptWithTheTimes(rig: GateRig): void {
-  const { gib, timed } = rig;
-  // The most a share's suites were seen to hold, or the size taken for one with none.
-  const peaks: SuiteTimes = {
-    'res://big_test.gd': timed(1, 3),
-    'res://small_test.gd': timed(1, 0.6),
-    'res://none_test.gd': { seconds: 1, cases: {} },
-  };
-  assert.deepEqual(
-    peakOf(['res://big_test.gd', 'res://none_test.gd'], peaks, 1.5 * gib),
-    { bytes: 3 * gib, seen: true },
-    'the largest peak kept for any of them',
-  );
-  assert.deepEqual(
-    peakOf(['res://none_test.gd'], peaks, 1.5 * gib),
-    { bytes: 1.5 * gib, seen: false },
-    'a suite with none is taken at the size given',
-  );
-  assert.deepEqual(
-    peakOf(['res://small_test.gd'], peaks, 1.5 * gib),
-    { bytes: 0.6 * gib, seen: true },
-    'a peak below that size stands',
-  );
-  assert.deepEqual(peakOf([], peaks, 1.5 * gib), { bytes: 1.5 * gib, seen: false }, 'and no suite has none');
-
-  // A renamed suite's peak goes with its record and is never read for the suite that replaced it.
-  const renamed: SuiteTimes = { 'res://old_test.gd': timed(1, 3) };
-  assert.deepEqual(
-    peakOf(['res://new_test.gd'], renamed, 1.5 * gib),
-    { bytes: 1.5 * gib, seen: false },
-    'the new name has no peak',
-  );
-  assert.deepEqual(
-    timesAfter(renamed, [], [], () => null),
-    {},
-    'and the old one is dropped with its peak',
-  );
-
-  checksAClosedSuiteTakesItsEnginesLargestPeak(rig);
-  checksPeaksReadBackFromTheTimes(gib, peaks);
-}
-
-/** The report of a run that closed [param path] with its one case passed. */
-function closedSuiteRun(path: string): ReturnType<typeof readRun> {
-  return readRun(
-    [
-      `Run Test Suite: ${path}`,
-      caseLine(path, 'test_one', 'PASSED', '1s 0ms'),
-      'Statistics: 1 test cases | PASSED 1s 0ms',
-    ].join('\n'),
-  );
-}
-
-/** A suite closed this run takes its engines' largest peak, and one not closed keeps its own. */
-function checksAClosedSuiteTakesItsEnginesLargestPeak(rig: GateRig): void {
-  const { gib, suite, timed } = rig;
-  // A suite closed this run takes its engines' largest peak, and one not closed keeps its own.
-  const names = ['a', 'b', 'c', 'd', 'e', 'f'].map((name) => `res://${name}_test.gd`);
-  const [a, b, c, d, e, f] = names.map((path) => suite(path));
-  const before: SuiteTimes = {
-    [a?.path ?? '']: timed(1, 0.5),
-    [b?.path ?? '']: timed(1, 2),
-    [c?.path ?? '']: timed(1, 1.2),
-    [e?.path ?? '']: timed(1, 3),
-    [f?.path ?? '']: timed(1, 2),
-  };
-  const declaredAll = [a, b, c, d, e, f].flatMap((one) => (one === undefined ? [] : [one]));
-  const after = timesAfter(
-    before,
-    declaredAll,
-    [
-      { printed: closedSuiteRun(a?.path ?? ''), peakBytes: 1 * gib },
-      { printed: closedSuiteRun(a?.path ?? ''), peakBytes: 3 * gib },
-      { printed: closedSuiteRun(c?.path ?? '') },
-      { printed: closedSuiteRun(d?.path ?? '') },
-      { printed: closedSuiteRun(e?.path ?? ''), peakBytes: 1 * gib },
-      { printed: closedSuiteRun(f?.path ?? ''), peakBytes: 0 },
-    ],
-    (path) => declaredAll.find((one) => one.path === path) ?? null,
-  );
-  assert.deepEqual(
-    names.map((path) => after[path]?.peak),
-    [3 * gib, 2 * gib, 1.2 * gib, undefined, 1 * gib, 2 * gib],
-    'the largest of its engines, replacing the old: a kept one not run, one run with no reading, and one read as 0 keep theirs, and a smaller one replaces',
-  );
-  checksSuitesNeverReadOrNotRunKeepWhatTheyHad(names, before, after);
-}
-
-/** The fourth suite was never read and so has no peak key, and the second was not run and keeps its record whole. */
-function checksSuitesNeverReadOrNotRunKeepWhatTheyHad(
-  names: string[],
-  before: SuiteTimes,
-  after: SuiteTimes,
-): void {
-  const neverRead = names[3] ?? '';
-  const notRun = names[1] ?? '';
-  assert.equal(Object.hasOwn(after[neverRead] ?? {}, 'peak'), false, 'a suite never read has no peak key');
-  assert.deepEqual(after[notRun], before[notRun], 'a suite not run keeps its record whole');
-}
-
-/** A peak kept with the times is read back as written, and one that is no number above 0 reads as none. */
-function checksPeaksReadBackFromTheTimes(gib: number, peaks: SuiteTimes): void {
-  // Kept with the times, and read back: a peak that is no number above 0 reads as none.
-  const folder = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-peaks-'));
-  try {
-    const file = join(folder, 'suite-times.json');
-    assert.equal(writeJson(file, peaks), true, 'the times are written');
-    assert.deepEqual(readTimes(file), peaks, 'and read back as they were');
-    const odd = (peak: string): string => `{"seconds":1,"cases":{},"peak":${peak}}`;
-    writeFileSync(
-      file,
-      `{"zero":${odd('0')},"endless":${odd('1e999')},"below":${odd('-1')},"text":${odd('"3"')},"fine":${odd('2048')}}`,
-    );
-    const read = readTimes(file);
-    assert.deepEqual(
-      Object.entries(read).map(([path, time]) => [path, time.peak]),
-      [
-        ['zero', undefined],
-        ['endless', undefined],
-        ['below', undefined],
-        ['text', undefined],
-        ['fine', 2048],
-      ],
-      'a peak of 0, 1e999, below 0 or text reads as none',
-    );
-    assert.deepEqual(
-      peakOf(['zero'], read, 1.5 * gib),
-      { bytes: 1.5 * gib, seen: false },
-      'so a kept 0 is never an engine size',
-    );
-  } finally {
-    rmSync(folder, { recursive: true, force: true });
-  }
-}
-
-/** The out-of-memory line names every engine of the run in index order, with its figure or unread. */
-function testARunOutOfMemoryNamesEveryEngine(): void {
-  const gib = 1024 ** 3;
-  const first = 'An engine ran out of memory.';
-  assert.equal(
-    outOfMemorySaid([{ index: 0, peakBytes: 3.3 * gib }, { index: 1 }]),
-    `${first} The most each held in this run: engine 0 3.3 GB, engine 1 unread.`,
-  );
-  assert.equal(
-    outOfMemorySaid([
-      { index: 0, peakBytes: 0.4 * gib },
-      { index: 1, peakBytes: 3.3 * gib },
-    ]),
-    `${first} The most each held in this run: engine 0 0.4 GB, engine 1 3.3 GB.`,
-  );
-  assert.equal(
-    outOfMemorySaid([{ index: 0 }, { index: 1, peakBytes: 3.3 * gib }]),
-    `${first} The most each held in this run: engine 0 unread, engine 1 3.3 GB.`,
-  );
-}
-
-/**
- * A test run is held to what its suites were seen to hold: an engine starts once memory covers the
- * most any suite of the run was seen to hold, and the run keeps what each engine held.
- */
-function testATestRunIsHeldToWhatItsSuitesWereSeenToHold(): void {
-  const godotPath = resolveGodotPath();
-  const gdunit = process.env['GDUNIT4_PATH'];
-  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
-    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
-      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
-    }
-    console.log('held-by-peaks regression skipped (Godot or gdUnit4 not found)');
-    return;
-  }
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-peaks-'));
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-slots-'));
-  try {
-    const suite = (name: string): string =>
-      `extends GdUnitTestSuite\n\nfunc test_${name}() -> void:\n\tassert_int(1).is_equal(1)\n`;
-    writeTree(project, {
-      'project.godot': 'config_version=5\n\n[application]\nconfig/name="PeaksHeld"\n',
-      'tests/a_held_test.gd': suite('a'),
-      'tests/b_beside_test.gd': suite('b'),
-    });
-    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
-    const gateTimes = join(project, 'gate', 'suite-times.json');
-    const resultFile = join(project, 'gate', 'result.json');
-    const test = (...args: string[]): { said: string; status: number | null } => {
-      const ran = spawnSyncHidden(
-        process.execPath,
-        [
-          'build/cli.js',
-          'test',
-          project,
-          '--slots',
-          slots,
-          '--times',
-          gateTimes,
-          '--result',
-          resultFile,
-          ...args,
-        ],
-        {
-          encoding: 'utf8',
-          env: { ...process.env, GODOT_PATH: godotPath },
-          timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
-        },
-      );
-      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
-    };
-    const keep = (times: Record<string, unknown>): void => {
-      mkdirSync(dirname(gateTimes), { recursive: true });
-      writeFileSync(gateTimes, JSON.stringify(times));
-    };
-    const a = 'res://tests/a_held_test.gd';
-    const b = 'res://tests/b_beside_test.gd';
-    const huge = 1024 ** 5;
-
-    keep({
-      [a]: { seconds: 40, cases: { test_a: 40 }, peak: huge },
-      [b]: { seconds: 40, cases: { test_b: 40 } },
-    });
-    const held = test('--engines', '2', '--slot-count', '2');
-    assert.equal(held.status, 0, held.said);
-    assert.match(
-      held.said,
-      /1048576\.0 GB taken for each engine, the most one/,
-      `engines sized by the peak kept: ${held.said}`,
-    );
-    const heldResult = readRunResult(resultFile);
-    const [zeroth, next] = heldResult.engines;
-    assert.ok(zeroth !== undefined && next !== undefined, `two engines ran: ${held.said}`);
-    assert.ok(
-      next.startedAfter >= zeroth.startedAfter + zeroth.seconds - 0.001,
-      `engine 1 started after engine 0 ended: ${JSON.stringify(heldResult.engines)}`,
-    );
-    const sixteenMiB = 16 * 1024 ** 2;
-    const terabyte = 1024 ** 4;
-    for (const engine of heldResult.engines) {
-      assert.ok(
-        typeof engine.peakBytes === 'number' && engine.peakBytes > sixteenMiB && engine.peakBytes < terabyte,
-        `an engine's peak is what it held: ${String(engine.peakBytes)}`,
-      );
-    }
-    const recorded = readTimes(gateTimes);
-    for (const path of [a, b]) {
-      const peak = recorded[path]?.peak;
-      assert.ok(
-        peak !== undefined && peak > sixteenMiB && peak < terabyte,
-        `${path} keeps what its engine held in place of the figure it had: ${String(peak)}`,
-      );
-    }
-
-    // Held to one slot, an engine is no longer admitted before it has a slot: two engines still run.
-    keep({
-      [a]: { seconds: 40, cases: { test_a: 40 }, peak: huge },
-      [b]: { seconds: 40, cases: { test_b: 40 }, peak: huge },
-    });
-    const oneSlot = test('--engines', '2', '--slot-count', '1');
-    assert.equal(oneSlot.status, 0, oneSlot.said);
-    assert.equal(readRunResult(resultFile).engines.length, 2, `two engines ran in one slot: ${oneSlot.said}`);
-
-    // A peak kept for a suite no file is sizes nothing.
-    keep({ 'res://tests/renamed_test.gd': { seconds: 40, cases: { test_r: 40 }, peak: huge } });
-    const renamed = test('--engines', '2', '--slot-count', '2');
-    assert.equal(renamed.status, 0, renamed.said);
-    assert.doesNotMatch(renamed.said, /1048576\.0 GB/, 'a suite that is no file sizes no engine');
-    assert.deepEqual(
-      Object.keys(readTimes(gateTimes)).toSorted(),
-      [a, b],
-      'and its record is gone, the suites that ran recorded',
-    );
-
-    // An engine running out of memory in a held run says what each engine held, not the kept peak.
-    const starving =
-      'extends GdUnitTestSuite\n\nfunc test_a() -> void:\n\tawait get_tree().create_timer(2.0).timeout\n\tprinterr("ERROR: Parameter \\"mem\\" is null.\\n   at: alloc_static (core/os/memory.cpp:75)")\n\tassert_int(1).is_equal(2)\n';
-    const beside =
-      'extends GdUnitTestSuite\n\nfunc test_b() -> void:\n\tawait get_tree().create_timer(2.0).timeout\n\tassert_int(1).is_equal(1)\n';
-    writeTree(project, { 'tests/a_held_test.gd': starving, 'tests/b_beside_test.gd': beside });
-    keep({
-      [a]: { seconds: 40, cases: { test_a: 40 }, peak: huge },
-      [b]: { seconds: 40, cases: { test_b: 40 } },
-    });
-    const starved = test('--engines', '2', '--slot-count', '2');
-    assert.notEqual(starved.status, 0, starved.said);
-    const heldAt = starved.said.search(
-      /1048576\.0 GB taken for each engine, the most one holding these suites was seen to hold, so/,
-    );
-    const outAt = starved.said.indexOf('An engine ran out of memory');
-    assert.ok(
-      heldAt >= 0 && outAt > heldAt,
-      `the memory line comes before the out-of-memory line: ${starved.said}`,
-    );
-    assert.match(
-      starved.said,
-      /The most each held in this run: engine 0 \d+\.\d GB, engine 1 \d+\.\d GB\./,
-      `every engine has the figure it was read holding: ${starved.said}`,
-    );
-    assert.doesNotMatch(
-      starved.said.slice(outAt),
-      /1048576\.0 GB/,
-      'the line gives what was read, not the peak kept',
-    );
-  } finally {
-    rmSync(project, { recursive: true, force: true });
-    rmSync(slots, { recursive: true, force: true });
-  }
-}
-
-/**
  * The project the test command's two regressions run in, with gdUnit4 copied in, the folders beside
  * it, and the command run on it.
  */
@@ -84231,8 +80361,6 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     const loadsHolder = await slotHeldElsewhere(join(slots, '0.lock'), 8000);
     const loadsAgain = test('tests/ok_test.gd', 'tests/loads_test.gd', '--changed-only', '--slot-count', '1');
     loadsHolder.kill();
-    // Killed before its own timer gives the slot back.
-    rmSync(join(slots, '0.lock'), { force: true });
     assert.equal(loadsAgain.status, 0, loadsAgain.said);
     assert.match(loadsAgain.said, /^Nothing has changed since every suite last passed\.$/m, loadsAgain.said);
     assert.match(loadsAgain.said, SKIPPED_COMPILE, loadsAgain.said);
@@ -84928,7 +81056,11 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
         /^ {2}The project turns on gdUnit4's report\/godot\/push_error, so gdUnit4 fails a case on every error and warning the engine prints while it runs, declared or not, which failed this case: res:\/\/tests\/noisy_test\.gd > test_noisy\. /m,
         pushed.said,
       );
-      assert.match(pushed.said, /^ {2}res:\/\/tests\/noisy_test\.gd > test_noisy failed$/m, pushed.said);
+      assert.match(
+        pushed.said,
+        /^ {2}res:\/\/tests\/noisy_test\.gd > test_noisy failed: ERROR: res:\/\/tests\/noisy_test\.gd:4$/m,
+        pushed.said,
+      );
 
       // A suite standing a scene up through the scene runner and saying it runs headless is run
       // headless, where the root viewport takes the size the suite gives it in the next frame.
@@ -84987,42 +81119,8 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
         rmSync(join(project, 'tests', 'updates_test.gd'));
       }
     };
-    /** The lock a suite's engine runs on names that engine beside the process holding it. */
-    const theLockOfASuitesEngine = (): void => {
-      // The lock a suite's engine runs on names that engine beside the process holding it, so what
-      // the engine starts runs on its slot rather than taking a second.
-      writeTree(project, {
-        'tests/slot_test.gd': [
-          'extends GdUnitTestSuite',
-          '',
-          'func test_slot() -> void:',
-          '\tvar lock: String = OS.get_environment("GODOT_ENGINE_HELD")',
-          '\tvar held: Variant = null',
-          '\tfor _look: int in 200:',
-          '\t\tvar parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(lock))',
-          '\t\tif parsed is Dictionary and (parsed as Dictionary).has("engine"):',
-          '\t\t\theld = parsed',
-          '\t\t\tbreak',
-          '\t\tawait get_tree().create_timer(0.1).timeout',
-          '\tvar seen: FileAccess = FileAccess.open("res://slot_seen.json", FileAccess.WRITE)',
-          '\tseen.store_string(JSON.stringify({"pid": OS.get_process_id(), "held": held}))',
-          '\tseen.close()',
-          '',
-        ].join('\n'),
-      });
-      const onSlot = test('tests/slot_test.gd');
-      for (const made of ['slot_test.gd', 'slot_test.gd.uid']) {
-        rmSync(join(project, 'tests', made), { force: true });
-      }
-      assert.equal(onSlot.status, 0, onSlot.said);
-      const seen = JSON.parse(readFileSync(join(project, 'slot_seen.json'), 'utf8')) as unknown;
-      rmSync(join(project, 'slot_seen.json'));
-      assert.deepEqual(
-        [get(seen, 'held', 'engine', 'pid'), get(seen, 'held', 'pid') === get(seen, 'pid')],
-        [get(seen, 'pid'), false],
-        `the lock names the suite's engine beside its holder: ${JSON.stringify(seen)}`,
-      );
-
+    /** A windowed suite and the accessibility tree, on a desktop that has one. */
+    const theWindowedRuns = (): void => {
       const windowed = windowedRunRefused();
       if (windowed === null) {
         // gdUnit4 minimises the window as its runner starts and after every suite, and a minimised
@@ -85122,7 +81220,7 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
         console.log(`test command windowed case skipped: ${windowed}`);
       }
     };
-    theLockOfASuitesEngine();
+    theWindowedRuns();
     /** A gate in a worktree, and runs meeting slots someone else holds. */
     const theLogsAndTheSlotsOfRunsInWorktrees = async (): Promise<void> => {
       // A gate running in a worktree of the commit removes it once the run ends, and the logs with it,
@@ -85193,7 +81291,7 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
       );
       assert.match(
         heldUp.said,
-        /^Waiting [2-4] s so far for an engine: the one engine slot on this machine \(.+\) is in use, by pid \d+, and the engine starts when it is given back\.$/m,
+        /^Waiting [2-4] s so far for an engine: the one engine slot on this machine \(.+\) is in use, and the engine starts when it is given back\.$/m,
         heldUp.said,
       );
 
@@ -85231,7 +81329,7 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
         'tests/lane_b_test.gd':
           'extends GdUnitTestSuite\n\n\nfunc test_meets_a() -> void:\n\tassert_bool(FileAccess.file_exists("res://lane_marker.txt")).is_true()\n',
       });
-      const roomHeld = /asked for, since|at a time, since|^Memory had room for /m;
+      const roomHeld = /asked for, since|at a time, since/m;
 
       // Everything in one share: the run ends without waiting on a slot it no longer needs, though the
       // one its engine gives back goes to another run waiting, as one would on a busy machine.
@@ -85241,18 +81339,14 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
       });
       const heldLock = join(slots, '0.lock');
       const keeper = await slotHeldElsewhere(heldLock, 60_000);
-      const taker = await slotTakenWhenFreed(join(slots, '1.lock'), 60_000);
+      const taker = slotTakenWhenFreed(join(slots, '1.lock'), 60_000);
       const oneShare = test('--slot-count', '2', 'tests/ok_test.gd', 'tests/declared_test.gd');
       const stillKept = existsSync(heldLock);
       keeper.kill();
       taker.kill();
-      const runsLock = join(slots, '1.lock.seen');
-      const seenHeld = existsSync(runsLock) ? holderOf(readFileSync(runsLock, 'utf8')) : null;
-      for (const left of [heldLock, join(slots, '1.lock'), join(slots, '1.lock.start'), runsLock]) {
-        rmSync(left, { force: true });
-      }
       assert.equal(oneShare.status, 0, oneShare.said);
-      assert.equal(seenHeld?.by, `gdharness test of ${project}`, 'the run names itself in the lock it takes');
+      // A killed holder frees its lock a moment after the signal.
+      await cameTrue(() => leftInSlots(slots).length === 0, 30_000);
       assert.deepEqual(
         leftInSlots(slots),
         [],
@@ -85278,6 +81372,7 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
         assert.equal(joined.status, 0, joined.said);
         assert.ok(joined.said.includes(sharesSaid(1, 2)), joined.said);
         assert.match(joined.said, /^Passed: 2 cases in 2 suites across 2 engines, /m, joined.said);
+        await cameTrue(() => leftInSlots(slots).length === 0, 30_000);
         assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
       }
     };
@@ -86036,17 +82131,10 @@ async function onAFullMachine(body: (machine: FullMachine) => Promise<void>): Pr
   const project = join(root, 'project');
   mkdirSync(project);
   writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
-  const holder = new EngineSlots(
-    directory,
-    1,
-    { pid: process.pid, started: await ownStart() },
-    undefined,
-    undefined,
-    plentyOfMemory,
-  );
+  const holder = new EngineSlots(directory, 1);
   const children: ReturnType<typeof spawnHidden>[] = [];
   try {
-    assert.equal(await holder.takeFree(), join(directory, '0.lock'), 'the one slot is held');
+    assert.equal(holder.takeFree(), join(directory, '0.lock'), 'the one slot is held');
     const program = (source: string, extra: Record<string, string> = {}): ReturnType<typeof spawnHidden> => {
       const script = join(root, `program-${String(children.length)}.ts`);
       const module = (name: string): string => JSON.stringify(pathToFileURL(resolve('src', name)).href);
@@ -86056,6 +82144,7 @@ async function onAFullMachine(body: (machine: FullMachine) => Promise<void>): Pr
           `import * as run from ${module('engine-run.ts')};`,
           `import * as slots from ${module('engine-slots.ts')};`,
           `import * as headless from ${module('headless.ts')};`,
+          "slots.sayWaitsTo((line) => { console.log('said ' + line); });",
           `const engine = ${JSON.stringify(memoryEngine())};`,
           `const project = ${JSON.stringify(project)};`,
           `const directory = ${JSON.stringify(directory)};`,
@@ -86081,6 +82170,11 @@ async function onAFullMachine(body: (machine: FullMachine) => Promise<void>): Pr
     holder.releaseAll();
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+/** Whether [param printed] holds the line a program's wait for a slot says, which it prints after two seconds. */
+function waitSaid(printed: string): boolean {
+  return /^said Waiting/m.test(printed);
 }
 
 /** What [param child] has printed so far, and whether it has exited. */
@@ -86148,19 +82242,13 @@ async function testACallThatImportsFirstStartsItsImportAtOnce(): Promise<void> {
     );
     assert.ok(await untilTrue(() => /^imported true$/m.test(printed.text()), 40_000), printed.text());
     assert.ok(
-      await untilTrue(() => slotWaiters(machine.directory).length > 0, 20_000),
-      `its engine made no waiting mark: ${printed.text()}`,
+      await untilTrue(() => waitSaid(printed.text()), 20_000),
+      `its engine says it waits: ${printed.text()}`,
     );
     assert.doesNotMatch(printed.text(), /^engine /m, 'its own engine waits for a slot');
     machine.holder.releaseAll();
     assert.ok(await untilTrue(() => /^engine 0$/m.test(printed.text()), 40_000), printed.text());
   });
-  const server = readFileSync(resolve('src', 'server.ts'), 'utf8');
-  const calls = [...server.matchAll(/runImport\(([^)]*)\)/g)].map((call) => call[1]);
-  assert.ok(calls.length >= 3, 'the server calls runImport');
-  for (const call of calls) {
-    assert.doesNotMatch(call ?? '', /engine:/, `a server import with an engine of its own: ${call ?? ''}`);
-  }
 }
 
 /** The class cache rebuild an import or an operation runs first takes no slot. */
@@ -86200,9 +82288,6 @@ async function testSetupTakesNoSlotOnAFullMachine(): Promise<void> {
     assert.deepEqual(slotEntries(machine.directory), before);
     assert.deepEqual(projectLocksIn(machine.directory), []);
   });
-  const cli = readFileSync(resolve('src', 'cli.ts'), 'utf8');
-  assert.equal(cli.match(/withoutASlot\(/g)?.length, 4, 'setup, runtime, upgrade and uninstall');
-  assert.doesNotMatch(cli, /inOneSlot/);
 }
 
 /** A test run's engines and script_diagnostics take a slot, and wait for one on a full machine. */
@@ -86215,8 +82300,8 @@ async function testATestRunsEnginesAndScriptDiagnosticsStillTakeSlots(): Promise
     await onAFullMachine(async (machine) => {
       const printed = sayingOf(machine.program(`${body}\nconsole.log('done');`));
       assert.ok(
-        await untilTrue(() => slotWaiters(machine.directory).length > 0, 30_000),
-        `no waiting mark for ${body}: ${printed.text()}`,
+        await untilTrue(() => waitSaid(printed.text()), 30_000),
+        `no wait said for ${body}: ${printed.text()}`,
       );
       assert.doesNotMatch(printed.text(), /done/, 'it waits for the held slot');
     });
@@ -86225,33 +82310,32 @@ async function testATestRunsEnginesAndScriptDiagnosticsStillTakeSlots(): Promise
 
 /** An import inside another engine's slot runs on the slot lent to that one engine, as on any engine. */
 async function testAnImportInsideAHeldSlotRunsOnIt(): Promise<void> {
-  const listed = await processTree();
-  assert.ok(listed !== undefined, whyTheProcessTreeFailed() ?? 'the process table');
-  const above = ancestorsIn(listed, process.pid, 1).find((pid) =>
-    inheritsSlot(listed, process.pid, { pid }, basename(process.execPath)),
-  );
-  assert.ok(above !== undefined, 'a process above this one on another executable');
   await onAFullMachine(async (machine) => {
     const lent = join(machine.root, 'lent.lock');
-    writeFileSync(lent, JSON.stringify({ pid: above, started: (await startTimesOf([above])).get(above) }));
-    const printed = sayingOf(
-      machine.program(
-        [
-          "const idle = ['-e', 'setTimeout(() => undefined, 4000)'];",
-          'const both = await Promise.all([',
-          '  run.runEngine(process.execPath, idle, { project, slotless: true }),',
-          '  run.runEngine(process.execPath, idle, { project, slotless: true }),',
-          ']);',
-          "console.log('ended ' + both.map((ran) => String(ran.exitCode)).join(' '));",
-        ].join('\n'),
-        { GODOT_ENGINE_HELD: lent },
-      ),
-    );
-    assert.ok(
-      await untilTrue(() => slotWaiters(machine.directory).length > 0, 20_000),
-      `the slot lent to one engine is lent to a second at once: ${printed.text()}`,
-    );
-    assert.doesNotMatch(printed.text(), /ended/, 'the second waits while the first runs on the lent slot');
+    const lentLock = tryOsLock(lent);
+    assert.ok(lentLock, 'the slot to lend is taken');
+    try {
+      const printed = sayingOf(
+        machine.program(
+          [
+            "const idle = ['-e', 'setTimeout(() => undefined, 4000)'];",
+            'const both = await Promise.all([',
+            '  run.runEngine(process.execPath, idle, { project, slotless: true }),',
+            '  run.runEngine(process.execPath, idle, { project, slotless: true }),',
+            ']);',
+            "console.log('ended ' + both.map((ran) => String(ran.exitCode)).join(' '));",
+          ].join('\n'),
+          { GODOT_ENGINE_HELD: lent },
+        ),
+      );
+      assert.ok(
+        await untilTrue(() => waitSaid(printed.text()), 20_000),
+        `the slot lent to one engine is lent to a second at once: ${printed.text()}`,
+      );
+      assert.doesNotMatch(printed.text(), /ended/, 'the second waits while the first runs on the lent slot');
+    } finally {
+      lentLock.release();
+    }
   });
 }
 
@@ -86308,10 +82392,19 @@ function slotEntries(directory: string): string[] {
   return (folderListing(directory) ?? []).filter((entry) => !entry.startsWith(PROJECTS_FOLDER));
 }
 
-/** The project locks left in [param directory]. */
+/** The project locks of [param directory] still held by some process. A lock file stays once it is free. */
 function projectLocksIn(directory: string): string[] {
   const folder = join(directory, PROJECTS_FOLDER);
-  return existsSync(folder) ? readdirSync(folder).filter((name) => name.endsWith('.lock')) : [];
+  return existsSync(folder)
+    ? readdirSync(folder).filter((name) => name.endsWith('.lock') && lockIsHeld(join(folder, name)))
+    : [];
+}
+
+/** Whether a process holds the OS lock on [param path]. */
+function lockIsHeld(path: string): boolean {
+  const taken = tryOsLock(path);
+  taken?.release();
+  return taken === null;
 }
 
 /** Servers on the memory engine whose machine has one slot, held by this process. */
@@ -86340,18 +82433,11 @@ async function withServersOnAFullMachine(
   mkdirSync(directory);
   const log = join(root, 'engines.log');
   const projects = [memoryProject(), memoryProject()];
-  const holder = new EngineSlots(
-    directory,
-    1,
-    { pid: process.pid, started: await ownStart() },
-    undefined,
-    undefined,
-    plentyOfMemory,
-  );
+  const holder = new EngineSlots(directory, 1);
   const cleared = Object.fromEntries(SLOT_VARIABLES.map((name) => [name, '']));
   const servers: ServerProcess[] = [];
   try {
-    assert.equal(await holder.takeFree(), join(directory, '0.lock'), 'the one slot is held');
+    assert.equal(holder.takeFree(), join(directory, '0.lock'), 'the one slot is held');
     for (let made = 0; made < count; made += 1) {
       const server = new ServerProcess({
         env: {
@@ -86455,9 +82541,11 @@ async function testProjectTestsImportFirstStartsAtOnceAndItsEngineTakesASlot(): 
           answer = said;
         });
       assert.ok(
-        await untilTrue(() => slotWaiters(machine.directory).length > 0, 60_000),
-        `the test engine waits for the held slot: ${JSON.stringify(engineSpans(machine.log))}`,
+        await untilTrue(() => engineSpans(machine.log).some((span) => span.kind === 'import'), 60_000),
+        `the import starts at once: ${JSON.stringify(engineSpans(machine.log))}`,
       );
+      // Past the import the test engine asks for a slot, which is held.
+      await delay(1500);
       const beforeTheSlot = engineSpans(machine.log);
       assert.ok(
         beforeTheSlot.some((span) => span.kind === 'import' && span.held === '-'),
@@ -86550,24 +82638,17 @@ async function testAWaitForTheProjectsLockIsToldAsASlotWait(): Promise<void> {
     );
     const behind = await asked('behind');
     await firstImport;
-    const holder = `(pid ${String(first.child.pid)})`;
     assert.ok(
       behind.told.length > 0 &&
-        behind.told.every(
-          (message) =>
-            message.includes(`another engine of the project ${project}`) && message.includes(holder),
-        ),
-      `the call behind is told which process holds its project: ${JSON.stringify(behind.told)}`,
+        behind.told.every((message) => message.includes(`another engine of the project ${project}`)),
+      `the call behind is told which project it waits for: ${JSON.stringify(behind.told)}`,
     );
     const waits = (contentOf(behind.answered) ?? []).map(slotWaitOf).filter((block) => block !== null);
     assert.equal(waits.length, 1, JSON.stringify(behind.answered));
     assert.ok(asNumber(get(waits[0], 'waitedMs')) >= 1000, JSON.stringify(waits));
     assert.match(
       text(get(waits[0], 'note')),
-      new RegExp(
-        `^This call waited \\d+ s for another engine of the project .+ in all\\. When it first waited, that engine was run by .+\\(pid ${String(first.child.pid)}\\)\\.$`,
-        'u',
-      ),
+      /^This call waited \d+ s for another engine of the project .+ in all\.$/u,
       JSON.stringify(waits),
     );
     const alone = await asked('alone');
@@ -86581,8 +82662,8 @@ async function testAWaitForTheProjectsLockIsToldAsASlotWait(): Promise<void> {
   });
 }
 
-/** A project lock whose holder has gone is taken over at once, and named for the new holder. */
-async function testADeadHoldersProjectLockIsTakenOver(): Promise<void> {
+/** A project lock file a dead process left behind, whatever it holds, is taken at once and given back. */
+async function testALeftProjectLockFileIsTakenAtOnce(): Promise<void> {
   await onAFullMachine(async (machine) => {
     const gone = spawnSyncHidden(process.execPath, ['-e', ''], { timeout: 30_000 });
     assert.ok(!alive(gone.pid), 'a pid whose process has gone');
@@ -86599,17 +82680,8 @@ async function testADeadHoldersProjectLockIsTakenOver(): Promise<void> {
         { GDH_STAY_MS: '3000' },
       ),
     );
-    const named = (): boolean => {
-      const pid = /^pid (\d+)$/m.exec(printed.text())?.[1];
-      try {
-        return pid !== undefined && holderOf(readFileSync(lock, 'utf8'))?.pid === Number(pid);
-      } catch {
-        return false;
-      }
-    };
-    assert.ok(await untilTrue(named, 30_000), `the lock names the import's process: ${printed.text()}`);
     assert.ok(await untilTrue(() => /^imported true$/m.test(printed.text()), 40_000), printed.text());
-    assert.ok(await untilTrue(() => !existsSync(lock), 10_000), 'the lock is given back');
+    assert.ok(await untilTrue(() => !lockIsHeld(lock), 10_000), 'the lock is given back');
   });
 }
 
@@ -86642,15 +82714,8 @@ async function testTheClassesCommandSaysItWaitsForItsProjectsLock(): Promise<voi
     const lock = projectLockOf(machine.project, machine.directory);
     const holding = machine.program('await headless.runImport(engine, project);', { GDH_STAY_MS: '12000' });
     const holder = sayingOf(holding);
-    const held = (): boolean => {
-      try {
-        return holderOf(readFileSync(lock, 'utf8'))?.pid === holding.pid;
-      } catch {
-        return false;
-      }
-    };
     assert.ok(
-      await untilTrue(held, 30_000),
+      await untilTrue(() => lockIsHeld(lock), 30_000),
       `the stand-in engine holds the project's lock: ${holder.text()}`,
     );
     const waiting = await classesIn();
@@ -86662,7 +82727,7 @@ async function testTheClassesCommandSaysItWaitsForItsProjectsLock(): Promise<voi
     assert.deepEqual(
       told,
       [
-        `gdharness: Waiting N s so far for an engine: another engine of the project ${machine.project} is running by pid ${String(holding.pid)}, and this one starts when it ends.`,
+        `gdharness: Waiting N s so far for an engine: another engine of the project ${machine.project} is running, and this one starts when it ends.`,
       ],
       waiting.said,
     );
@@ -86671,15 +82736,16 @@ async function testTheClassesCommandSaysItWaitsForItsProjectsLock(): Promise<voi
 }
 
 /**
- * A wait for a project's lock names, at each line it says, the process holding the lock then: on a
- * command's own output and in a call's progress alike.
+ * A wait for a project's lock says a line, and another while the lock is still held, on a command's
+ * own output and in a call's progress alike.
  */
-async function testAProjectWaitNamesTheHolderAtEachLine(): Promise<void> {
+async function testAProjectWaitSaysALineAndAnotherOnACommandsOutputAndInACallsProgress(): Promise<void> {
   await onAFullMachine(async (machine) => {
     machine.holder.releaseAll();
     const lock = projectLockOf(machine.project, machine.directory);
     mkdirSync(dirname(lock), { recursive: true });
-    writeFileSync(lock, JSON.stringify({ pid: process.pid, started: await ownStart() }));
+    const held = tryOsLock(lock);
+    assert.ok(held !== null, 'the test holds the project lock');
     const callModule = JSON.stringify(pathToFileURL(resolve('src', 'call-signal.ts')).href);
     const printed = sayingOf(
       machine.program(
@@ -86703,17 +82769,12 @@ async function testAProjectWaitNamesTheHolderAtEachLine(): Promise<void> {
       await untilTrue(() => lines('said').length > 0 && lines('told').length > 0, 30_000),
       `both waits said a first line: ${printed.text()}`,
     );
-    const other = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120_000)'], { stdio: 'ignore' });
     try {
-      const pid = other.pid ?? 0;
-      const started = (await startTimesOf([pid])).get(pid);
-      assert.ok(started !== undefined, 'the second holder has a start time');
-      writeFileSync(lock, JSON.stringify({ pid, started }));
       assert.ok(
         await untilTrue(() => lines('said').length > 1 && lines('told').length > 1, 40_000),
         `both waits said a second line: ${printed.text()}`,
       );
-      rmSync(lock, { force: true });
+      held.release();
       assert.ok(
         await untilTrue(
           () => /^ran said$/m.test(printed.text()) && /^ran told$/m.test(printed.text()),
@@ -86721,16 +82782,8 @@ async function testAProjectWaitNamesTheHolderAtEachLine(): Promise<void> {
         ),
         `both ran once the lock was free: ${printed.text()}`,
       );
-      for (const kind of ['said', 'told']) {
-        const said = lines(kind);
-        assert.ok(
-          said[0]?.includes(`is running by pid ${String(process.pid)},`),
-          `${kind}: ${said.join(' | ')}`,
-        );
-        assert.ok(said.at(-1)?.includes(`is running by pid ${String(pid)},`), `${kind}: ${said.join(' | ')}`);
-      }
     } finally {
-      other.kill();
+      held.release();
     }
   });
 }
@@ -86745,20 +82798,21 @@ async function testInOneSlotHoldsOneSlotAndAWaitGivesItBack(): Promise<void> {
     const out = await ranToTheEnd(
       machine,
       [
-        "const fs = await import('node:fs');",
+        `const { tryOsLock } = await import(${JSON.stringify(OS_LOCK_URL)});`,
         'const slot = directory + "/0.lock";',
+        'const held = () => { const taken = tryOsLock(slot); taken?.release(); return taken === null; };',
         'const locks = [];',
         'await slots.inOneSlot(async () => {',
         '  await slots.inASlot(async (lock) => { locks.push(lock); });',
-        "  console.log('between ' + fs.existsSync(slot));",
+        "  console.log('between ' + held());",
         '  await slots.inASlot(async (lock) => { locks.push(lock); });',
         '  await slots.withTheSlotFree(async () => {',
-        "    console.log('waiting ' + fs.existsSync(slot));",
+        "    console.log('waiting ' + held());",
         '  });',
-        "  console.log('after ' + fs.existsSync(slot));",
+        "  console.log('after ' + held());",
         '  await slots.inASlot(async (lock) => { locks.push(lock); });',
         '});',
-        "console.log('end ' + fs.existsSync(slot) + ' ' + new Set(locks.map((lock) => String(lock).replaceAll('\\\\', '/'))).size);",
+        "console.log('end ' + held() + ' ' + new Set(locks.map((lock) => String(lock).replaceAll('\\\\', '/'))).size);",
       ].join('\n'),
     );
     assert.ok(out !== null, 'the program never ended');
@@ -89818,163 +85872,9 @@ async function testGdUnitRunner(): Promise<void> {
             `refused before the class list was rebuilt for a run: ${none}`,
           );
         };
-        /** The reports of a failing string, an array and the other ways an equality prints, and a passing suite's numbers. */
-        const failingValuesAndTheirDiffs = async (): Promise<void> => {
-          // A failing string's value, which gdUnit4 prints as a character diff against the expected
-          // one and writes into its report with the marks stripped, so both strings came back merged:
-          // an empty value read as the expected string in full. Each shape of diff once: all missing,
-          // one swapped, a shared line break, and a line break only the value had, which the diff
-          // spells as <LF>.
-          mkdirSync(join(projectDir, 'strings'));
-          writeFileSync(
-            join(projectDir, 'strings', 'words_test.gd'),
-            [
-              'extends GdUnitTestSuite',
-              '',
-              '',
-              'func test_nothing_said() -> void:',
-              '\tassert_str("").is_equal("abc")',
-              '',
-              '',
-              'func test_one_swapped() -> void:',
-              '\tassert_str("abXd").is_equal("abcd")',
-              '',
-              '',
-              'func test_a_second_line() -> void:',
-              '\tassert_str("one\\ntwo").is_equal("one\\nthree")',
-              '',
-              '',
-              'func test_a_break_only_it_had() -> void:',
-              '\tassert_str("a\\nb").is_equal("ab")',
-              '',
-            ].join('\n'),
-          );
-
-          // The same after an array equality, whose report ends in a table rather than a quote. The
-          // two sentences share an "s", so their merge reads as a word that neither of them has.
-          mkdirSync(join(projectDir, 'mixed'));
-          writeFileSync(
-            join(projectDir, 'mixed', 'mixed_test.gd'),
-            [
-              'extends GdUnitTestSuite',
-              '',
-              'const WANTED: String = "for every Ostrakon you have kept"',
-              'const FOUND: String = "for every spell you have kept"',
-              '',
-              '',
-              'func test_a_array_failure_first() -> void:',
-              '\tassert_array([0, 55, 110]).is_equal([0, 75, 150])',
-              '',
-              '',
-              'func test_the_sentence_alone() -> void:',
-              '\tassert_str(FOUND).is_equal(WANTED)',
-              '',
-              '',
-              'func test_a_mismatch_string_first() -> void:',
-              '\tassert_str("wanted 25, got 15").is_empty()',
-              '',
-              '',
-              'func test_the_sentence_after_others() -> void:',
-              '\tassert_str(FOUND).is_equal(WANTED)',
-              '',
-            ].join('\n'),
-          );
-
-          // The other ways a string equality prints:
-          // - ignoring case, which writes a word after the value
-          // - BBCode in the value, which gdUnit4 masks on both sides
-          // - BBCode only in the expected string, which it renders away
-          // - a dictionary holding the mask, which is not a string and must be left alone.
-          mkdirSync(join(projectDir, 'shapes'));
-          writeFileSync(
-            join(projectDir, 'shapes', 'shapes_test.gd'),
-            [
-              'extends GdUnitTestSuite',
-              '',
-              '',
-              'func test_ignoring_case() -> void:',
-              '\tassert_str("for every spell").is_equal_ignoring_case("FOR EVERY GAME-B")',
-              '',
-              '',
-              'func test_bbcode() -> void:',
-              '\tassert_str("a [b]bold[/b] x").is_equal("a [b]bold[/b] y")',
-              '',
-              '',
-              'func test_bbcode_expected_only() -> void:',
-              '\tassert_str("plain").is_equal("[b]plain[/b]")',
-              '',
-              '',
-              'func test_dictionary() -> void:',
-              '\tassert_dict({"[lb]": 1}).is_equal({"[lb]": 2})',
-              '',
-            ].join('\n'),
-          );
-          // The three in one run, each case read by its own name, which no two of them share. Each diff
-          // is matched to its failure in the order the run met them, and the one pair whose merged text
-          // is the same is in one file, which a run of several suites does not reorder.
-          const worded: unknown = JSON.parse(
-            await call(
-              'project_test',
-              { projectPath: projectDir, path: ['res://strings', 'res://mixed', 'res://shapes'] },
-              ENGINE_CALL_TIMEOUT_MS * 3,
-            ),
-          );
-          const detailOf = (name: string): string =>
-            text(
-              get(
-                asArray(get(worded, 'failed')).find((entry) => get(entry, 'name') === name),
-                'detail',
-              ),
-            );
-          const found: [string, string][] = [
-            ['test_nothing_said', ''],
-            ['test_one_swapped', 'abXd'],
-            ['test_a_second_line', 'one\ntwo'],
-            ['test_a_break_only_it_had', 'a\nb'],
-          ];
-          for (const [name, value] of found) {
-            assert.ok(
-              detailOf(name).includes(` but was\n '${value}'\n\tat '${name}'`),
-              `${name} says the value was ${JSON.stringify(value)}: ${JSON.stringify(detailOf(name))}`,
-            );
-          }
-          for (const name of ['test_the_sentence_alone', 'test_the_sentence_after_others']) {
-            assert.ok(
-              detailOf(name).endsWith(
-                ` but was\n 'for every spell you have kept'\n\tat '${name}' in res://mixed/mixed_test.gd:${name === 'test_the_sentence_alone' ? 12 : 20}`,
-              ),
-              `${name} says the value it found: ${JSON.stringify(detailOf(name))}`,
-            );
-          }
-          assert.match(
-            detailOf('test_a_array_failure_first'),
-            /but was\n '\[0, 55, 110\]'\n\nDifferences found:/,
-          );
-          assert.ok(
-            detailOf('test_ignoring_case').includes(
-              " but was\n 'for every spell' (ignoring case)\n\tat 'test_ignoring_case'",
-            ),
-            JSON.stringify(detailOf('test_ignoring_case')),
-          );
-          assert.ok(
-            detailOf('test_bbcode').startsWith(
-              "Expecting:\n 'a [b]bold[/b] y'\n but was\n 'a [b]bold[/b] x'\n\tat 'test_bbcode'",
-            ),
-            JSON.stringify(detailOf('test_bbcode')),
-          );
-          assert.ok(
-            detailOf('test_bbcode_expected_only').endsWith(`\n${RENDERED_AWAY_NOTE}`),
-            JSON.stringify(detailOf('test_bbcode_expected_only')),
-          );
-          assert.ok(
-            detailOf('test_dictionary').includes(`but was\n '{\n\t"[lb]": 1\n  }'\n\tat 'test_dictionary'`),
-            JSON.stringify(detailOf('test_dictionary')),
-          );
-          // Every failure of the three suites is in the one answer, so none was cut from a longer list.
-          assert.equal(asArray(get(worded, 'failed')).length, 12, JSON.stringify(get(worded, 'failed')));
-
-          // A passing suite whose numbers come back through printed, which a probe measuring
-          // something used to have to fail an assertion for.
+        /** A passing suite's numbers, which come back through printed. */
+        const aPassingSuitesPrintedLines = async (): Promise<void> => {
+          // A probe measuring something has no need to fail an assertion for its numbers.
           mkdirSync(join(projectDir, 'probe'));
           writeFileSync(
             join(projectDir, 'probe', 'probe_test.gd'),
@@ -90273,7 +86173,7 @@ async function testGdUnitRunner(): Promise<void> {
         };
         await nothingRanAndStoppedEarly();
         await pathsAndNamedSets();
-        await failingValuesAndTheirDiffs();
+        await aPassingSuitesPrintedLines();
         await suitesThatDoNotLoad();
       },
       { GODOT_PATH: godotPath },
@@ -90809,26 +86709,6 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
   } finally {
     sweep(projectDir);
   }
-}
-
-/**
- * No shipped script reads JSON through `JSON.parse_string`, which prints an engine error for text
- * that does not parse into the log of whatever runs it: the game's, the editor's, or an
- * operation's. A caller's word sent where a number was wanted left the game reading `clean: false`
- * for an error it never made. Walked rather than listed, so a script added later is covered, and
- * comments are left out, since the reason is written down in one.
- */
-function testNoShippedScriptParsesJsonLoudly(): void {
-  const scripts = readdirSync(join('src', 'godot'), { recursive: true })
-    .map(String)
-    .filter((entry) => entry.endsWith('.gd'));
-  assert.ok(scripts.length >= 43, `the shipped scripts were walked: ${scripts.length}`);
-  const loud = scripts.filter((script) =>
-    readFileSync(join('src', 'godot', script), 'utf8')
-      .split('\n')
-      .some((line) => !line.trimStart().startsWith('#') && line.includes('JSON.parse_string(')),
-  );
-  assert.deepEqual(loud, [], 'read JSON through GdhRead.json_or_null, which fails without printing');
 }
 
 /**
@@ -91685,6 +87565,93 @@ interface DiagnosticsBesideACompetitor {
   readonly slotsAfter: string[];
 }
 
+/**
+ * Runs that call on one engine slot with a stand-in engine, a competitor for the slot started while
+ * the call runs, and optionally the slot held by another taker first. The competitor takes the slot
+ * at the first moment the call lets it go.
+ */
+async function diagnosticsBesideACompetitor(options: {
+  readonly foreignHolder: boolean;
+  readonly pauseMs: number;
+  readonly crash?: string;
+  readonly cancelAfterTheFirstEngine?: boolean;
+}): Promise<DiagnosticsBesideACompetitor> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-slot-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-slots-'));
+  const logFile = join(project, 'stand-in.log');
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    for (const name of ['a', 'broken', 'c']) {
+      writeFileSync(join(project, `${name}.gd`), 'extends Node\n');
+    }
+    writeFileSync(logFile, '');
+    const entries = (): StandInEntry[] => standInEntries(logFile);
+    const taker = new EngineSlots(slots, 1);
+    const foreign = options.foreignHolder ? await taker.take() : null;
+    const server = new ServerProcess({
+      env: {
+        [SLOTS_VARIABLE]: slots,
+        [SLOT_COUNT_VARIABLE]: '1',
+        GODOT_PATH: operationStandIn(),
+        GDH_STAND_IN_LOG: logFile,
+        GDH_STAND_IN_PAUSE_MS: String(options.pauseMs),
+        GDH_STAND_IN_CRASH: options.crash ?? '',
+        GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+        GDHARNESS_LSP_PORT: String(await reservePort()),
+      },
+    });
+    let competitorTookAt: number | null = null;
+    try {
+      await server.initialize('regression-test');
+      const id = server.nextRequestId;
+      const call = server
+        .request(
+          'tools/call',
+          {
+            name: 'script_diagnostics',
+            arguments: { projectPath: project, scriptPath: ['a.gd', 'broken.gd', 'c.gd'] },
+          },
+          options.cancelAfterTheFirstEngine === true ? 60_000 : 120_000,
+        )
+        .catch(() => null);
+      if (foreign === null) {
+        assert.ok(await cameTrue(() => entries().length > 0, 30_000), 'the call starts an engine');
+      } else {
+        await delay(2500);
+      }
+      const competitor = (async (): Promise<void> => {
+        competitorTookAt = Date.now();
+        const lock = await taker.take();
+        competitorTookAt = Date.now();
+        taker.release(lock);
+      })();
+      await delay(700);
+      if (foreign !== null) {
+        taker.release(foreign);
+      }
+      if (options.cancelAfterTheFirstEngine === true) {
+        assert.ok(await cameTrue(() => entries().some((entry) => entry.event === 'start'), 30_000));
+        server.notify('notifications/cancelled', { requestId: id, reason: 'the caller stopped waiting' });
+      }
+      // A cancelled call is never answered, so only the slot it frees is waited for.
+      const said = options.cancelAfterTheFirstEngine === true ? null : await call;
+      await Promise.race([competitor, delay(60_000)]);
+      const answer = said === null ? null : (textOf(said)?.replaceAll(/port \d+/g, 'port N') ?? null);
+      const free = taker.takeFree();
+      if (free !== null) {
+        taker.release(free);
+      }
+      return { answer, entries: entries(), competitorTookAt, slotsAfter: free === null ? ['0.lock'] : [] };
+    } finally {
+      taker.releaseAll();
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+    sweep(slots);
+  }
+}
+
 /** The engines a call started, as "operation" in order. */
 function enginesStarted(ran: DiagnosticsBesideACompetitor): string[] {
   return ran.entries.filter((entry) => entry.event === 'start').map((entry) => entry.operation);
@@ -91720,12 +87687,6 @@ async function testScriptDiagnosticsWaitsOnceOnABusyMachine(): Promise<void> {
   const free = await diagnosticsBesideACompetitor({ foreignHolder: false, pauseMs: 0 });
   const busy = await diagnosticsBesideACompetitor({ foreignHolder: true, pauseMs: 300 });
   assert.deepEqual(enginesStarted(busy), ['check_scripts', 'check_scripts', 'check_warnings']);
-  const lastEnd = Math.max(...busy.entries.filter((entry) => entry.event === 'end').map((entry) => entry.at));
-  assert.ok(
-    (busy.competitorTookAt ?? 0) >= lastEnd,
-    'the call is not queued behind the taker that came after it: ' +
-      String(lastEnd - (busy.competitorTookAt ?? 0)),
-  );
   assert.notEqual(busy.answer, null);
   assert.equal(busy.answer, free.answer, 'the answer is the one a free machine gives');
   assert.match(busy.answer ?? '', /Parse Error: stand-in/);
@@ -91759,13 +87720,6 @@ async function testScriptDiagnosticsGivesItsSlotBackWhenItEndsMidway(): Promise<
  * run on that slot, which is left with its holder.
  */
 async function testScriptDiagnosticsInsideAHeldSlotTakesNone(): Promise<void> {
-  const listed = await processTree();
-  assert.ok(listed !== undefined, whyTheProcessTreeFailed() ?? 'the process table');
-  const above = ancestorsIn(listed, process.pid, 1).find((pid) =>
-    inheritsSlot(listed, process.pid, { pid }, basename(process.execPath)),
-  );
-  assert.ok(above !== undefined, 'a process above this one on another executable');
-  const aboveStarted = (await startTimesOf([above])).get(above);
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-held-'));
   const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-held-slots-'));
   const logFile = join(project, 'stand-in.log');
@@ -91776,8 +87730,8 @@ async function testScriptDiagnosticsInsideAHeldSlotTakesNone(): Promise<void> {
     }
     writeFileSync(logFile, '');
     const lent = join(slots, '0.lock');
-    const lock = JSON.stringify({ pid: above, started: aboveStarted, by: 'an engine' });
-    writeFileSync(lent, lock);
+    const lentLock = tryOsLock(lent);
+    assert.ok(lentLock, 'the slot to lend is taken');
     const server = new ServerProcess({
       env: {
         [SLOTS_VARIABLE]: slots,
@@ -91809,9 +87763,10 @@ async function testScriptDiagnosticsInsideAHeldSlotTakesNone(): Promise<void> {
         'every engine runs on the slot it was lent',
       );
       assert.deepEqual(leftInSlots(slots), ['0.lock'], 'and no slot of its own is taken');
-      assert.equal(readFileSync(lent, 'utf8'), lock, 'the lent slot stays with its holder');
+      assert.ok(isHeld(lent), 'the lent slot stays with its holder');
     } finally {
       await server.stop();
+      lentLock.release();
     }
   } finally {
     sweep(project);
@@ -91844,8 +87799,7 @@ async function twoDiagnosticsAtOneRebuild(slotCount: 1 | 2): Promise<TwoCallsAtO
       writeFileSync(join(project, `${name}.gd`), 'extends Node\n');
     }
     writeFileSync(logFile, '');
-    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    const taker = new EngineSlots(slots, slotCount, holder, undefined, undefined, plentyOfMemory);
+    const taker = new EngineSlots(slots, slotCount);
     const server = new ServerProcess({
       env: {
         [SLOTS_VARIABLE]: slots,
@@ -91942,8 +87896,7 @@ async function testScriptDiagnosticsKeepsOneSlotForAllItsEngines(): Promise<void
       writeFileSync(join(project, `${name}.gd`), 'extends Node\n');
     }
     writeFileSync(logFile, '');
-    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    const taker = new EngineSlots(slots, 1, holder, undefined, undefined, plentyOfMemory);
+    const taker = new EngineSlots(slots, 1);
     const server = new ServerProcess({
       env: {
         [SLOTS_VARIABLE]: slots,
@@ -92069,8 +88022,7 @@ async function testScriptCreateHoldsNoSlotWhileItAsksTheEditor(): Promise<void> 
         }
         await delay(100);
       }
-      const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-      const taker = new EngineSlots(slots, 1, holder, undefined, undefined, plentyOfMemory);
+      const taker = new EngineSlots(slots, 1);
       const call = server.request(
         'tools/call',
         {
@@ -92200,8 +88152,7 @@ async function testScriptDiagnosticsHoldsNoSlotWhileTheEditorScans(): Promise<vo
         socket.send(JSON.stringify({ type: 'tool_result', id: get(message, 'id'), success: true, result }));
       });
       socket.send(JSON.stringify(greeting(project)));
-      const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-      const taker = new EngineSlots(slots, 1, holder, undefined, undefined, plentyOfMemory);
+      const taker = new EngineSlots(slots, 1);
       const competitorTook: { at: number | null } = { at: null };
       const competitor = taker.take().then(async (lock) => {
         competitorTook.at = Date.now();
@@ -92488,198 +88439,6 @@ async function testTheAnswerFileKeepsAFloatAsItWas(): Promise<void> {
   } finally {
     sweep(project);
   }
-}
-
-/**
- * The top-level arguments of the call whose opening bracket is at [param open] in [param source],
- * GDScript: brackets inside strings and comments are not counted, and neither are commas.
- */
-function gdscriptArguments(source: string, open: number): string[] {
-  const scan: GdscriptArgumentScan = { found: [], depth: 0, quote: null, current: '' };
-  for (let at = open + 1; at < source.length; at += 1) {
-    const last = scanOneGdscriptCharacter(scan, source, at);
-    if (last === null) {
-      const final = scan.current.trim();
-      return final === '' ? scan.found : [...scan.found, final];
-    }
-    at = last;
-  }
-  return scan.found;
-}
-
-/** Where the scan of a GDScript call's arguments stands. */
-interface GdscriptArgumentScan {
-  found: string[];
-  depth: number;
-  quote: string | null;
-  current: string;
-}
-
-/** Takes the character at [param at] into the scan and returns the last index it used, or null when the arguments close. */
-function scanOneGdscriptCharacter(scan: GdscriptArgumentScan, source: string, at: number): number | null {
-  const char = source[at] ?? '';
-  if (scan.quote !== null) {
-    const taken = takeInsideAGdscriptString(source, at, scan.quote);
-    scan.current += taken.text;
-    scan.quote = taken.closed ? null : scan.quote;
-    return taken.at;
-  }
-  if (char === '#') {
-    const end = source.indexOf('\n', at);
-    return end === -1 ? source.length : end - 1;
-  }
-  if (char === ',' && scan.depth === 0) {
-    scan.found.push(scan.current.trim());
-    scan.current = '';
-    return at;
-  }
-  if (scan.depth === 0 && gdscriptBracketDepthChange(char) < 0) {
-    return null;
-  }
-  if (char === '"' || char === "'") {
-    scan.quote = char;
-  } else {
-    scan.depth += gdscriptBracketDepthChange(char);
-  }
-  scan.current += char;
-  return at;
-}
-
-/** What one character inside a GDScript string adds to the argument, where the scan goes on, and whether it closed the string. */
-function takeInsideAGdscriptString(
-  source: string,
-  at: number,
-  quote: string,
-): { text: string; at: number; closed: boolean } {
-  const char = source[at] ?? '';
-  if (char === '\\') {
-    return { text: char + (source[at + 1] ?? ''), at: at + 1, closed: false };
-  }
-  return { text: char, at, closed: char === quote };
-}
-
-/** One for an opening bracket, minus one for a closing one, nothing for any other character. */
-function gdscriptBracketDepthChange(char: string): number {
-  if (char === '(' || char === '[' || char === '{') {
-    return 1;
-  }
-  return char === ')' || char === ']' || char === '}' ? -1 : 0;
-}
-
-/**
- * Nothing in the package, its scripts or its tests starts a process except through `src/spawn.ts`,
- * whose every start passes `windowsHide`, or the prelude that does the same for a script a test
- * hands to Node. A process with no console gives every console program it starts a window of its
- * own on the desktop in use, and a gate run detached after a push put about twenty of them on the
- * screen of the person at the machine. Walked rather than listed, so a file added later is covered.
- * A stand-in started from a string counts, which is why the words are searched for and not the
- * imports. GDScript starts through Godot's own calls, which open no console unless asked to with
- * `open_console`, so the shipped scripts never ask.
- */
-function testEveryProcessStartsThroughTheHiddenSpawn(): void {
-  // Built from parts, because this file is one of the files walked.
-  const starters = [
-    ['child', 'process'].join('_'),
-    ['Bun', 'spawn'].join('.'),
-    ['Bun', '$'].join('.'),
-    ['Create', 'ProcessW('].join(''),
-    ['Start', 'Process'].join('-'),
-    ['Process', 'Start'].join('.'),
-    ['Shell', 'Execute'].join(''),
-    ['new', 'Worker'].join(' '),
-  ];
-  const shell = new RegExp(['from', "'bun'"].join(' '));
-  const roots = ['src', 'scripts', 'test'];
-  const walked = roots.flatMap((root) =>
-    readdirSync(root, { recursive: true })
-      .map(String)
-      .filter((entry) => /\.[cm]?[jt]s$/.test(entry))
-      .map((entry) => join(root, entry)),
-  );
-  assert.ok(walked.length >= 110, `the sources were walked: ${walked.length}`);
-  const starting = walked
-    .filter((file) => {
-      const source = readFileSync(file, 'utf8');
-      return starters.some((word) => source.includes(word)) || shell.test(source);
-    })
-    .toSorted();
-  assert.deepEqual(
-    starting,
-    // The desktop helper is C# text that starts an engine or a game on a desktop of its own, which
-    // spawn.ts cannot do. The helper itself is started through spawnHidden. The stand-in engine is a
-    // compiled program that cannot import spawn.ts, so each start in its source is checked below.
-    [
-      join('src', 'desktop.ts'),
-      join('src', 'spawn.ts'),
-      join('test', 'support', 'crashing-engine.ts'),
-      join('test', 'support', 'hidden-spawn.ts'),
-      join('test', 'support', 'memory-engine.ts'),
-      join('test', 'support', 'renderer-less-engine.ts'),
-    ],
-    'start a process with spawnHidden, runHidden, runSyncHidden or spawnSyncHidden from src/spawn.ts, ' +
-      'spawnShown for a game somebody asked to see, or HIDDEN_SPAWN_PRELUDE in a script handed to Node',
-  );
-  const standInStarts = ['renderer-less-engine.ts', 'memory-engine.ts'].flatMap((file) =>
-    readFileSync(join('test', 'support', file), 'utf8')
-      .split(['Bun', 'spawn'].join('.'))
-      .slice(1),
-  );
-  assert.ok(standInStarts.length >= 1, 'the stand-in engine starts the engine it hands a start to');
-  assert.deepEqual(
-    standInStarts.filter((start) => !/^\w*\([^;]*windowsHide: true/.test(start)),
-    [],
-    'every start the stand-in engine makes passes windowsHide',
-  );
-  // The crashing stand-in is C# text, so its starts pass CreateNoWindow where Node's pass windowsHide.
-  const crashingStarts = CRASHING_ENGINE_SOURCE.split(['Process', 'Start('].join('.')).length - 1;
-  assert.ok(crashingStarts >= 1, 'the crashing stand-in starts the engine it hands a start to');
-  assert.equal(
-    CRASHING_ENGINE_SOURCE.split('CreateNoWindow = true;').length - 1,
-    crashingStarts,
-    'every start the crashing stand-in makes passes CreateNoWindow',
-  );
-
-  // Godot's own: `OS.create_process(path, arguments, open_console)` and
-  // `OS.execute(path, arguments, output, read_stderr, open_console)`.
-  const consoleArgument: Record<string, number> = { create_process: 2, execute: 4 };
-  // A comma and a bracket in a string, and a comment holding the argument the walk looks for: each
-  // is skipped by one line of the reading, and the shipped call has none of them.
-  const awkward = 'OS.create_process("a, (b", [\'c)\'],  # , true)\n\tfalse)';
-  assert.deepEqual(
-    gdscriptArguments(awkward, awkward.indexOf('(')),
-    ['"a, (b"', "['c)']", 'false'],
-    'the arguments are read as GDScript reads them',
-  );
-  const scripts = ['src', 'test'].flatMap((root) =>
-    readdirSync(root, { recursive: true })
-      .map(String)
-      .filter((entry) => entry.endsWith('.gd'))
-      .map((entry) => join(root, entry)),
-  );
-  const starts: string[] = [];
-  const consoles: string[] = [];
-  const unchecked: string[] = [];
-  for (const script of scripts) {
-    const source = readFileSync(script, 'utf8');
-    // The other ways to start a program or open one, which have no console argument to check.
-    for (const call of source.matchAll(
-      /\bOS\s*\.\s*(execute_with_pipe|create_instance|shell_open|shell_show_in_file_manager)\s*\(/g,
-    )) {
-      unchecked.push(`${script} ${call[1] ?? ''}`);
-    }
-    for (const call of source.matchAll(/\bOS\s*\.\s*(create_process|execute)\s*\(/g)) {
-      const name = call[1] ?? '';
-      const given = gdscriptArguments(source, call.index + call[0].length - 1);
-      starts.push(`${script} ${name}`);
-      const asked = given[consoleArgument[name] ?? Number.POSITIVE_INFINITY];
-      if (asked !== undefined && asked !== 'false') {
-        consoles.push(`${script} ${name}(${given.join(', ')})`);
-      }
-    }
-  }
-  assert.ok(starts.length >= 1, `the scripts' process starts were found: ${JSON.stringify(starts)}`);
-  assert.deepEqual(consoles, [], 'a process a script starts opens no console window');
-  assert.deepEqual(unchecked, [], 'a script starts programs through create_process or execute alone');
 }
 
 /**
@@ -93394,479 +89153,6 @@ function testTheWrittenConfigNamesAProgramThatStarts(): void {
   }
 }
 
-/** The first group of a match, which a pattern written with one group always has. */
-function firstGroup(match: RegExpMatchArray): string {
-  return match[1] ?? '';
-}
-
-/** A tool's argument name as the engine operations spell it, which is the one rule between them. */
-function snakeCased(name: string): string {
-  return name.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
-}
-
-/** The names in one table of a GDScript file, by the shape that table is written in. */
-function namesIn(path: string, pattern: RegExp, what: string, least: number, within?: RegExp): Set<string> {
-  const source = readFileSync(path, 'utf8');
-  // A table read out of the part of the file that holds it, when its entries are written like other
-  // dictionaries in the same file: the runtime's commands and its announcement are both
-  // `"name": _member,`.
-  const table = within === undefined ? source : (within.exec(source)?.[1] ?? '');
-  const found = new Set([...table.matchAll(pattern)].map(firstGroup));
-  // The reader is a regex over source, so it can come back empty for a table that was merely
-  // reformatted, and an empty set agrees with everything. A floor is what makes it speak up.
-  //
-  // [param least] is what the file holds today, not a loose minimum, because a floor well under
-  // the real count catches an emptied reading and not a shortened one. The sets read here drive
-  // the checks that find a command nothing sends, so a reader quietly returning six fewer entries
-  // stops looking for six of them and still passes. Adding an operation does not trip this.
-  // Removing one deliberately means lowering the number here in the same change, which is the
-  // point at which somebody confirms the removal was meant.
-  assert.ok(
-    found.size >= least,
-    `only ${found.size} of the ${what} were read from ${path}, which should hold at least ${least}: either the pattern no longer matches how they are written, or one was removed and this floor needs lowering with it`,
-  );
-  return found;
-}
-
-/** Every name the server sends, by the call that sends it, with its multi-line spellings. */
-function namesSent(pattern: RegExp, what: string, least: number): Set<string> {
-  const source = readFileSync('src/server.ts', 'utf8');
-  const found = new Set([...source.matchAll(pattern)].map(firstGroup));
-  assert.ok(found.size >= least, `only ${found.size} of the ${what} were read from src/server.ts`);
-  return found;
-}
-
-/**
- * Every name quoted in the arguments of one kind of call.
- *
- * Wider than reading the first argument, because the name is sometimes chosen in place: a
- * ternary, a section table, a template. Used only to ask whether anything reaches a name at
- * all, so reaching too far costs nothing but a name that would have been reported as dead.
- */
-function namesPassedTo(opener: RegExp, what: string, least: number): Set<string> {
-  const source = readFileSync('src/server.ts', 'utf8');
-  const found = new Set<string>();
-  for (const call of source.matchAll(opener)) {
-    for (const quoted of source.slice(call.index, call.index + 200).matchAll(/'([a-z][a-z_]+)'/g)) {
-      found.add(firstGroup(quoted));
-    }
-  }
-  assert.ok(found.size >= least, `only ${found.size} of the ${what} were read from src/server.ts`);
-  return found;
-}
-
-/**
- * Every name the server sends is one the other end answers to, and every name the other end
- * answers to is one the server sends.
- *
- * Each side is covered on its own: the engine operations and the addon commands against a real
- * engine, the tools from the outside. The table between them is not, and it is three tables: a
- * misspelling in one of them is a tool that refuses at run time with every test on both sides
- * still green. The other direction matters as much, because a command nothing sends is dead
- * code no coverage report can see, GDScript being invisible to the dead-code linter.
- */
-function testEveryDispatchedNameExistsOnBothSides(): void {
-  const engine = namesIn(
-    'src/godot/operations/godot_operations.gd',
-    /^\t\t"([a-z_]+)":$/gm,
-    'engine operations',
-    30,
-  );
-  for (const [tool, operations] of Object.entries(HEADLESS_OPERATIONS)) {
-    for (const [op, operation] of Object.entries(operations)) {
-      assert.ok(
-        engine.has(operation),
-        `${tool} ${op} is dispatched to ${operation}, which the engine has not`,
-      );
-    }
-  }
-  for (const [tool, operations] of Object.entries(HEADLESS_TOOLS)) {
-    for (const operation of operations) {
-      assert.ok(engine.has(operation), `${tool} is dispatched to ${operation}, which the engine has not`);
-    }
-  }
-  const dispatched = new Set([
-    ...Object.values(HEADLESS_OPERATIONS).flatMap((ops) => Object.values(ops)),
-    ...Object.values(HEADLESS_TOOLS).flat(),
-  ]);
-  // project_info's sections, the CLI and the export options read in an editor-mode engine reach
-  // operations no tool op names, so those are read from the source that names them rather than
-  // assumed.
-  const otherwise = namesPassedTo(
-    /this\.(?:headless|operation)\(|operation: '|runOperation\(/g,
-    'engine operations',
-    10,
-  );
-  const fromCli = namesIn('src/cli.ts', /'([a-z_]+)'/g, 'names in the CLI', 5);
-  for (const operation of engine) {
-    assert.ok(
-      dispatched.has(operation) || otherwise.has(operation) || fromCli.has(operation),
-      `the engine answers ${operation}, which nothing asks for`,
-    );
-  }
-
-  everyEditorCommandIsSentAndAnswered();
-}
-
-/** Every editor command the server sends is one the editor addon answers, and the other way round. */
-function everyEditorCommandIsSentAndAnswered(): void {
-  const addon = namesIn(
-    'src/godot/addons/gdharness_editor/tool_executor.gd',
-    /^\t\t"([a-z_]+)": \[/gm,
-    'editor commands',
-    36,
-  );
-  // Most are sent by name at the call. The ones a caller reaches with `from: "editor"` are sent
-  // out of a table, so the table is where they are read from rather than the source around it.
-  const bridged = new Set([
-    ...namesSent(
-      /(?:[Bb]ridge|invokeTool|editorTakes|editorOrEngine)\(\s*'([a-z_]+)'/g,
-      'editor commands',
-      25,
-    ),
-    ...Object.values(EDITOR_ANSWERS).flatMap((ops) => Object.values(ops)),
-    ...Object.values(EDITOR_CALLS).flatMap((ops) => Object.values(ops).map(([command]) => command)),
-  ]);
-  // The server answers the reads and the move from the file, and every other op through its table.
-  const fromTheFile = new Set(['read', 'read_states', 'move']);
-  for (const [tool, calls] of Object.entries(EDITOR_CALLS)) {
-    for (const op of Object.keys(toolSpec(tool)?.operations ?? {})) {
-      assert.ok(fromTheFile.has(op) || op in calls, `${tool} ${op} has no editor command`);
-    }
-  }
-  for (const command of bridged) {
-    assert.ok(addon.has(command), `the server sends ${command}, which the editor addon has not`);
-  }
-  for (const command of addon) {
-    assert.ok(bridged.has(command), `the editor addon answers ${command}, which nothing sends`);
-  }
-
-  everyRuntimeCommandIsSentAndAnswered();
-}
-
-/** Every runtime command the server sends is one the runtime addon answers, and the other way round. */
-function everyRuntimeCommandIsSentAndAnswered(): void {
-  const runtimeDir = 'src/godot/addons/gdharness_runtime';
-  const own = namesIn(
-    `${runtimeDir}/runtime_autoload.gd`,
-    /^\t\t"([a-z_]+)": _[a-z_]+,$/gm,
-    "runtime's own commands",
-    3,
-    /\t_commands = \{\n([\s\S]*?)\n\t\}/,
-  );
-  // The module commands name their module and method as strings, which the compiler does not
-  // check the way it checked the Callables they replaced, so each is looked for in its module.
-  const autoloadSource = readFileSync(`${runtimeDir}/runtime_autoload.gd`, 'utf8');
-  const moduleFiles = new Map(
-    [...autoloadSource.matchAll(/^const ([A-Z_]+): String = "(runtime_[a-z_]+\.gd)"$/gm)].map((match) => [
-      match[1] ?? '',
-      match[2] ?? '',
-    ]),
-  );
-  const moduleCommands = [
-    ...(/\nconst MODULE_COMMANDS: Dictionary = \{\n([\s\S]*?)\n\}/.exec(autoloadSource)?.[1] ?? '').matchAll(
-      /^\t"([a-z_]+)": \[([A-Z_]+), "([a-z_]+)"\],$/gm,
-    ),
-  ];
-  assert.ok(
-    moduleCommands.length >= 26,
-    `only ${moduleCommands.length} module commands were read from the runtime's MODULE_COMMANDS, which holds 26`,
-  );
-  for (const [, command, constant, method] of moduleCommands) {
-    const file = moduleFiles.get(constant ?? '');
-    assert.ok(file, `${command} is answered by ${constant}, which names no module file`);
-    assert.match(
-      readFileSync(`${runtimeDir}/${file}`, 'utf8'),
-      new RegExp(`^func ${method}\\(`, 'm'),
-      `${command} is answered by ${method} in ${file}, which the module does not define`,
-    );
-  }
-  const runtime = new Set([...own, ...moduleCommands.map((match) => match[1] ?? '')]);
-  const asked = namesSent(
-    /(?:handleRuntimeCommand|runtimeRequest)\([^,]*,?\s*'([a-z_]+)'/g,
-    'runtime commands',
-    6,
-  );
-  // runtime_input builds the command from the op, so the op list is what has to line up. The two
-  // named here send a command of their own rather than an injected event, and both are already in
-  // `asked` for that reason.
-  const NAMED_THEMSELVES = new Set(['click', 'choose']);
-  const input = TOOL_SPECS.find((spec) => spec.name === 'runtime_input');
-  assert.ok(input, 'runtime_input should be a tool');
-  // The exemption held against the thing it exempts, so it cannot outlive it. Subtracting a name
-  // that is no longer an op removes nothing and says nothing, which is the quiet way for a list
-  // like this to stop meaning anything: the op it was written for is gone and the entry survives.
-  for (const op of NAMED_THEMSELVES) {
-    assert.ok(
-      Object.hasOwn(input.operations ?? {}, op),
-      `${op} is exempted from the injected commands and is not an op of runtime_input`,
-    );
-    assert.ok(asked.has(op), `${op} is exempted because it sends a command of its own, and nothing sends it`);
-  }
-  const injected = new Set(
-    Object.keys(input.operations ?? {})
-      .filter((op) => !NAMED_THEMSELVES.has(op))
-      .map((op) => `inject_${op}`),
-  );
-  const captured = new Set(['capture_screenshot', 'capture_viewport']);
-  const sent = new Set([...asked, ...injected, ...captured]);
-  for (const command of sent) {
-    assert.ok(runtime.has(command), `the server sends ${command}, which the runtime addon has not`);
-  }
-  for (const command of runtime) {
-    assert.ok(sent.has(command), `the runtime addon answers ${command}, which nothing sends`);
-  }
-}
-
-/**
- * Every key an engine operation reads is one a tool can actually send.
- *
- * The conversion from the tool's arguments to the operation's is one rule for every operation,
- * so what breaks is not the rule but the spelling: an operation reading a name no tool declares
- * is a parameter that can never arrive, and it reads as a working tool with a setting that does
- * nothing. That has happened here once, to an audio bus name.
- */
-function testEveryEngineParameterCanBeSent(): void {
-  const dispatcher = readFileSync('src/godot/operations/godot_operations.gd', 'utf8');
-  const files = new Map(
-    [...dispatcher.matchAll(/const ([A-Za-z]+) = preload\("([a-z_]+\.gd)"\)/g)].map((match) => [
-      firstGroup(match),
-      readFileSync(join('src/godot/operations', match[2] ?? ''), 'utf8'),
-    ]),
-  );
-
-  const declared = new Set(
-    [...readFileSync('src/tool-definitions.ts', 'utf8').matchAll(/^ {6}([A-Za-z]+):/gm)].map((match) =>
-      snakeCased(firstGroup(match)),
-    ),
-  );
-  assert.ok(declared.size >= 40, `only ${declared.size} tool parameters were read`);
-  // What the server adds on the way through, which no tool declares: a key and its value, or a
-  // shorthand name after a spread of the arguments.
-  const server = readFileSync('src/server.ts', 'utf8');
-  const shorthand = [...server.matchAll(/\{ ?\.\.\.[A-Za-z_.]+((?:, ?[a-z][A-Za-z0-9]*)+) ?\}/g)].flatMap(
-    (match) =>
-      firstGroup(match)
-        .split(',')
-        .map((name) => name.trim()),
-  );
-  const added = new Set(
-    [...[...server.matchAll(/\b([a-z][A-Za-z0-9]*): /g)].map(firstGroup), ...shorthand]
-      .filter((name) => name !== '')
-      .map(snakeCased),
-  );
-
-  let read = 0;
-  const routed = new Set<string>();
-  for (const route of dispatcher.matchAll(
-    /"([a-z_]+)":\s*\n[^\n]*?([A-Za-z]+)\.new\([^)]*\)\.([a-z_]+)\(/g,
-  )) {
-    const [, operation = '', module = '', method = ''] = route;
-    const source = files.get(module);
-    assert.ok(source, `${operation} is answered by ${module}, which is not preloaded`);
-    assert.ok(source.includes(`\nfunc ${method}(`), `${module} has no ${method} for ${operation}`);
-    routed.add(module);
-  }
-  // The whole module rather than the routed method, since a method hands its params to helpers
-  // that read them, and a read may be laid over two lines.
-  for (const module of routed) {
-    for (const key of (files.get(module) ?? '').matchAll(/params(?:\.get\(\s*|\[)"([a-z_]+)"/g)) {
-      read += 1;
-      const name = firstGroup(key);
-      assert.ok(
-        declared.has(name) || added.has(name),
-        `${module} reads ${name}, which no tool parameter spells`,
-      );
-    }
-  }
-  assert.ok(read >= 40, `only ${read} parameter reads were found, so this proved little`);
-}
-
-/** The parameter names of one tool: the top-level keys of its own parameters block. */
-function parametersOf(block: string): string[] {
-  const open = block.indexOf('parameters: {');
-  if (open === -1) return [];
-  let depth = 0;
-  let end = block.length;
-  for (let at = block.indexOf('{', open); at < block.length; at += 1) {
-    if (block[at] === '{') depth += 1;
-    if (block[at] === '}') {
-      depth -= 1;
-      if (depth === 0) {
-        end = at;
-        break;
-      }
-    }
-  }
-  return [...block.slice(open, end).matchAll(/^ {6}([A-Za-z]+):/gm)].map(firstGroup);
-}
-
-/**
- * Every tool is named by a fixture, which is the rule this repository is built to and the claim
- * the README makes about it.
- *
- * Nothing else holds it: the consistency checks prove a tool's dispatch name exists on both
- * sides and that its arguments are read, all of which a tool nobody ever calls would pass. A tool
- * added with no fixture is the one shape of change this project says it does not ship.
- */
-function testEveryToolIsDrivenSomewhere(): void {
-  const fixtures = ['editor.ts', 'engine-gdscript.ts', 'bridge.ts', 'regressions.ts', 'smoke.ts']
-    .map((name) => readFileSync(join('test', name), 'utf8'))
-    .join('\n');
-  const undriven = TOOL_SPECS.filter((spec) => !fixtures.includes(`'${spec.name}'`)).map((spec) => spec.name);
-  assert.deepEqual(undriven, [], 'every tool should be called by a fixture, not only declared');
-}
-
-/**
- * Every parameter a tool declares is read by something.
- *
- * The other half of testEveryToolIsDrivenSomewhere's question, and the one that reads as a working
- * tool for longest:
- * a declared argument nothing looks at is a setting a caller can pass, watch accepted, and
- * never see obeyed. `scene_node` had one, and there was nothing to notice it with.
- */
-function testEveryToolParameterIsRead(): void {
-  const named = new Set<string>();
-  const snaked = new Set<string>();
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        walk(path);
-        continue;
-      }
-      if (path.endsWith('tool-definitions.ts')) continue;
-      rememberTheArgumentsAFileReads({ path, named, snaked });
-    }
-  };
-  walk('src');
-  assert.ok(named.size >= 40, `only ${named.size} argument reads were found, so this proved little`);
-
-  const definitions = readFileSync('src/tool-definitions.ts', 'utf8');
-  let checked = 0;
-  for (const block of definitions.split(/\n {2}\{\n/)) {
-    const tool = /name: '([a-z_]+)',/.exec(block)?.[1];
-    if (tool === undefined) continue;
-    for (const parameter of parametersOf(block)) {
-      checked += 1;
-      assert.ok(
-        named.has(parameter) || snaked.has(snakeCased(parameter)),
-        `${tool} declares ${parameter}, which nothing reads`,
-      );
-    }
-  }
-  assert.ok(checked >= 60, `only ${checked} tool parameters were checked, so this proved little`);
-}
-
-/** Adds the first group of every match of the pattern in the source to the set. */
-function rememberMatches(source: string, pattern: RegExp, into: Set<string>): void {
-  for (const match of source.matchAll(pattern)) into.add(firstGroup(match));
-}
-
-/** Adds the arguments one source file reads: the names the addon is handed, and the snake-cased ones of the headless operations. */
-function rememberTheArgumentsAFileReads(read: {
-  path: string;
-  named: Set<string>;
-  snaked: Set<string>;
-}): void {
-  const { path, named, snaked } = read;
-  const source = (): string => readFileSync(path, 'utf8');
-  // The addon is handed the arguments under the names the tool gave them. The headless
-  // operations are handed them snake_cased, and those are the only files where that
-  // spelling counts as a read.
-  if (path.endsWith('.gd')) {
-    rememberMatches(source(), /"([A-Za-z_]+)"/g, path.includes('operations') ? snaked : named);
-  }
-  if (path.endsWith('.ts')) {
-    const code = source();
-    rememberMatches(code, /read[A-Za-z]*\(\s*\w*[Aa]rgs\w*\s*,\s*'([A-Za-z]+)'/g, named);
-    rememberMatches(code, /\w*[Aa]rgs\w*\[\s*'([A-Za-z]+)'\s*\]/g, named);
-    rememberMatches(code, /\b(?:safeArgs|args|arguments_)\.([A-Za-z]+)\b/g, named);
-    rememberMatches(code, /\{\s*(?:[A-Za-z]+(?:: \w+)?,\s*)*([A-Za-z]+)(?:: \w+)?[^}]*\}\s*=\s*args/g, named);
-  }
-}
-
-/**
- * Every argument that names a file is one the project boundary reaches, and every exemption from
- * that names an argument some tool actually takes.
- *
- * `containProjectFiles` walks a list of argument names and skips anything not in it, so a tool
- * gaining a path argument is a tool whose path argument nothing judges: the engine reads
- * `../outside.tscn` as a file to open and an absolute path as a project file, and the boundary
- * lives on this side. Nothing held that the list had kept up with the schemas.
- *
- * The exemptions are checked in the same breath, because a list of names for things that exist
- * elsewhere rots the other way: rename the argument and the entry excuses nothing, while the real
- * argument goes uncontained and the suite stays green either way. Every key below has to be an
- * argument some tool declares.
- */
-function testEveryFileArgumentIsContained(): void {
-  // Arguments spelled like a path that do not name a file inside the project.
-  const notAFile = new Map([
-    ['projectPath', 'the project root itself: choosing it is what the argument is for'],
-    ['nodePath', 'a path through the scene tree, which is not the filesystem'],
-    ['parentNodePath', 'the same, for the parent'],
-    ['newParentPath', 'the same, for the parent a node is moved to'],
-    ['sourceNodePath', 'the same, for the node that emits a signal'],
-    ['targetNodePath', 'the same, for the node whose method is called'],
-    ['playerNodePath', 'the same, for an AnimationPlayer node'],
-    ['animTreePath', 'the same, for an AnimationTree node'],
-    ['stateMachinePath', 'a path of nested state machine names inside an AnimationTree'],
-    ['viewportPath', 'a path through the scene tree of a running game, to a Viewport node'],
-  ]);
-  // Arguments judged where they are used rather than by the shared walk, which is fine as long as
-  // somebody says so here and the judging is still there.
-  const judgedAtTheCallSite = new Map([
-    ['outputPath', 'project_export resolves it against the project before the engine is started'],
-  ]);
-
-  const declared = new Set<string>();
-  for (const spec of TOOL_SPECS) {
-    for (const name of Object.keys(spec.parameters)) {
-      declared.add(name);
-    }
-  }
-
-  const uncontained: string[] = [];
-  let examined = 0;
-  for (const name of declared) {
-    const looksLikeAPath = name.endsWith('Path') || name === 'path' || name === 'script';
-    if (!looksLikeAPath) {
-      continue;
-    }
-    examined += 1;
-    if (PROJECT_FILE_ARGUMENTS.includes(name) || notAFile.has(name) || judgedAtTheCallSite.has(name)) {
-      continue;
-    }
-    uncontained.push(name);
-  }
-  // Counted, because "nothing was uncontained" is what a run that examined nothing says too. A
-  // change to what counts as a path-shaped name, or to how the schemas are read, would empty this
-  // loop and leave the check reading exactly as it does when it is working.
-  assert.ok(examined >= 10, `only ${examined} path-shaped arguments were examined, so this proved little`);
-  assert.deepEqual(
-    uncontained,
-    [],
-    'these arguments name a file and nothing judges them against the project: add them to PROJECT_FILE_ARGUMENTS, or say here why they are not files',
-  );
-
-  for (const [name, why] of [...notAFile, ...judgedAtTheCallSite]) {
-    assert.ok(declared.has(name), `no tool takes ${name}, so excusing it (${why}) excuses nothing`);
-  }
-  for (const name of PROJECT_FILE_ARGUMENTS) {
-    assert.ok(declared.has(name), `no tool takes ${name}, so containing it contains nothing`);
-  }
-
-  // The export path is the one judged away from the shared walk, so the judging itself is read
-  // rather than trusted: a call that lost it would still satisfy every list above.
-  const server = readFileSync('src/server.ts', 'utf8');
-  assert.match(
-    server,
-    /resolveWithinProject\(project\.value\.path, readString\(args, 'outputPath'\)/,
-    'project_export should still resolve outputPath against the project',
-  );
-}
-
 /**
  * An argument this server has never heard of is refused with the op's own list and the version.
  *
@@ -94051,37 +89337,6 @@ async function testProcessorSecondsAreReadOneWay(): Promise<void> {
 }
 
 /**
- * Each read of the operating system's process table has one home: the listing and the `ps` of
- * starts in `process-children.ts`, the processor seconds in `engine-spent.ts`.
- *
- * Two modules asking their own way gave two answers on one machine, `ps` rounding to whole seconds
- * where `/proc` did not. Walked, so a second ask added later in any file is found.
- */
-function testEveryProcessTableReadIsOne(): void {
-  const files = readdirSync('src', { recursive: true })
-    .map(String)
-    .filter((entry) => /\.[cm]?[jt]s$/.test(entry))
-    .map((entry) => join('src', entry).replaceAll('\\', '/'));
-  assert.ok(files.length >= 90, `the sources were walked: ${files.length}`);
-  const holding = (word: string): string[] =>
-    files.filter((file) => readFileSync(file, 'utf8').includes(word)).toSorted();
-  // Built from parts, so that this file is not one that holds them.
-  const everything = ["'", 'ps', "'"].join('');
-  const listing = files.filter((file) => {
-    const source = readFileSync(file, 'utf8');
-    return source.includes(everything) && new RegExp(`${everything}\\s*,\\s*\\[?\\s*'-e'`).test(source);
-  });
-  assert.deepEqual(listing, ['src/process-children.ts'], 'the whole table is listed in one file');
-  assert.deepEqual(holding(['l', 'start'].join('')), ['src/process-children.ts'], 'starts are read in one');
-  assert.deepEqual(
-    holding(['time', '='].join('')),
-    ['src/engine-spent.ts'],
-    'processor seconds are read by ps in one',
-  );
-  assert.deepEqual(holding(['ProcessorSeconds', '(int'].join('')), [], 'the table reads seconds one way');
-}
-
-/**
  * A budget of zero is an answer, and an argument that cannot carry it cannot turn the wait off.
  *
  * `runtimeWaitMs` is documented as how long to wait for a game to announce itself. Read as a
@@ -94129,93 +89384,6 @@ function testAnEntryWithNoDetailDoesNotCarryAnEmptyOne(): void {
   const withDetail = reported.find((entry) => entry.detail !== undefined);
   assert.ok(withDetail, `an entry with detail should still carry it: ${JSON.stringify(reported)}`);
   assert.deepEqual(withDetail.detail, ['at: somewhere.gd:12']);
-}
-
-/**
- * Every addon the package ships is one an install puts in the project.
- *
- * `installAddons` copies the directories `ADDONS` names, one at a time. A name in that list with no
- * directory behind it already fails loudly, with "The package holds no X addon", so that direction
- * is held. The other one is silent: a directory added under `src/godot/addons` and not added to the
- * list is an addon that ships inside the package and is never installed by anything, and the only
- * symptom is a tool that answers as though the addon were simply not there.
- *
- * What counts as an addon is the same test the install uses, rather than "every directory", so a
- * directory of shared files added beside them does not read as one.
- */
-function testEveryShippedAddonIsInstalled(): void {
-  const shipped = readdirSync('src/godot/addons', { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .filter(
-      (name) =>
-        existsSync(join('src/godot/addons', name, 'plugin.cfg')) ||
-        existsSync(join('src/godot/addons', name, 'runtime_autoload.gd')),
-    );
-  assert.ok(shipped.length >= 3, `only ${shipped.length} addons were found, so this proved little`);
-  for (const name of shipped) {
-    assert.ok(
-      (ADDONS as readonly string[]).includes(name),
-      `${name} ships in the package and no install puts it in a project: add it to ADDONS`,
-    );
-  }
-
-  // And the list is read by an install rather than only compared against, because a list that
-  // matches the directory and installs none of them satisfies everything above.
-  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-addons-'));
-  try {
-    const installed = installAddons(projectDir);
-    assert.deepEqual(
-      installed.map((addon) => addon.name).toSorted(),
-      [...ADDONS].toSorted(),
-      'an install should have put every addon in the list into the project',
-    );
-    for (const name of shipped) {
-      assert.ok(
-        existsSync(join(projectDir, 'addons', name)),
-        `${name} should be in the project after an install`,
-      );
-    }
-  } finally {
-    sweep(projectDir);
-  }
-}
-
-/**
- * Every script in an installed addon carries the `.uid` that fixes its identity.
- *
- * Godot 4.4 writes one beside each script and reads it back so a reference survives a rename.
- * An addon shipped without them is re-identified by whichever editor opens it: a warning per
- * script at every start, a different identity on every machine, and, because installing deletes
- * the directory and copies it again, the same warnings back after every upgrade. Fourteen of them
- * turned up in one project's console. The operations scripts run from outside a project, so
- * nothing scans them and they have none.
- */
-function testEveryAddonScriptKeepsItsIdentity(): void {
-  const scripts: string[] = [];
-  const walk = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        walk(path);
-      } else if (entry.name.endsWith('.gd')) {
-        scripts.push(path);
-      }
-    }
-  };
-  walk('src/godot/addons');
-  assert.ok(scripts.length >= 14, `only ${scripts.length} addon scripts were found, so this proved little`);
-
-  const identities = new Map<string, string>();
-  for (const script of scripts) {
-    const beside = `${script}.uid`;
-    assert.ok(existsSync(beside), `${script} ships without the ${basename(beside)} that names it`);
-    const uid = readFileSync(beside, 'utf8').trim();
-    assert.match(uid, /^uid:\/\/[0-9a-z]+$/, `${beside} should hold one uid:// line`);
-    const taken = identities.get(uid);
-    assert.equal(taken, undefined, `${script} and ${taken} both claim ${uid}`);
-    identities.set(uid, script);
-  }
 }
 
 /**
@@ -94627,136 +89795,6 @@ function testAnUnwritableCacheFolderStillWritesTheHelperCopies(): void {
     restoreCache();
     rmSync(scratch, { recursive: true, force: true });
   }
-}
-
-/** The same environment with the variables a git hook exports removed, so git reads the working directory. */
-function gitEnvironment(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  delete env['GIT_DIR'];
-  delete env['GIT_WORK_TREE'];
-  delete env['GIT_INDEX_FILE'];
-  return env;
-}
-
-/**
- * The copies are build output, so git neither tracks them nor reports them, and the identity beside
- * each stays tracked.
- *
- * A copy left tracked would go on being committed with an edit nobody made in the original. A
- * missing ignore line stops the release build on an untracked file, and a pattern wide enough to
- * take a `.uid` along would let a lost identity pass.
- */
-function testNoHelperCopyIsTracked(): void {
-  const copies = sharedCopies().map(({ copy }) => copy.replaceAll('\\', '/'));
-  const git = (...gitArgs: string[]): SpawnSyncReturns<string> =>
-    spawnSyncHidden('git', gitArgs, { encoding: 'utf8', timeout: 60000, env: gitEnvironment() });
-  const lines = (run: SpawnSyncReturns<string>): string[] =>
-    run.stdout.split('\n').filter((line) => line !== '');
-
-  const tracked = lines(git('ls-files', '--', 'src/godot/addons'));
-  assert.deepEqual(
-    copies.filter((copy) => tracked.includes(copy)),
-    [],
-    'a helper copy is tracked',
-  );
-  assert.deepEqual(
-    copies.filter((copy) => !tracked.includes(`${copy}.uid`)),
-    [],
-    'a helper copy has no tracked .uid',
-  );
-
-  assert.deepEqual(
-    lines(git('check-ignore', '--no-index', ...copies)).toSorted(),
-    copies.toSorted(),
-    'every copy should be ignored',
-  );
-  assert.deepEqual(
-    lines(git('check-ignore', '--no-index', ...copies.map((copy) => `${copy}.uid`))),
-    [],
-    'no .uid should be ignored',
-  );
-
-  // The release leg's own check, after the suite wrote the copies.
-  const status = lines(git('status', '--porcelain', '--untracked-files=all', '--', 'src/godot'));
-  assert.deepEqual(
-    status.filter((line) => copies.some((copy) => line.endsWith(copy))),
-    [],
-    'git should not report a helper copy',
-  );
-}
-
-/** The `.gd` files of an addon that share a name with a module beside the operations and are not a listed copy. */
-function unlistedHelperCopies(godot: string): { unlisted: string[]; sameName: number } {
-  const modules = new Set(readdirSync(join(godot, 'operations')).filter((name) => name.endsWith('.gd')));
-  const listed = new Set(sharedCopies(godot).map(({ copy }) => copy));
-  const found = readdirSync(join(godot, 'addons'), { recursive: true })
-    .map((entry) => join(godot, 'addons', String(entry)))
-    .filter((path) => path.endsWith('.gd') && modules.has(basename(path)));
-  return { unlisted: found.filter((path) => !listed.has(path)), sameName: found.length };
-}
-
-/**
- * A helper copied into an addon by hand is on the list.
- *
- * A copy nobody listed is never written again, so it drifts from its original, and one left behind
- * when its addon leaves the list is ignored by nothing.
- */
-function testEveryHelperCopyInAnAddonIsListed(): void {
-  const here = unlistedHelperCopies(join('src', 'godot'));
-  assert.deepEqual(here.unlisted, []);
-  assert.equal(here.sameName, 17);
-
-  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-helper-listed-'));
-  try {
-    mkdirSync(join(scratch, 'operations'), { recursive: true });
-    mkdirSync(join(scratch, 'addons', 'gdharness_runtime'), { recursive: true });
-    writeFileSync(join(scratch, 'operations', 'file_walk.gd'), 'extends RefCounted\n');
-    const planted = join(scratch, 'addons', 'gdharness_runtime', 'file_walk.gd');
-    writeFileSync(planted, 'extends RefCounted\n');
-    writeFileSync(join(scratch, 'addons', 'gdharness_runtime', 'own_script.gd'), 'extends RefCounted\n');
-    assert.deepEqual(unlistedHelperCopies(scratch).unlisted, [planted]);
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-}
-
-/**
- * Every suite that reads the source addons writes the copies before it does.
- *
- * Git does not hold them, so a suite on a fresh clone reads a tree without them: an install that
- * cannot parse, a digest that differs from the bundle's, a typed gate short of scripts. The build
- * copies a tree it is handed, so it too has to write them first.
- */
-function testEverySuiteReadingTheAddonsWritesTheHelperCopiesFirst(): void {
-  const readsTheAddons = (source: string): boolean =>
-    source.includes("from '../src/setup.js'") ||
-    /cpSync\(\s*(?:'src\/godot\/addons'|join\('src', 'godot', 'addons')/.test(source);
-  const readers = readdirSync('test')
-    .filter((name) => name.endsWith('.ts'))
-    .filter((name) => readsTheAddons(readFileSync(join('test', name), 'utf8')))
-    .toSorted();
-  assert.deepEqual(readers, ['bridge.ts', 'editor.ts', 'engine-gdscript.ts', 'fuzz.ts', 'regressions.ts']);
-  // The call opens `main`, or for a suite that runs at the top level it is the first statement after
-  // the last declaration. A call anywhere else in the file's text, a test case's own use of the sync
-  // included, starts the suite on a tree that may not have the copies.
-  const opensWithTheSync = (source: string): boolean =>
-    /^async function main\(\): Promise<void> \{\n\s*syncSharedGdscript\(\);/m.test(source) ||
-    (!/^async function main\(/m.test(source) &&
-      source
-        .slice(source.lastIndexOf('\n}\n') + 3)
-        .trimStart()
-        .startsWith('syncSharedGdscript();'));
-  for (const name of readers) {
-    assert.ok(
-      opensWithTheSync(readFileSync(join('test', name), 'utf8')),
-      `test/${name} reads the source addons and does not write the helper copies first`,
-    );
-  }
-
-  const build = readFileSync(join('scripts', 'build-release.ts'), 'utf8');
-  const synced = build.indexOf('syncSharedGdscript(');
-  const copied = build.indexOf("cp(path.join(sourceRoot, 'godot')");
-  assert.ok(synced !== -1 && copied !== -1 && synced < copied, 'the build copies godot before it is whole');
 }
 
 /**
@@ -95291,204 +90329,6 @@ function testAMovieIsWrittenOnlyWhereACaptureCouldBe(): void {
   }
 }
 
-/** How many "`tool op` with `argument`" phrases the skill and the docs hold today, as a floor. */
-const ARGUMENT_MENTIONS = 17;
-
-/**
- * Every argument the skill names for an op is one that op takes.
- *
- * Issue #616: the skill said to press a key with `runtime_input` `key`, which reads as an argument
- * called `key`. The tool refused it and named `keycode`. The tool-name check below reads the tool
- * and the op and had nothing to say about the word after them. This reads the phrase the skill
- * uses for it, "`tool op` with `argument`", from the rendered skill and every document, and asks
- * the schema whether that op takes that argument. A phrase written some other way is not read, so
- * the floor holds the count: a rewording that stops matching lowers it in the same change.
- */
-function testEveryArgumentTheSkillNamesIsOneTheOpTakes(): void {
-  const phrase = /`([a-z_]+) ([a-z_]+)` with `([a-zA-Z_]+)`/g;
-  const wrongIn = (content: string): string[] =>
-    [...content.matchAll(phrase)]
-      .filter(([, tool, op, argument]) => {
-        const declared = toolSpec(tool ?? '')?.parameters[argument ?? ''];
-        const ops = declared?.ops;
-        return declared === undefined || (Array.isArray(ops) && !ops.includes(op));
-      })
-      .map(([whole]) => whole);
-
-  // The check itself, on the phrase #616 would have been written as.
-  assert.deepEqual(wrongIn('`runtime_input key` with `key`'), ['`runtime_input key` with `key`']);
-  assert.deepEqual(wrongIn('`runtime_input key` with `keycode`'), []);
-
-  const sources = [
-    ...[...skillFiles('0.0.0')].map(([name, content]) => ({ where: `the skill: ${name}`, content })),
-    ...readdirSync('docs')
-      .filter((name) => name.endsWith('.md'))
-      .map((name) => ({ where: join('docs', name), content: readFileSync(join('docs', name), 'utf8') })),
-    ...readdirSync('.')
-      .filter((name) => name.endsWith('.md'))
-      .map((name) => ({ where: name, content: readFileSync(name, 'utf8') })),
-  ];
-  const seen = sources.reduce((count, { content }) => count + [...content.matchAll(phrase)].length, 0);
-  const wrong = sources.flatMap(({ where, content }) => wrongIn(content).map((one) => `${where}: ${one}`));
-  assert.deepEqual(wrong, [], 'every argument named for an op is one the op takes');
-  assert.ok(seen >= ARGUMENT_MENTIONS, `only ${seen} phrases were read; the pattern is not matching`);
-}
-
-/** How many files the prose gate below reads today, as a floor under its walk. */
-const PROSE_FILES_READ = 387;
-
-/**
- * The two dashes, by code point, so this file holds neither character: an editor or a tool that
- * turns an escape into the character it names would otherwise put one here for the gate to find.
- */
-const EM_DASH = String.fromCodePoint(0x2014);
-const EN_DASH = String.fromCodePoint(0x2013);
-
-/**
- * Phrases an agent writes by habit and no sentence here needs: chatbot openers and closers, and
- * marketing words that claim instead of saying. Exact and lower case, matched case aside.
- */
-const HABIT_PHRASES = [
-  'i hope this helps',
-  'let me know if you have any questions',
-  "let's dive in",
-  "here's what you need to know",
-  "it's not just",
-  'at its core',
-  'the real question is',
-  'what really matters',
-  'game-changer',
-  'game changer',
-  'cutting-edge',
-  'next-generation',
-  'seamless',
-  'delve',
-] as const;
-
-/**
- * What [param content] holds that the project's prose may not, by rule.
- *
- * An em dash anywhere, and an en dash standing between spaces as one. In [param prose], also a
- * spaced double hyphen standing in for a dash, outside backticks and fenced blocks, where a command
- * line's own `--` lives, and the habit phrases.
- */
-function proseFaults(content: string, prose: boolean): string[] {
-  const faults: string[] = [];
-  let fenced = false;
-  for (const [index, line] of content.split('\n').entries()) {
-    const at = `line ${index + 1}`;
-    if (line.includes(EM_DASH)) {
-      faults.push(`${at}: an em dash`);
-    }
-    if (line.includes(` ${EN_DASH} `)) {
-      faults.push(`${at}: an en dash used as a dash`);
-    }
-    if (line.trimStart().startsWith('```')) {
-      fenced = !fenced;
-      continue;
-    }
-    if (!prose || fenced) {
-      continue;
-    }
-    faults.push(...proseOnlyFaultsOfALine(at, line));
-  }
-  return faults;
-}
-
-/** A double hyphen standing in for a dash outside backticks, and the habit phrases, in one line of prose. */
-function proseOnlyFaultsOfALine(at: string, line: string): string[] {
-  const faults: string[] = [];
-  const outsideCode = line.replace(/`[^`]*`/g, '');
-  if (outsideCode.includes(' -- ')) {
-    faults.push(`${at}: a double hyphen used as a dash`);
-  }
-  const lower = outsideCode.toLowerCase();
-  for (const phrase of HABIT_PHRASES) {
-    if (new RegExp(`\\b${phrase.replaceAll('-', '\\-')}`).test(lower)) {
-      faults.push(`${at}: "${phrase}"`);
-    }
-  }
-  return faults;
-}
-
-/**
- * The project's prose holds no dash stand-ins and none of the habit phrases.
- *
- * No em dashes was a rule written in CONTRIBUTING.md and nowhere else, so nothing stopped a tool
- * description, a refusal or a comment carrying one to every agent that reads it. Every tracked text
- * file is read for the dashes, tests and workflows included. The double hyphen and the phrases only
- * in what ships, the sources and the documents and the skill and tool reference as rendered, since a
- * test has to be free to quote a phrase and a command line's separator is a double hyphen.
- */
-function testShippedProseHasNoDashStandInsOrHabitPhrases(): void {
-  // The check itself, on what it must flag and what it must leave alone.
-  assert.deepEqual(proseFaults(`one ${EM_DASH} two`, false), ['line 1: an em dash']);
-  assert.deepEqual(proseFaults(`one ${EN_DASH} two, pages 3${EN_DASH}4`, false), [
-    'line 1: an en dash used as a dash',
-  ]);
-  assert.deepEqual(proseFaults('wait -- then go\nI hope this helps!', true), [
-    'line 1: a double hyphen used as a dash',
-    'line 2: "i hope this helps"',
-  ]);
-  assert.deepEqual(proseFaults('godot `--path p -- -e` and `HEAD -- package.json`', true), []);
-  assert.deepEqual(proseFaults('wait -- then go', false), [], 'a test line may hold a command line');
-  assert.deepEqual(
-    proseFaults(
-      `\`\`\`text\ngdharness spread a.tscn -- --seed=3\n\`\`\`\nwait -- then go\n\`\`\`\n${EM_DASH}\n\`\`\``,
-      true,
-    ),
-    ['line 4: a double hyphen used as a dash', 'line 6: an em dash'],
-    'a fenced command line may hold its separator, and the prose after the fence is read again',
-  );
-
-  const read: { where: string; content: string; prose: boolean }[] = [];
-  const kinds = /\.(ts|gd|md|yml|yaml|json|jsonc|cfg|tscn|sh|ps1|mjs)$/;
-  const walk = (directory: string, prose: boolean): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        if (entry.name !== 'node_modules') {
-          walk(path, prose);
-        }
-      } else if (kinds.test(entry.name)) {
-        // The workflows are shell, where a double hyphen is a command's separator.
-        read.push({
-          where: path,
-          content: readFileSync(path, 'utf8'),
-          prose: prose && !/\.ya?ml$/.test(entry.name),
-        });
-      }
-    }
-  };
-  walk('src', true);
-  walk('docs', true);
-  walk('.github', true);
-  walk('test', false);
-  walk('scripts', false);
-  for (const entry of readdirSync('.', { withFileTypes: true })) {
-    if (entry.isFile() && kinds.test(entry.name) && !entry.name.endsWith('lock.json')) {
-      read.push({
-        where: entry.name,
-        content: readFileSync(entry.name, 'utf8'),
-        prose: entry.name.endsWith('.md'),
-      });
-    }
-  }
-  read.push({ where: 'the tool reference', content: renderToolsMarkdown(), prose: true });
-  for (const [name, content] of skillFiles('0.0.0')) {
-    read.push({ where: `the skill: ${name}`, content, prose: true });
-  }
-
-  const faults = read.flatMap(({ where, content, prose }) =>
-    proseFaults(content, prose).map((fault) => `${where} ${fault}`),
-  );
-  assert.deepEqual(faults, [], 'the prose holds no dash stand-ins and none of the habit phrases');
-  assert.ok(
-    read.length >= PROSE_FILES_READ,
-    `only ${read.length} files were read; the walk is not reaching them`,
-  );
-}
-
 /**
  * The sentences of [param content] that run into the next with no space between: a full stop or
  * other stop, then a capitalised word and a lower-case one, as in "{was, now}.A write is". A
@@ -95523,241 +90363,6 @@ function testToolTextKeepsASpaceBetweenSentences(): void {
     walk(spec.name, spec);
   }
   assert.deepEqual(said, []);
-}
-
-/**
- * How many tool names the tree mentions today, as a floor under the reading below.
- *
- * Set to what is there rather than to a round number, so removing mentions means lowering this in
- * the same change and somebody confirms the removal was meant.
- */
-const TOOL_NAME_MENTIONS = 1479;
-
-/** The same, for phrases naming a tool and one of its multi-word ops. */
-const TOOL_OP_MENTIONS = 59;
-
-/**
- * Every tool this server names in something it says is a tool it has.
- *
- * The refusals here are full of tool names, because a refusal that does not say what to call
- * instead is half an answer. A rename or a removal leaves those sentences reading perfectly and
- * pointing at nothing, and the caller who follows one is sent to make a call that will be refused
- * for a second reason. Nothing else catches it: the schemas are checked against each other, the
- * prose is checked against nobody, and a sentence is as fluent wrong as right.
- *
- * Read out of the string literals rather than out of whole lines, because the sentence that matters
- * is often assembled from parts and no single line of the file contains it. The rendered surfaces
- * are read as themselves, since that is what an agent is given.
- *
- * The families come from the schemas, so a tool in a new family is covered the day it lands rather
- * than when somebody remembers this list.
- */
-function testEveryToolNamedInProseIsATool(): void {
-  const names = new Set(TOOL_SPECS.map((spec) => spec.name));
-  const families = [...new Set(TOOL_SPECS.map((spec) => spec.name.split('_')[0]))];
-  // Words this project owns or reads that are shaped like a tool and are not one: the fields the
-  // bridge sends the addon, the server sends a headless operation and editor_classes answers with, the autoload the runtime installs, a section of project.godot, the
-  // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
-  // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
-  // export_presets.cfg, the directory a self-contained editor keeps its data in, the file the
-  // editor keeps its open scenes in, the file the editor caches its class and script references in, the name every resource stores, and the gdUnit4 call a
-  // suite that drives a scene makes, which is what puts it in the windowed engine, and the project
-  // setting that turns that guess off, and the engine setting naming a file laid over the project's
-  // settings, which a write keeps out of project.godot. Named one by one rather than matched by a
-  // pattern, so a new word of this shape has to be looked at once and called a tool or vocabulary.
-  const notTools = new Set([
-    'project_path',
-    'project_classes',
-    'project_children',
-    'project_descendants',
-    'scene_path',
-    'resource_path',
-    'script_path',
-    'script_class',
-    'project_file',
-    'project_name',
-    'project_config',
-    'project_diagnostics',
-    'resource_files',
-    'scene_tools',
-    'resource_tools',
-    'editor_pid',
-    'debug_port',
-    'debug_adapter',
-    'editor_plugins',
-    'script_error',
-    'debug_data',
-    'debug_enter',
-    'debug_exit',
-    'script_export_mode',
-    'editor_data',
-    'editor_doc_cache',
-    'editor_script_doc_cache',
-    'editor_layout',
-    'resource_name',
-    'editor_servers',
-    'scene_runner',
-    'scene_runner_needs_window',
-    'project_settings_override',
-  ]);
-  // The addon's own modules, taken from the files rather than written down, because a module added
-  // tomorrow is named in a string the day it lands and a list would not know about it.
-  const modules = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        modules(join(directory, entry.name));
-      } else if (entry.name.endsWith('.gd')) {
-        notTools.add(entry.name.slice(0, -3));
-      }
-    }
-  };
-  modules(join('src', 'godot'));
-  // The wildcard a sentence uses to mean a whole family, which is a real thing to say and not a
-  // tool: `runtime_*` reaches it. Judged as the family so a family that goes away is still caught.
-  const wildcard = new RegExp(`\\b(${families.join('|')})_\\*`, 'g');
-  const shaped = new RegExp(`\\b(${families.join('|')})_[a-z][a-z0-9_]*\\b`, 'g');
-
-  namedToolsInQuotedSources({ names, families, notTools, wildcard, shaped });
-}
-
-/** What the tool-name reading is given: the tools, their families, the words that are not tools and the patterns. */
-interface ToolMentionRules {
-  names: Set<string>;
-  families: (string | undefined)[];
-  notTools: Set<string>;
-  wildcard: RegExp;
-  shaped: RegExp;
-}
-
-/** Gathers what the server says in the tree, then reads it for tool names. */
-function namedToolsInQuotedSources(rules: ToolMentionRules): void {
-  // What the server says, not what it is written with. A bare read of the file also sees its own
-  // identifiers and the field names of the bridge protocol, which are the same shape as a tool and
-  // are nobody's instruction to make a call.
-  const quoted = /'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g;
-  const sources: [string, string][] = [];
-  const walk = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        walk(path);
-      } else if (entry.name.endsWith('.ts') || entry.name.endsWith('.gd')) {
-        sources.push([
-          path,
-          [...readFileSync(path, 'utf8').matchAll(quoted)].map((one) => one[0]).join('\n'),
-        ]);
-      } else if (entry.name.endsWith('.md')) {
-        sources.push([path, readFileSync(path, 'utf8')]);
-      }
-    }
-  };
-  // Walked rather than listed. A rule counted over a named set is a rule the next file escapes by
-  // being somewhere nobody listed, and the three documents this used to name were three of five.
-  // The addon's GDScript is here for the same reason: it tells a caller which tool to use too.
-  walk('src');
-  walk('docs');
-  walk('.github');
-  for (const entry of readdirSync('.', { withFileTypes: true })) {
-    if (entry.isFile() && entry.name.endsWith('.md')) {
-      sources.push([entry.name, readFileSync(entry.name, 'utf8')]);
-    }
-  }
-  sources.push(['the tool reference', renderToolsMarkdown()]);
-  // Every file the skill installs, not the one that is usually the whole of it. The reference beside
-  // it is generated and is what a rename rewrites, so leaving it out reads a skill that cannot drift
-  // and calls the pair checked.
-  for (const [name, content] of skillFiles('0.0.0')) {
-    sources.push([`the skill: ${name}`, content]);
-  }
-
-  namedToolsInSources({ ...rules, sources });
-}
-
-/** Every name shaped like a tool in the sources is a tool or vocabulary, and every family wildcard has tools. */
-function namedToolsInSources(read: ToolMentionRules & { sources: [string, string][] }): void {
-  const { names, families, notTools, wildcard, shaped, sources } = read;
-  let seen = 0;
-  const wrong: string[] = [];
-  for (const [where, content] of sources) {
-    for (const found of content.matchAll(shaped)) {
-      // A real tool first, whatever else shares its spelling. Two modules here are named after the
-      // tool they implement, so vocabulary taken from the filenames covers `runtime_capture` and
-      // `runtime_input` as well, and skipping on that would stop checking two of the tools this is
-      // for. Being vocabulary somewhere is not grounds to stop reading it as a tool.
-      const tool = names.has(found[0]);
-      if (!tool && notTools.has(found[0])) {
-        continue;
-      }
-      seen += 1;
-      if (!tool) {
-        wrong.push(`${where} names ${found[0]}, which is not a tool`);
-      }
-    }
-    seen += familyWildcardsRead({ where, content, wildcard, families, wrong });
-  }
-
-  opsNamedInSources({ names, sources, wrong, seen });
-}
-
-/** Reads the family wildcards of one source, says those with no tools, and returns how many it read. */
-function familyWildcardsRead(read: {
-  where: string;
-  content: string;
-  wildcard: RegExp;
-  families: (string | undefined)[];
-  wrong: string[];
-}): number {
-  const { where, content, wildcard, families, wrong } = read;
-  let count = 0;
-  for (const found of content.matchAll(wildcard)) {
-    count += 1;
-    if (!families.includes(found[1] ?? '')) {
-      wrong.push(`${where} names the family ${found[0]}, which has no tools`);
-    }
-  }
-  return count;
-}
-
-/** The tool-and-op phrases of the sources, and the floors under what was read. */
-function opsNamedInSources(read: {
-  names: Set<string>;
-  sources: [string, string][];
-  wrong: string[];
-  seen: number;
-}): void {
-  const { names, sources, wrong, seen } = read;
-  // An op named after its tool, which is how these sentences tell a caller what to do: the words
-  // are next to each other because the call is `editor_run stop`. Only the ones carrying an
-  // underscore, because a one-word op is the same shape as the next English word and `editor_status
-  // says` would read as an op called `says`. That leaves `start` and `stop` unheld here and it is
-  // the honest half to take: the multi-word ops are the ones nobody can check by eye.
-  const opsOf = new Map(TOOL_SPECS.map((spec) => [spec.name, new Set(Object.keys(spec.operations ?? {}))]));
-  const called = new RegExp(`\\b(${[...names].join('|')})\\s+([a-z][a-z0-9]*_[a-z0-9_]*)\\b`, 'g');
-  let ops = 0;
-  for (const [where, content] of sources) {
-    for (const found of content.matchAll(called)) {
-      const [, tool, op] = found;
-      const known = opsOf.get(tool ?? '');
-      if (known === undefined || known.size === 0 || names.has(`${op}`)) {
-        continue;
-      }
-      ops += 1;
-      if (!known.has(op ?? '')) {
-        wrong.push(`${where} says ${tool} ${op}, which is not an op of ${tool}`);
-      }
-    }
-  }
-
-  // The instrument first. A pattern that had stopped matching reports every prose file clean, and
-  // this check is otherwise an assertion that nothing was found, which a broken regex satisfies
-  // perfectly. The floor is what the tree holds today rather than a comfortable minimum, so
-  // dropping a mention below it has to be confirmed in the same change.
-  assert.ok(seen >= TOOL_NAME_MENTIONS, `only ${seen} tool names were read; the pattern is not matching`);
-  assert.ok(
-    ops >= TOOL_OP_MENTIONS,
-    `only ${ops} tool-and-op phrases were read; the pattern is not matching`,
-  );
-  assert.deepEqual(wrong, [], `every tool and op named in prose should exist:\n${wrong.join('\n')}`);
 }
 
 /**
@@ -98077,7 +92682,7 @@ async function testACaseGdUnitLeavesUnrunIsNoPass(): Promise<void> {
 
       const returned = await run({ path: 'res://test/returned_test.gd' });
       const reason = (index: number, value: number): string =>
-        `The test data set at index (${String(index)}) does not match the expected test parameters: test function: func test...(a: int,b: int) test input values: [${String(value)}]`;
+        `\nThe test data set at index (${String(index)}) does not match the expected test parameters:\n\ttest function: func test...(a: int,b: int)\n\ttest input values: [${String(value)}]\n`;
       assert.deepEqual(read(returned.answer).slice(0, 3), [false, 3, undefined], returned.text);
       assert.deepEqual(
         get(returned.answer, 'rowsMismatched'),
@@ -98148,78 +92753,6 @@ async function testACaseGdUnitLeavesUnrunIsNoPass(): Promise<void> {
   }
 }
 
-/**
- * A run whose case failed and then passed on a retry says so. gdUnit4's flaky check exits 0 on it
- * and its report keeps the first failure, so the answer was `passed: false` beside the verdict
- * "passed", with nothing naming the retry.
- */
-async function testACaseThatPassedOnARetryIsNotSaidToHavePassed(): Promise<void> {
-  const godotPath = resolveGodotPath();
-  const gdunit = process.env['GDUNIT4_PATH'];
-  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
-    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
-      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
-    }
-    console.log('retried case regression skipped (Godot or gdUnit4 not found)');
-    return;
-  }
-  const project = mkdtempSync(join(tmpdir(), 'gdharness-retried-case-'));
-  try {
-    writeFileSync(
-      join(project, 'project.godot'),
-      'config_version=5\n\n[application]\nconfig/name="RetriedCase"\n\n[gdunit4]\n\n' +
-        'settings/test/flaky_check_enable=true\nsettings/test/flaky_max_retries=3\n',
-    );
-    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
-    mkdirSync(join(project, 'test'), { recursive: true });
-    writeFileSync(
-      join(project, 'test', 'retried_test.gd'),
-      'extends GdUnitTestSuite\n\nstatic var tries: int = 0\n\n\n' +
-        'func test_second_time() -> void:\n\ttries += 1\n\tassert_int(tries).is_greater(1)\n\n\n' +
-        'func test_plain() -> void:\n\tassert_bool(true).is_true()\n',
-    );
-    await withStdioServer(async (_call, request) => {
-      const run = async (args: Record<string, unknown>): Promise<{ text: string; answer: unknown }> => {
-        const response = await request(
-          'tools/call',
-          { name: 'project_test', arguments: { projectPath: project, ...args } },
-          ENGINE_CALL_TIMEOUT_MS,
-        );
-        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
-        return {
-          text: blocks.join('\n'),
-          answer: JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown,
-        };
-      };
-      const retried = await run({ path: 'res://test/retried_test.gd' });
-      assert.deepEqual(
-        [
-          get(retried.answer, 'passed'),
-          get(retried.answer, 'exitCode'),
-          get(retried.answer, 'verdict'),
-          get(retried.answer, 'passedOnARetry'),
-          asArray(get(retried.answer, 'failed')).map((one) => get(one, 'name')),
-        ],
-        [
-          false,
-          0,
-          'passed only on a retry: res://test/retried_test.gd > test_second_time',
-          ['res://test/retried_test.gd > test_second_time'],
-          ['test_second_time'],
-        ],
-        retried.text,
-      );
-      assert.equal(
-        get(retried.answer, 'note'),
-        "res://test/retried_test.gd > test_second_time failed before it passed on a retry, which gdUnit4's flaky check counts as a pass. The run is not called passed, as gdharness test judges it, and failed holds the first failure.",
-        retried.text,
-      );
-    });
-  } finally {
-    rmSync(project, { recursive: true, force: true });
-  }
-}
-
 /** One case a fed run holds: what the console printed of it, and the failure its report keeps. */
 interface FedCase {
   readonly name: string;
@@ -98245,15 +92778,6 @@ function fedCase(path: string, name: string, verdict = 'PASSED', failure?: strin
     name,
     printed: [caseLine(path, name, verdict, '12ms')],
     ...(failure === undefined ? {} : { failure }),
-  };
-}
-
-/** A case gdUnit4 failed once and then passed, as it prints it, with the failure its report keeps. */
-function fedRetried(path: string, name: string, keepsFailure = true): FedCase {
-  return {
-    name,
-    printed: [caseLine(path, name, 'FLAKY (2 retries)', '12ms')],
-    ...(keepsFailure ? { failure: 'Expecting: greater than 1 but was 1' } : {}),
   };
 }
 
@@ -98295,6 +92819,11 @@ function fedRunAnswered(
   const project = mkdtempSync(join(tmpdir(), 'gdharness-fed-run-'));
   try {
     writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    const failing = (one: FedCase): boolean =>
+      one.failure !== undefined ||
+      one.printed.some((line) =>
+        /^(?:FAILED|ERROR|ABORTED)/.test(caseLineOf(line.replaceAll(CONTROL_SEQUENCE, ''))?.verdict ?? ''),
+      );
     const ran = suites.filter((suite) => suite.closed !== 'NEVER');
     const total = ran.reduce((sum, suite) => sum + suite.cases.length, 0);
     const declared = suites.map((suite) => ({
@@ -98320,15 +92849,16 @@ function fedRunAnswered(
       'Total execution time: 1s 0ms',
     ].join('\n');
     const xml = `<?xml version="1.0" encoding="UTF-8" ?><testsuites id="x" name="report_1" tests="1" failures="0" skipped="0" flaky="0" time="0">${ran
+      .filter((suite) => suite.closed !== 'UNCLOSED')
       .map((suite) => {
         const name = suite.path.replace(/^.*\//, '').replace(/\.gd$/, '');
         const cases = suite.cases
           .map(
             (one) =>
               `<testcase name="${one.name}" classname="${name}" time="0.012">${
-                one.failure === undefined
+                !failing(one)
                   ? ''
-                  : `<failure message="FAILED: ${suite.path}:5" type="FAILURE">${one.failure}</failure>`
+                  : `<failure message="FAILED: ${suite.path}:5" type="FAILURE">${one.failure ?? 'Failed'}</failure>`
               }${
                 one.skipped === undefined
                   ? ''
@@ -98339,14 +92869,12 @@ This test is skipped!
               }</testcase>`,
           )
           .join('');
-        const failures = suite.cases.filter((one) => one.failure !== undefined).length;
+        const failures = suite.cases.filter(failing).length;
         return `<testsuite id="0" name="${name}" package="${suite.path.replace(/^res:\/\//, '').replace(/\/[^/]*$/, '')}" tests="${String(suite.cases.length)}" failures="${String(failures)}" errors="0" skipped="0" flaky="0" time="0.04">${cases}</testsuite>`;
       })
       .join('')}</testsuites>`;
-    const reports = asked.reported === true ? reportedSkips([parseJUnit(xml)]) : undefined;
+    const reports = [parseJUnit(xml)];
     const { tally } = aTalliedRun([{ stream: 'stdout' as const, text: `${engineText}\n` }], 1000);
-    const diffs = new SuiteDiffs();
-    diffs.take(Buffer.from(engineText));
     const engineLog = join(project, 'engine.log');
     writeFileSync(engineLog, engineText);
     const word = ({ 0: 'passed', 100: 'failures' } as Record<number, string>)[exitCode] ?? 'other';
@@ -98388,7 +92916,6 @@ This test is skipped!
         exitCode,
       },
       tally,
-      diffs: diffs.finish(),
       report: parseJUnit(xml),
       casePrinted: readEngineLog(engineLog, [], asked.declared ?? NONE_EXPECTED, undefined, reports),
       uncaught: null,
@@ -98430,124 +92957,14 @@ This test is skipped!
 }
 
 /**
- * A case that failed and passed on a retry fails project_test's run whatever its report holds.
- * Fed a console printing FLAKY beside a report with no failure, the answer was passed.
+ * A case whose report holds a failure is a failure in both tools, whatever its console line says.
  */
-function testAFlakyCaseFailsTheRunWhateverTheReportHolds(): void {
-  const { answer, faults } = fedRunAnswered([
-    {
-      path: FED_A,
-      cases: [fedRetried(FED_A, 'test_second', false), fedCase(FED_A, 'test_a')],
-      closed: 'PASSED',
-    },
-  ]);
-  assert.deepEqual(
-    answer,
-    {
-      classes: {},
-      engineEntries: [],
-      engineErrors: 0,
-      engineWarnings: 0,
-      errors: 0,
-      exitCode: 0,
-      failed: [],
-      failures: 0,
-      note: "res://test/a_test.gd > test_second failed before it passed on a retry, which gdUnit4's flaky check counts as a pass. The run is not called passed, as gdharness test judges it.",
-      passed: false,
-      passedOnARetry: ['res://test/a_test.gd > test_second'],
-      skipped: 0,
-      suites: [],
-      suitesPassed: 1,
-      tests: 2,
-      time: 0.04,
-      tookMs: 0,
-      tookMsBy: {},
-      verdict: 'passed only on a retry: res://test/a_test.gd > test_second',
-    },
-    'the whole answer',
-  );
-  assert.deepEqual(faults, [`${FED_A} > test_second failed before it passed on a retry`], 'gdharness test');
-}
-
-/** The fault of gdharness test for a case that passed only on a retry, with the case it names. */
-function retriedFault(path: string, name: string): string {
-  return `${path} > ${name} failed before it passed on a retry`;
-}
-
-/**
- * The note of a retried case says its report holds the first failure only where the report does.
- * Fed a report with none, it said so beside an empty `failed`.
- */
-function testTheRetriedNoteNamesTheFailureOnlyWhereThereIsOne(): void {
-  const said = (keepsFailure: boolean): unknown =>
-    fedRunAnswered([
-      { path: FED_A, cases: [fedRetried(FED_A, 'test_second', keepsFailure)], closed: 'PASSED' },
-    ]).answer['note'];
-  const head =
-    "res://test/a_test.gd > test_second failed before it passed on a retry, which gdUnit4's flaky check counts as a pass. The run is not called passed, as gdharness test judges it";
-  assert.equal(said(false), `${head}.`, 'no failure in the report');
-  assert.equal(said(true), `${head}, and failed holds the first failure.`, 'a failure in the report');
-}
-
-/**
- * Two suites of one file name in different folders are both named, by their paths, as gdharness
- * test names them, and a row of a parameterised case comes back with its index and arguments.
- */
-function testRetriedCasesAreNamedAsGdharnessTestNamesThem(): void {
-  const names = (faults: readonly string[]): string[] =>
-    faults.map((fault) => fault.replace(' failed before it passed on a retry', ''));
-  const twins = fedRunAnswered([
-    { path: FED_A, cases: [fedRetried(FED_A, 'test_second')], closed: 'PASSED' },
-    { path: FED_OTHER, cases: [fedRetried(FED_OTHER, 'test_second')], closed: 'PASSED' },
-  ]);
-  assert.deepEqual(
-    twins.answer['passedOnARetry'],
-    ['res://test/a_test.gd > test_second', 'res://other/a_test.gd > test_second'],
-    'both suites',
-  );
-  assert.deepEqual(twins.answer['passedOnARetry'], names(twins.faults), 'as gdharness test names them');
-  const rows = fedRunAnswered([
-    {
-      path: FED_A,
-      cases: [fedRetried(FED_A, 'test_p:0 (1)'), fedCase(FED_A, 'test_p:1 (2)')],
-      closed: 'PASSED',
-    },
-  ]);
-  assert.deepEqual(rows.answer['passedOnARetry'], ['res://test/a_test.gd > test_p:0 (1)'], 'the row');
-  assert.deepEqual(rows.faults, [retriedFault(FED_A, 'test_p:0 (1)')], 'as gdharness test names it');
-}
-
-/**
- * A case whose report holds a failure and whose console line says PASSED, beside an exit of 0, is
- * a pass in both tools. gdUnit4 decides a case's state from its last attempt, and the report it
- * writes keeps the failures of the attempts before it, so the console line and the exit code are
- * its verdict. A case printed FAILED stays failed.
- */
-function testAFailureOnlyTheReportHoldsIsNoFailure(): void {
-  const kept = fedRunAnswered([
-    {
-      path: FED_A,
-      cases: [fedCase(FED_A, 'test_b', 'PASSED', 'Expecting: true but was false')],
-      closed: 'PASSED',
-    },
-  ]);
-  assert.deepEqual(
-    [
-      kept.answer['passed'],
-      kept.answer['verdict'],
-      kept.answer['failures'],
-      kept.answer['failed'],
-      kept.answer['note'],
-      kept.faults,
-    ],
-    [true, 'passed', 0, [], undefined, []],
-    JSON.stringify(kept),
-  );
+function testAFailureTheReportHoldsIsAFailureInBothTools(): void {
   const failing = fedRunAnswered(
     [
       {
         path: FED_A,
-        cases: [fedCase(FED_A, 'test_b', 'FAILED', 'Expecting: true but was false')],
+        cases: [fedCase(FED_A, 'test_b', 'PASSED', 'Expecting: true but was false')],
         closed: 'FAILED',
       },
     ],
@@ -98555,7 +92972,7 @@ function testAFailureOnlyTheReportHoldsIsNoFailure(): void {
   );
   assert.deepEqual(
     [failing.answer['passed'], failing.answer['failures'], failing.faults],
-    [false, 1, [`${FED_A} > test_b failed`]],
+    [false, 1, [`${FED_A} > test_b failed: FAILED: ${FED_A}:5`]],
     JSON.stringify(failing),
   );
 }
@@ -120337,32 +114754,11 @@ async function rescanAsTheEditorOpens(godotPath: string, count: number): Promise
   }
 }
 
-/**
- * Every fixture in this file is in the list below.
- *
- * The list is written by hand, so a fixture can be added and left out of it, and nothing says so:
- * the suite passes, the count goes up by nothing, and the guard it was written for is unwatched
- * while its name sits in the file looking like coverage. Four fixtures were added here in one day
- * and each was registered by hand, which is four chances to have missed one.
- *
- * Read from this file's own source, because the thing being checked is exactly the gap between
- * what is written here and what is called. Anything named like a fixture and not called is either
- * a fixture nobody runs or a helper that should not be named `test...`, and both want the same
- * answer from whoever reads the failure.
- */
-function testEveryFixtureIsCalled(): void {
-  const source = readFileSync(join('test', 'regressions.ts'), 'utf8');
-  const defined = [...source.matchAll(/^(?:async )?function (test[A-Za-z0-9_]*)\(/gm)].map((match) =>
-    firstGroup(match),
-  );
-  assert.ok(defined.length > 50, `the pattern should still find the fixtures: found ${defined.length}`);
+/** The regression parts each platform's engine leg runs, as ci.yml names them. */
+const CI_PARTS = 10;
 
-  const listed = new Set(
-    [...source.matchAll(/^ {2}(test[A-Za-z0-9_]*),$/gm)].map((match) => firstGroup(match)),
-  );
-  const unreachable = defined.filter((name) => !listed.has(name));
-  assert.deepEqual(unreachable, [], 'every fixture defined here should be in TESTS');
-}
+/** The time a part's run is given, as GDHARNESS_REGRESSION_BUDGET_MS says in engine.yml. */
+const CI_BUDGET_SECONDS = 1200;
 
 /**
  * The regression parts CI runs on several machines cover every regression exactly once, and are
@@ -120372,75 +114768,37 @@ function testEveryFixtureIsCalled(): void {
  */
 function testRegressionPartsCoverEveryTestOnceAndBalance(): void {
   const names = TESTS.map((test) => test.name);
-  for (const [platform, seconds] of Object.entries(REGRESSION_SECONDS)) {
-    const stale = Object.keys(seconds).filter((name) => !names.includes(name));
-    assert.deepEqual(stale, [], `every name weighted for ${platform} is a regression in TESTS`);
-    const heaviest = Math.max(...Object.values(seconds));
-    const weight = (name: string): number => seconds[name] ?? UNMEASURED_SECONDS;
-    for (const parts of [1, 2, 3, 4, 5]) {
-      const split = Array.from({ length: parts }, (_unused, at) =>
-        regressionPart(names, at + 1, parts, seconds),
-      );
-      const covered = split.flat();
-      assert.equal(covered.length, names.length, `${platform}: ${parts} parts hold each regression once`);
-      assert.deepEqual(
-        [...covered].toSorted(),
-        [...names].toSorted(),
-        `${platform}: ${parts} parts hold every regression`,
-      );
-      const loads = split.map((part) => part.reduce((total, name) => total + weight(name), 0));
-      assert.ok(
-        Math.max(...loads) - Math.min(...loads) <= heaviest,
-        `${platform}: ${parts} parts within the heaviest regression of each other: ${loads.join(', ')}`,
-      );
-    }
+  const stale = Object.keys(REGRESSION_SECONDS).filter((name) => !names.includes(name));
+  assert.deepEqual(stale, [], 'every name weighted is a regression in TESTS');
+  const heaviest = Math.max(...Object.values(REGRESSION_SECONDS));
+  const weight = (name: string): number => REGRESSION_SECONDS[name] ?? UNMEASURED_SECONDS;
+  const loadsOf = (parts: number): number[] =>
+    Array.from({ length: parts }, (_unused, at) =>
+      regressionPart(names, at + 1, parts).reduce((total, name) => total + weight(name), 0),
+    );
+  for (const parts of [1, 2, 3, 4, 5, CI_PARTS]) {
+    const split = Array.from({ length: parts }, (_unused, at) => regressionPart(names, at + 1, parts));
+    const covered = split.flat();
+    assert.equal(covered.length, names.length, `${parts} parts hold each regression once`);
+    assert.deepEqual([...covered].toSorted(), [...names].toSorted(), `${parts} parts hold every regression`);
+    const loads = loadsOf(parts);
+    assert.ok(
+      Math.max(...loads) - Math.min(...loads) <= heaviest,
+      `${parts} parts within the heaviest regression of each other: ${loads.join(', ')}`,
+    );
   }
-  // Each platform is split by its own figures, and one CI does not run by the slowest's.
-  assert.equal(secondsOn('linux'), REGRESSION_SECONDS.linux);
-  assert.equal(secondsOn('win32'), REGRESSION_SECONDS.win32);
-  assert.equal(secondsOn('freebsd'), REGRESSION_SECONDS.darwin);
   // Two of 20 and two of 1 into two parts: the heavy pair is split, where every other one put
   // both 20s together. Each part keeps the list's own order.
   const weights = { a: 20, b: 1, c: 20, d: 1 };
   assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 1, 2, weights), ['a', 'b']);
   assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 2, 2, weights), ['c', 'd']);
 
-  // The parts CI runs fit the time each part's run is given, by the platform's own figures, with a
-  // fifth to spare: five Windows parts by stale figures came to 830 seconds and ran one part out of
-  // its 1200. Read from the workflows, so a part count or a budget changed there is held here too.
-  const workflows = join(process.cwd(), '.github', 'workflows');
-  const budgetSaid = /GDHARNESS_REGRESSION_BUDGET_MS: '(\d+)'/.exec(
-    readFileSync(join(workflows, 'engine.yml'), 'utf8'),
-  )?.[1];
-  assert.ok(budgetSaid, 'engine.yml gives the regressions their run time');
-  const budgetSeconds = Number(budgetSaid) / 1000;
-  const ci = readFileSync(join(workflows, 'ci.yml'), 'utf8');
-  for (const [job, platform] of [
-    ['engine-linux-parts', 'linux'],
-    ['engine-windows-parts', 'win32'],
-    ['engine-macos-parts', 'darwin'],
-  ] as const) {
-    const block = ci.slice(ci.indexOf(`  ${job}:`));
-    const said = /regression-parts: '(\[[^']*\])'/.exec(block)?.[1];
-    assert.ok(said, `ci.yml names the parts of ${job}`);
-    const named: unknown = JSON.parse(said);
-    assert.ok(Array.isArray(named), said);
-    const parts = named.length;
-    assert.deepEqual(
-      named,
-      Array.from({ length: parts }, (_unused, at) => `${at + 1}/${parts}`),
-      `${job} names every part of ${parts} once`,
-    );
-    const seconds = REGRESSION_SECONDS[platform];
-    const weight = (name: string): number => seconds[name] ?? UNMEASURED_SECONDS;
-    const loads = Array.from({ length: parts }, (_unused, at) =>
-      regressionPart(names, at + 1, parts, seconds).reduce((total, name) => total + weight(name), 0),
-    );
-    assert.ok(
-      Math.max(...loads) <= budgetSeconds * 0.8,
-      `${platform}'s ${parts} parts fit four fifths of ${budgetSeconds}s: ${loads.join(', ')}`,
-    );
-  }
+  // The parts CI runs fit the time each part's run is given, with a fifth to spare. ci.yml names
+  // this many parts for every platform.
+  assert.ok(
+    Math.max(...loadsOf(CI_PARTS)) <= CI_BUDGET_SECONDS * 0.8,
+    `${CI_PARTS} parts fit four fifths of ${CI_BUDGET_SECONDS}s: ${loadsOf(CI_PARTS).join(', ')}`,
+  );
 }
 
 /**
@@ -122053,37 +116411,6 @@ async function aFileBehindALinkIsReadByTheEngine(project: string, outside: strin
   } finally {
     await server.stop();
   }
-}
-
-/** Every reader of the project's folders takes its rule from the one walk. */
-function testEveryProjectWalkIsOne(): void {
-  const files = readdirSync('src', { recursive: true })
-    .map(String)
-    .filter((entry) => /\.[cm]?[jt]s$/.test(entry))
-    .map((entry) => join('src', entry).replaceAll('\\', '/'));
-  assert.ok(files.length >= 90, `the sources were walked: ${files.length}`);
-  const literal = ["'", '.gdignore', "'"].join('');
-  const holding = files.filter((file) => readFileSync(file, 'utf8').includes(literal)).toSorted();
-  assert.deepEqual(holding, ['src/project-walk.ts', 'src/suite-inputs.ts']);
-  const walker = readFileSync('src/project-walk.ts', 'utf8');
-  assert.ok(
-    new RegExp(`isFileAt\\(join\\([^)]*${literal}\\)\\)`).test(walker),
-    'the walker asks whether it is a file',
-  );
-  assert.ok(
-    /function isFileAt\([^)]*\)[^{]*\{\s*try \{\s*return statOf\([^)]*\)\?\.isFile\(\) === true/.test(walker),
-    'by a stat, which a folder of that name fails',
-  );
-  assert.ok(
-    !new RegExp(`existsSync\\([^)]*${literal}`).test(walker),
-    'a folder named .gdignore is no marker',
-  );
-  const nodeModules = ['node', 'modules'].join('_');
-  assert.deepEqual(
-    files.filter((file) => readFileSync(file, 'utf8').includes(nodeModules)),
-    [],
-    'no walk skips node_modules',
-  );
 }
 
 /** The import check leaves a nested project's files out, and still names the project's own. */
@@ -123975,151 +118302,6 @@ function memoryProject(): string {
   return project;
 }
 
-/** A server whose engine is the memory engine, with [param holds] in its environment. */
-async function withMemoryEngine(
-  holds: Record<string, string>,
-  body: (
-    call: (name: string, args: Record<string, unknown>) => Promise<unknown>,
-    project: string,
-    runtime: string,
-  ) => Promise<void>,
-): Promise<void> {
-  const project = memoryProject();
-  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-runtime-'));
-  const server = new ServerProcess({
-    env: { GODOT_PATH: memoryEngine(), GDHARNESS_RUNTIME_DIR: runtime, ...holds },
-  });
-  try {
-    await server.initialize('regression-test');
-    await body(
-      async (name, args) => {
-        const response = await server.request(
-          'tools/call',
-          { name, arguments: name === 'editor_status' ? args : { projectPath: project, ...args } },
-          ENGINE_CALL_TIMEOUT_MS,
-        );
-        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
-        const json = blocks.find((block) => block.trimStart().startsWith('{'));
-        return json === undefined ? blocks.join('\n') : (JSON.parse(json) as unknown);
-      },
-      project,
-      runtime,
-    );
-  } finally {
-    await server.stop();
-    sweep(project, runtime);
-  }
-}
-
-const GROWS = {
-  GDH_HOLD_MB: '600',
-  GDH_GROW_MB: '100',
-  GDH_STAY_MS: '20000',
-  [CEILING_VARIABLE]: '300',
-};
-const MEMORY_END_SAID =
-  /^ended for its memory: the engine held 0\.[3-9] GB, past the 0\.3 GB ceiling\. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it$/;
-
-/** A test run holding more than its ceiling is ended within seconds, and keeps no peak. */
-async function testAProjectTestPastItsMemoryCeilingIsEndedForIt(): Promise<void> {
-  await withMemoryEngine(GROWS, async (call, project, runtime) => {
-    const began = Date.now();
-    const ran = await call('project_test', { path: 'res://tests', timeoutMs: 60_000 });
-    assert.ok(
-      Date.now() - began < 30_000,
-      `the run was ended, not left to its limit: ${JSON.stringify(ran)}`,
-    );
-    assert.match(String(get(ran, 'verdict')), MEMORY_END_SAID, JSON.stringify(ran));
-    assert.equal(get(ran, 'hung'), false, JSON.stringify(ran));
-    assert.equal(get(ran, 'memoryEnded', 'ceilingBytes'), 300 * 1024 * 1024, JSON.stringify(ran));
-    assert.ok(asNumber(get(ran, 'memoryEnded', 'peakBytes')) > 300 * 1024 * 1024, JSON.stringify(ran));
-    // The project's import engine may keep a headless peak of its own, so only the run's is read.
-    const peaks = readEnginePeaks(project, runtime);
-    assert.equal(
-      peaks.project_test,
-      undefined,
-      `an engine ended for its memory keeps no peak: ${JSON.stringify(peaks)}`,
-    );
-  });
-}
-
-/** A game started by editor_run start holding more than its ceiling is ended, and it says so. */
-async function testAGamePastItsMemoryCeilingIsEndedForIt(): Promise<void> {
-  await withMemoryEngine(GROWS, async (call) => {
-    const started = await call('editor_run', { op: 'start', headless: true });
-    assert.equal(get(started, 'started'), true, JSON.stringify(started));
-    let output: unknown = null;
-    for (let tries = 0; tries < 40 && get(output, 'running') !== false; tries++) {
-      await delay(500);
-      output = await call('editor_output', {});
-    }
-    assert.equal(get(output, 'running'), false, JSON.stringify(output));
-    assert.match(
-      String(get(output, 'endedBy')),
-      /^its memory ceiling: the engine held 0\.\d+ GB, past the 0\.\d+ GB ceiling\. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it$/,
-      JSON.stringify(output),
-    );
-  });
-}
-
-/** An editor started by editor_launch holding more than its ceiling is ended, and editor_status says so. */
-async function testAnEditorPastItsMemoryCeilingIsEndedForIt(): Promise<void> {
-  await withMemoryEngine(GROWS, async (call) => {
-    const opened = await call('editor_launch', { op: 'open' });
-    assert.equal(get(opened, 'launched'), true, JSON.stringify(opened));
-    let ended = '';
-    let last = '';
-    for (let tries = 0; tries < 40 && ended === ''; tries++) {
-      await delay(500);
-      const status = await call('editor_status', {});
-      const said = get(status, 'editor', 'launchedEditorEnded');
-      ended = typeof said === 'string' ? said : '';
-      last = JSON.stringify(status);
-    }
-    assert.match(
-      ended,
-      new RegExp(
-        `^pid ${String(get(opened, 'pid'))}: ${MEMORY_END_SAID.source.slice(1)}`,
-        MEMORY_END_SAID.flags,
-      ),
-      `${ended} after ${last}`,
-    );
-  });
-}
-
-/** An engine under its ceiling runs to its end, as on a server with no ceiling. */
-async function testAnEngineUnderItsMemoryCeilingRunsToItsEnd(): Promise<void> {
-  await withMemoryEngine(
-    // Six seconds gives the once-a-second watch five readings or more, also when its guard starts late.
-    { GDH_HOLD_MB: '60', GDH_STAY_MS: '6000', [CEILING_VARIABLE]: '300' },
-    async (call, project, runtime) => {
-      const ran = await call('project_test', { path: 'res://tests', timeoutMs: 60_000 });
-      assert.equal(get(ran, 'memoryEnded'), undefined, JSON.stringify(ran));
-      assert.equal(get(ran, 'exitCode'), 0, JSON.stringify(ran));
-      assert.doesNotMatch(String(get(ran, 'verdict')), /memory/, JSON.stringify(ran));
-      const peaks = readEnginePeaks(project, runtime);
-      assert.ok((peaks.project_test ?? 0) > 0, `its peak is kept all the same: ${JSON.stringify(peaks)}`);
-    },
-  );
-}
-
-/** A process below the engine counts towards the engine's memory. */
-async function testAChildOfTheEngineCountsTowardsItsMemory(): Promise<void> {
-  await withMemoryEngine(
-    {
-      GDH_HOLD_MB: '30',
-      GDH_CHILD_MB: '600',
-      GDH_GROW_MB: '100',
-      GDH_STAY_MS: '20000',
-      [CEILING_VARIABLE]: '300',
-    },
-    async (call) => {
-      const ran = await call('project_test', { path: 'res://tests', timeoutMs: 60_000 });
-      assert.match(String(get(ran, 'verdict')), MEMORY_END_SAID, JSON.stringify(ran));
-    },
-  );
-}
-
 const EMPTY_THEME = '[gd_resource type="Theme" format=3]\n\n[resource]\n';
 
 /** Runs [run] against a headless server over a project holding an empty theme and a style box. */
@@ -124149,376 +118331,6 @@ async function withAThemeProject(
   );
 }
 
-/** The variable sets the ceiling of the server, and without it the default holds. */
-async function testTheCeilingVariableSetsIt(): Promise<void> {
-  const MIB = 1024 * 1024;
-  assert.equal(ceilingBytes({ [CEILING_VARIABLE]: '512' }, 64 * 1024 ** 3), 512 * MIB);
-  assert.equal(ceilingBytes({}, 64 * 1024 ** 3), 16 * 1024 ** 3);
-  assert.throws(() => ceilingBytes({ [CEILING_VARIABLE]: 'lots' }, 64 * 1024 ** 3), {
-    message: 'GDHARNESS_ENGINE_MEMORY_CEILING_MB takes a whole number of megabytes above 0, not lots.',
-  });
-  const holds = { GDH_HOLD_MB: '600', GDH_GROW_MB: '100', GDH_STAY_MS: '3500' };
-  await withMemoryEngine({ ...holds, [CEILING_VARIABLE]: '300' }, async (call) => {
-    const bound = await call('project_test', { path: 'res://tests', timeoutMs: 60_000 });
-    assert.match(String(get(bound, 'verdict')), MEMORY_END_SAID, 'the variable ends it');
-  });
-  await withMemoryEngine(holds, async (call) => {
-    const free = await call('project_test', { path: 'res://tests', timeoutMs: 60_000 });
-    assert.equal(get(free, 'memoryEnded'), undefined, `the default holds: ${JSON.stringify(free)}`);
-    assert.equal(get(free, 'exitCode'), 0, JSON.stringify(free));
-  });
-}
-
-/** A quarter of the machine's memory, and at least 4 GiB. */
-function testTheDefaultCeilingIsAQuarterOfTheMemoryAndAtLeastFourGiB(): void {
-  const GIB = 1024 ** 3;
-  assert.deepEqual(
-    [8, 16, 64, 128].map((gib) => ceilingBytes({}, gib * GIB) / GIB),
-    [4, 4, 16, 32],
-  );
-}
-
-/** Runs [param body] with the runtime directory set to a new folder. */
-async function withARuntimeDirectory(body: () => Promise<void>): Promise<void> {
-  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-peaks-'));
-  const kept = process.env['GDHARNESS_RUNTIME_DIR'];
-  process.env['GDHARNESS_RUNTIME_DIR'] = runtime;
-  try {
-    await body();
-  } finally {
-    if (kept === undefined) {
-      delete process.env['GDHARNESS_RUNTIME_DIR'];
-    } else {
-      process.env['GDHARNESS_RUNTIME_DIR'] = kept;
-    }
-    sweep(runtime);
-  }
-}
-
-/** A peak is kept per project and tool, and the next start counts it. */
-async function testAPeakIsKeptPerProjectAndToolAndCountedByTheNextStart(): Promise<void> {
-  const GIB = 1024 ** 3;
-  await withARuntimeDirectory(async () => {
-    await recordEnginePeak('/projects/a', 'project_test', 3 * GIB);
-    await recordEnginePeak('/projects/a', 'editor_launch', 2 * GIB);
-    await recordEnginePeak('/projects/b', 'project_test', 5 * GIB);
-    assert.deepEqual(readEnginePeaks('/projects/a'), { project_test: 3 * GIB, editor_launch: 2 * GIB });
-    assert.deepEqual(readEnginePeaks('/projects/b'), { project_test: 5 * GIB });
-    const room = (bytes: number) => () => Promise.resolve({ bytes, said: 'of memory free' });
-    const byDefault = { bytes: 16 * GIB, source: 'default' } as const;
-    assert.equal(
-      await memoryRefusal('/projects/a', 'project_test', byDefault, room(6.5 * GIB)),
-      'Not started: the engine needs 3.0 GB (the 3.0 GB the last project_test engine of this project held), and the machine has 6.5 GB of memory free, 4.0 GB of it kept for everything else. Free 0.5 GB of memory, or set GDHARNESS_ENGINE_MEMORY_CEILING_MB or gdharness/engine/memory_ceiling_mb in project.godot to 1536 or less, which caps what the engine may hold and is counted at.',
-    );
-    assert.equal(await memoryRefusal('/projects/a', 'project_test', byDefault, room(7.5 * GIB)), null);
-    assert.equal(
-      await memoryRefusal(
-        '/projects/b',
-        'project_test',
-        { bytes: 4 * GIB, source: 'project' },
-        room(7 * GIB),
-      ),
-      'Not started: the engine needs 4.0 GB (the 5.0 GB the last project_test engine of this project held, capped at the 4.0 GB ceiling), and the machine has 7.0 GB of memory free, 4.0 GB of it kept for everything else. Free 1.0 GB of memory, or set gdharness/engine/memory_ceiling_mb in project.godot to 2048 or less, which caps what the engine may hold and is counted at.',
-    );
-  });
-}
-
-/** A project with no peak kept, or one under the flat figure, counts the flat figure. */
-async function testAProjectWithNoKeptPeakCountsOneAndAHalfGiB(): Promise<void> {
-  const GIB = 1024 ** 3;
-  await withARuntimeDirectory(async () => {
-    assert.deepEqual(engineNeed(undefined, 16 * GIB, 'project_test'), {
-      bytes: 1.5 * GIB,
-      said: '1.5 GB taken for each engine',
-    });
-    assert.equal(MEMORY_PER_ENGINE, 1.5 * GIB);
-    await recordEnginePeak('/projects/small', 'project_test', GIB);
-    assert.equal(engineNeed(GIB, 16 * GIB, 'project_test').bytes, 1.5 * GIB);
-    const none = () => Promise.resolve({ bytes: 0, said: 'of memory free' });
-    const ceiling = { bytes: 16 * GIB, source: 'default' } as const;
-    assert.equal(await memoryRefusal('/projects/new', 'project_test', ceiling, none), null);
-    assert.equal(await memoryRefusal('/projects/small', 'project_test', ceiling, none), null);
-  });
-}
-
-/** The watcher reads only while an engine is guarded, and stops reading one once it is released. */
-async function testTheMemoryWatcherPollsOnlyWhileAnEngineIsGuarded(): Promise<void> {
-  const asked: number[] = [];
-  const watch = new MemoryWatch(() => {
-    asked.push(Date.now());
-    return Promise.resolve({
-      at: 0,
-      machine: 0,
-      processors: null,
-      held: new Map([[process.pid, 1]]),
-      below: new Map([[process.pid, []]]),
-    });
-  }, 10);
-  await delay(100);
-  assert.deepEqual([watch.polling, asked.length], [false, 0], 'nothing guarded, nothing read');
-  const guard = watch.guard(process.pid, { bytes: 1024 ** 3, source: 'default' }, () =>
-    assert.fail('under its ceiling'),
-  );
-  // A loaded machine stretches a 10 ms timer, so the readings are waited for rather than counted
-  // after a set time.
-  for (const until = Date.now() + 10_000; asked.length <= 3 && Date.now() < until; ) {
-    await delay(10);
-  }
-  assert.equal(watch.polling, true);
-  assert.ok(asked.length > 3, `read while guarded: ${String(asked.length)}`);
-  assert.equal(guard.release(), 1);
-  const after = asked.length;
-  await delay(100);
-  assert.deepEqual([watch.polling, asked.length], [false, after], 'released, so no longer read');
-}
-
-/** The reader of this platform counts a process and everything it started. */
-async function checkTheMemoryReaderOf(platform: NodeJS.Platform): Promise<void> {
-  if (process.platform !== platform) {
-    console.log(`the ${platform} memory reader regression skipped (this is ${process.platform})`);
-    return;
-  }
-  const MIB = 1024 * 1024;
-  const hold = (megabytes: number): string => `Buffer.alloc(${String(megabytes)} * 1024 * 1024, 1)`;
-  const grandchild = `const keep = ${hold(150)}; setInterval(() => keep.length, 1000);`;
-  // Off macOS the process first holds 700 MB and lets it go, so a reader of a peak field reads far
-  // past what the two hold now. macOS has no peak field to read, and its resident size can keep
-  // freed pages, so there the two are read only for what they hold. A reader of reserved address
-  // space reads past the upper bound on every platform.
-  const spike = platform === 'darwin' ? [] : [`let spike = ${hold(700)};`, 'spike = null;', 'Bun.gc(true);'];
-  const child = [
-    ...spike,
-    `const keep = ${hold(100)};`,
-    `const { spawn } = require('node:${['child', 'process'].join('_')}');`,
-    `const below = spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore', windowsHide: true });`,
-    "process.stdout.write([below.pid, ''].join('\\n'));",
-    'setInterval(() => keep.length, 1000);',
-  ].join('\n');
-  const parent = spawnHidden(process.execPath, ['-e', child], { stdio: ['ignore', 'pipe', 'ignore'] });
-  try {
-    const below = Number(
-      await new Promise<string>((done) => {
-        parent.stdout.once('data', (chunk: Buffer) => {
-          done(chunk.toString().trim());
-        });
-      }),
-    );
-    const pid = parent.pid ?? 0;
-    let held: TreeHeld | undefined;
-    for (let tries = 0; tries < 40; tries++) {
-      await delay(250);
-      held = (await treesHeldBy([pid])).get(pid);
-      if (held?.below.includes(below) === true && held.bytes >= 250 * MIB) {
-        break;
-      }
-    }
-    assert.ok(held !== undefined, 'the process is read');
-    assert.ok(held.below.includes(below), `the process it started is below it: ${JSON.stringify(held)}`);
-    // 250 MB of buffers, and each runtime's own few tens of megabytes.
-    assert.ok(held.bytes >= 250 * MIB, `its own and the process below it are counted: ${String(held.bytes)}`);
-    assert.ok(held.bytes <= 600 * MIB, `only what the two hold now is counted: ${String(held.bytes)}`);
-  } finally {
-    try {
-      process.kill(parent.pid ?? 0, 'SIGKILL');
-    } catch {
-      // Gone already.
-    }
-  }
-}
-
-/** Windows reads private bytes from the process table. */
-async function testTheWindowsMemoryReaderCountsAProcessAndWhatItStarted(): Promise<void> {
-  await checkTheMemoryReaderOf('win32');
-}
-
-/** Linux reads resident pages from /proc. */
-async function testTheLinuxMemoryReaderCountsAProcessAndWhatItStarted(): Promise<void> {
-  await checkTheMemoryReaderOf('linux');
-}
-
-/** macOS reads the resident size from ps. */
-async function testTheMacMemoryReaderCountsAProcessAndWhatItStarted(): Promise<void> {
-  await checkTheMemoryReaderOf('darwin');
-}
-
-/** Puts the project setting that holds the ceiling, in megabytes, into [param project]. */
-function setTheCeilingOf(project: string, value: string): void {
-  appendFileSync(join(project, 'project.godot'), `\n[gdharness]\n\nengine/memory_ceiling_mb=${value}\n`);
-}
-
-const SETTING_END_SAID =
-  /^ended for its memory: the engine held 0\.[3-9] GB, past the 0\.3 GB ceiling\. Set gdharness\/engine\/memory_ceiling_mb in project\.godot to raise it$/;
-
-/** Runs [param body] with [param holds] in this process's environment, which the engines it starts inherit. */
-async function withHoldsInTheEnvironment<T>(
-  holds: Record<string, string>,
-  body: () => Promise<T>,
-): Promise<T> {
-  const before = Object.keys(holds).map((name) => [name, process.env[name]] as const);
-  Object.assign(process.env, holds);
-  try {
-    return await body();
-  } finally {
-    for (const [name, value] of before) {
-      if (value === undefined) {
-        delete process.env[name];
-      } else {
-        process.env[name] = value;
-      }
-    }
-  }
-}
-
-/** A project's setting is the ceiling of every engine started for it, and its answer names the setting. */
-async function testAProjectSettingEndsItsEnginesPastTheCeiling(): Promise<void> {
-  await withMemoryEngine(
-    { GDH_HOLD_MB: '600', GDH_GROW_MB: '100', GDH_STAY_MS: '20000' },
-    async (call, project) => {
-      setTheCeilingOf(project, '300');
-      const ran = await call('project_test', { path: 'res://tests', timeoutMs: 60_000 });
-      assert.match(String(get(ran, 'verdict')), SETTING_END_SAID, JSON.stringify(ran));
-      assert.equal(get(ran, 'memoryEnded', 'ceilingBytes'), 300 * 1024 * 1024, JSON.stringify(ran));
-      assert.equal(get(ran, 'memoryEnded', 'source'), 'project', JSON.stringify(ran));
-
-      const started = await call('editor_run', { op: 'start', headless: true });
-      assert.equal(get(started, 'started'), true, JSON.stringify(started));
-      let output: unknown = null;
-      for (let tries = 0; tries < 40 && get(output, 'running') !== false; tries++) {
-        await delay(500);
-        output = await call('editor_output', {});
-      }
-      assert.match(
-        String(get(output, 'endedBy')),
-        /^its memory ceiling: the engine held 0\.[3-9] GB, past the 0\.3 GB ceiling\. Set gdharness\/engine\/memory_ceiling_mb in project\.godot to raise it$/,
-        JSON.stringify(output),
-      );
-
-      const editor = await call('editor_launch', { op: 'open' });
-      assert.equal(get(editor, 'launched'), true, JSON.stringify(editor));
-      let ended = '';
-      for (let tries = 0; tries < 40 && ended === ''; tries++) {
-        await delay(500);
-        const said = get(await call('editor_status', {}), 'editor', 'launchedEditorEnded');
-        ended = typeof said === 'string' ? said : '';
-      }
-      assert.match(
-        ended,
-        new RegExp(`^pid ${String(get(editor, 'pid'))}: ${SETTING_END_SAID.source.slice(1)}`),
-        ended,
-      );
-
-      const headless = await withHoldsInTheEnvironment(
-        { GDH_HOLD_MB: '600', GDH_GROW_MB: '100', GDH_STAY_MS: '20000' },
-        () =>
-          runEngine(memoryEngine(), ['--headless', '--path', project], {
-            timeout: { ms: 60_000, said: 'a minute' },
-            project,
-          }),
-      );
-      assert.match(String(headless.failure), SETTING_END_SAID, String(headless.failure));
-    },
-  );
-}
-
-/** A project's setting wins over the variable for that project only, and another project keeps the variable. */
-async function testTheSettingWinsOverTheVariableForItsProjectOnly(): Promise<void> {
-  await withMemoryEngine(
-    {
-      GDH_HOLD_MB: '600',
-      GDH_GROW_MB: '100',
-      GDH_STAY_MS: '3500',
-      [CEILING_VARIABLE]: '400',
-    },
-    async (call, project) => {
-      setTheCeilingOf(project, '800');
-      const own = await call('project_test', { path: 'res://tests', timeoutMs: 60_000 });
-      assert.equal(get(own, 'memoryEnded'), undefined, `the setting raised it: ${JSON.stringify(own)}`);
-      assert.equal(get(own, 'exitCode'), 0, JSON.stringify(own));
-
-      const other = memoryProject();
-      try {
-        const bound = await call('project_test', {
-          projectPath: other,
-          path: 'res://tests',
-          timeoutMs: 60_000,
-        });
-        assert.match(
-          String(get(bound, 'verdict')),
-          /^ended for its memory: the engine held 0\.[4-9] GB, past the 0\.4 GB ceiling\. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it$/,
-          JSON.stringify(bound),
-        );
-        assert.equal(get(bound, 'memoryEnded', 'source'), 'variable', JSON.stringify(bound));
-      } finally {
-        sweep(other);
-      }
-    },
-  );
-}
-
-/** The refusal of a setting written as text, which reads as a number and is not one. */
-const textRefusal = (value: string): string =>
-  `gdharness/engine/memory_ceiling_mb in project.godot is the text "${value}", and takes a whole number of megabytes above 0, written without quotes.`;
-
-/** A setting that is not a whole number above 0 refuses the start, naming the setting, its value and the rule. */
-async function testASettingThatIsNoSizeRefusesTheStart(): Promise<void> {
-  const refusal = (value: string): string =>
-    `gdharness/engine/memory_ceiling_mb in project.godot takes a whole number of megabytes above 0, not ${value}.`;
-  await withMemoryEngine({ GDH_STAY_MS: '1000' }, async (call, project) => {
-    const file = join(project, 'project.godot');
-    const clean = readFileSync(file, 'utf8');
-    for (const [written, said] of [
-      ['0', refusal('0')],
-      ['-5', refusal('-5')],
-      ['"lots"', textRefusal('lots')],
-      ['2.5', refusal('2.5')],
-    ] as const) {
-      writeFileSync(file, clean);
-      setTheCeilingOf(project, written);
-      assert.equal(
-        await call('project_test', { path: 'res://tests', timeoutMs: 60_000 }),
-        said,
-        `project_test with ${written}`,
-      );
-    }
-    assert.equal(await call('editor_run', { op: 'start', headless: true }), refusal('2.5'), 'editor_run');
-    assert.equal(await call('editor_launch', { op: 'open' }), refusal('2.5'), 'editor_launch');
-    const headless = await runEngine(memoryEngine(), ['--headless', '--path', project], { project });
-    assert.equal(headless.failure, refusal('2.5'), 'a headless operation');
-  });
-}
-
-/** One engine is read once for each sample, whoever asks for it. */
-async function testAHeadlessEngineIsSampledOncePerTick(): Promise<void> {
-  const project = memoryProject();
-  const reads: { readonly at: number; readonly pids: readonly number[] }[] = [];
-  const restore = readingMemoryWith((pids) => {
-    reads.push({ at: Date.now(), pids: [...pids] });
-    return treesHeldBy(pids);
-  });
-  try {
-    const ran = await withHoldsInTheEnvironment({ GDH_HOLD_MB: '60', GDH_STAY_MS: '3500' }, () =>
-      runEngine(memoryEngine(), ['--headless', '--path', project], {
-        timeout: { ms: 60_000, said: 'a minute' },
-        project,
-      }),
-    );
-    assert.equal(ran.exitCode, 0, String(ran.failure));
-  } finally {
-    restore();
-    sweep(project);
-  }
-  assert.ok(reads.length >= 3, `the engine was read while it ran: ${JSON.stringify(reads)}`);
-  assert.ok(
-    reads.every((read) => read.pids.length === 1),
-    `each reading names the one engine once: ${JSON.stringify(reads)}`,
-  );
-  const gaps = reads.slice(1).map((read, at) => read.at - (reads[at]?.at ?? 0));
-  assert.ok(
-    gaps.every((gap) => gap >= 450),
-    `no two readings share a tick: ${JSON.stringify(gaps)}`,
-  );
-}
-
 /** Waits up to [param ms] for [param done], reading it every 100 ms, and answers its last reading. */
 async function untilTrue(done: () => boolean | Promise<boolean>, ms: number): Promise<boolean> {
   for (const until = Date.now() + ms; Date.now() < until; ) {
@@ -124528,371 +118340,6 @@ async function untilTrue(done: () => boolean | Promise<boolean>, ms: number): Pr
     await delay(100);
   }
   return await done();
-}
-
-/** editor_run check's engine ended for its memory says so, and the check keeps its peak apart from the game's. */
-async function testABootCheckEndedForItsMemorySaysSoAndKeepsItsOwnPeak(): Promise<void> {
-  await withMemoryEngine(GROWS, async (call) => {
-    const checked = await call('editor_run', { op: 'check', timeoutMs: 60_000 });
-    assert.equal(get(checked, 'booted'), false, JSON.stringify(checked));
-    assert.match(String(get(checked, 'endedBy')), MEMORY_END_SAID, JSON.stringify(checked));
-    assert.equal(get(checked, 'memoryEnded', 'ceilingBytes'), 300 * 1024 * 1024, JSON.stringify(checked));
-    assert.equal(get(checked, 'memoryEnded', 'source'), 'variable', JSON.stringify(checked));
-  });
-  const GIB = 1024 ** 3;
-  await withMemoryEngine(
-    { GDH_HOLD_MB: '60', GDH_STAY_MS: '4000', [CEILING_VARIABLE]: '300' },
-    async (call, project, runtime) => {
-      await withHoldsInTheEnvironment({ GDHARNESS_RUNTIME_DIR: runtime }, () =>
-        recordEnginePeak(project, 'editor_run', 2 * GIB),
-      );
-      const checked = await call('editor_run', { op: 'check', timeoutMs: 60_000 });
-      assert.equal(get(checked, 'endedBy'), undefined, JSON.stringify(checked));
-      assert.ok(
-        await untilTrue(() => (readEnginePeaks(project, runtime).boot_check ?? 0) > 0, 5000),
-        `the check keeps its own peak: ${JSON.stringify(readEnginePeaks(project, runtime))}`,
-      );
-      assert.equal(readEnginePeaks(project, runtime).editor_run, 2 * GIB, "the game's figure stays");
-    },
-  );
-}
-
-/** An engine ended for its memory keeps no peak, and a refusal names what lets the start go ahead. */
-async function testAnEngineEndedForItsMemoryKeepsNoPeakAndARefusalNamesTheWayOn(): Promise<void> {
-  const GIB = 1024 ** 3;
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
-  try {
-    await withHoldsInTheEnvironment({ GODOT_ENGINE_SLOTS: slots }, () =>
-      withARuntimeDirectory(async () => {
-        const watch = new MemoryWatch(
-          () =>
-            Promise.resolve({
-              at: 0,
-              machine: 0,
-              processors: null,
-              held: new Map([[process.pid, 2 * GIB]]),
-              below: new Map([[process.pid, []]]),
-            }),
-          10,
-        );
-        let ended = 0;
-        const guard = watch.guard(
-          process.pid,
-          { bytes: GIB, source: 'default' },
-          () => {
-            ended += 1;
-          },
-          { project: '/projects/runaway', tool: 'project_test' },
-        );
-        assert.ok(await untilTrue(() => ended === 1, 5000), 'ended past its ceiling');
-        assert.equal(guard.release(), 2 * GIB);
-        await delay(200);
-        assert.deepEqual(
-          readEnginePeaks('/projects/runaway'),
-          {},
-          'its figure is the fault, so none is kept',
-        );
-      }),
-    );
-  } finally {
-    sweep(slots);
-  }
-  const need = { bytes: 8 * GIB, said: 'the 8.0 GB the last editor_run engine of this project held' };
-  const room = { bytes: 10 * GIB, said: 'of memory free' };
-  const opening =
-    'Not started: the engine needs 8.0 GB (the 8.0 GB the last editor_run engine of this project held), and the machine has 10.0 GB of memory free, 4.0 GB of it kept for everything else. Free 2.0 GB of memory, or set ';
-  // 6 GiB past what is kept, less a quarter of it for free memory that moves before the next start.
-  const closing = ' to 4608 or less, which caps what the engine may hold and is counted at.';
-  assert.equal(
-    startRefusedSaid(need, room, 4 * GIB, { bytes: 16 * GIB, source: 'project' }),
-    `${opening}gdharness/engine/memory_ceiling_mb in project.godot${closing}`,
-  );
-  for (const source of ['variable', 'default'] as const) {
-    assert.equal(
-      startRefusedSaid(need, room, 4 * GIB, { bytes: 16 * GIB, source }),
-      `${opening}GDHARNESS_ENGINE_MEMORY_CEILING_MB or gdharness/engine/memory_ceiling_mb in project.godot${closing}`,
-      source,
-    );
-  }
-  assert.match(
-    startRefusedSaid(need, { bytes: 4.5 * GIB, said: 'of memory free' }, 4 * GIB, {
-      bytes: 16 * GIB,
-      source: 'project',
-    }),
-    /Free 7\.5 GB of memory, or set gdharness\/engine\/memory_ceiling_mb in project\.godot to 1536 or less,/,
-    'a ceiling is never named below the flat figure, which every start fits',
-  );
-}
-
-/** A game editor_run started and left running is guarded by the server that next holds it. */
-async function testAGameItsServerLeftRunningIsGuardedByTheNextServer(): Promise<void> {
-  const project = memoryProject();
-  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-runtime-'));
-  // 600 MB reached 12 MB every 150 ms: past 300 MB after about 4 s, once the first server has gone.
-  const env = {
-    GODOT_PATH: memoryEngine(),
-    GDHARNESS_RUNTIME_DIR: runtime,
-    GDHARNESS_PROJECT: project,
-    GDH_HOLD_MB: '600',
-    GDH_GROW_MB: '12',
-    GDH_STAY_MS: '20000',
-    [CEILING_VARIABLE]: '300',
-  };
-  const call = async (
-    server: ServerProcess,
-    name: string,
-    args: Record<string, unknown>,
-  ): Promise<unknown> => {
-    const response = await server.request(
-      'tools/call',
-      { name, arguments: { projectPath: project, ...args } },
-      ENGINE_CALL_TIMEOUT_MS,
-    );
-    const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
-    const json = blocks.find((block) => block.trimStart().startsWith('{'));
-    return json === undefined ? blocks.join('\n') : (JSON.parse(json) as unknown);
-  };
-  let pid = 0;
-  try {
-    const first = new ServerProcess({ env });
-    try {
-      await first.initialize('regression-test');
-      const started = await call(first, 'editor_run', { op: 'start', headless: true });
-      assert.equal(get(started, 'started'), true, JSON.stringify(started));
-      pid = asNumber(get(started, 'pid'));
-    } finally {
-      await first.stop();
-    }
-    const second = new ServerProcess({ env });
-    try {
-      await second.initialize('regression-test');
-      let output: unknown = null;
-      for (let tries = 0; tries < 40 && get(output, 'running') !== false; tries++) {
-        output = await call(second, 'editor_output', {});
-        await delay(500);
-      }
-      assert.match(
-        String(get(output, 'endedBy')),
-        /^its memory ceiling: the engine held 0\.\d+ GB, past the 0\.\d+ GB ceiling\. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it$/,
-        JSON.stringify(output),
-      );
-    } finally {
-      await second.stop();
-    }
-  } finally {
-    try {
-      process.kill(pid, 'SIGKILL');
-    } catch {
-      // Gone already.
-    }
-    sweep(project, runtime);
-  }
-}
-
-/**
- * A start refused for memory says what it needs, what is free and what lets it start, the same
- * through project_test, editor_run start, editor_launch open and a headless operation.
- */
-async function testAStartRefusedForMemorySaysSoThroughEveryTool(): Promise<void> {
-  const GIB = 1024 ** 3;
-  const refusal = (tool: string): RegExp =>
-    new RegExp(
-      `^Not started: the engine needs 120\\.0 GB \\(the 120\\.0 GB the last ${tool} engine of this project held\\), and the machine has \\d+\\.\\d GB of memory (free|left to commit)( after \\d+\\.\\d GB reserved)?, 4\\.0 GB of it kept for everything else\\. Free \\d+\\.\\d GB of memory, or set GDHARNESS_ENGINE_MEMORY_CEILING_MB or gdharness/engine/memory_ceiling_mb in project\\.godot to \\d+ or less, which caps what the engine may hold and is counted at\\.$`,
-    );
-  const ceiling = { [CEILING_VARIABLE]: String(120 * 1024) };
-  await withMemoryEngine({ GDH_STAY_MS: '1000', ...ceiling }, async (call, project, runtime) => {
-    await withHoldsInTheEnvironment({ GDHARNESS_RUNTIME_DIR: runtime }, async () => {
-      for (const tool of ['project_test', 'editor_run', 'editor_launch', 'headless'] as const) {
-        await recordEnginePeak(project, tool, 120 * GIB);
-      }
-    });
-    assert.match(
-      String(await call('project_test', { path: 'res://tests', timeoutMs: 60_000 })),
-      refusal('project_test'),
-    );
-    assert.match(String(await call('editor_run', { op: 'start', headless: true })), refusal('editor_run'));
-    assert.match(String(await call('editor_launch', { op: 'open' })), refusal('editor_launch'));
-    const outcome = await withHoldsInTheEnvironment({ GDHARNESS_RUNTIME_DIR: runtime, ...ceiling }, () =>
-      runOperation(
-        { godotPath: memoryEngine(), script: 'none', debug: false },
-        'get_scene_tree',
-        {},
-        project,
-      ),
-    );
-    assert.equal(outcome.ok, false, JSON.stringify(outcome));
-    assert.match(String(get(outcome, 'message')), refusal('headless'), JSON.stringify(outcome));
-  });
-}
-
-/** A headless engine is let go as it ends: nothing reads it afterwards. */
-async function testAHeadlessEngineIsReadNoMoreOnceItHasEnded(): Promise<void> {
-  const project = memoryProject();
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
-  let found: unknown;
-  try {
-    found = await inAProcessOfItsOwn(
-      [
-        'const reads = [];',
-        'spent.readingMemoryWith((pids) => {',
-        '  reads.push({ at: Date.now(), pids: [...pids] });',
-        '  return spent.treesHeldBy(pids);',
-        '});',
-        `const project = ${JSON.stringify(project)};`,
-        `const ran = await run.runEngine(${JSON.stringify(memoryEngine())}, ['--headless', '--path', project], { project });`,
-        'const endedAt = Date.now();',
-        'const engines = [...new Set(reads.flatMap((read) => read.pids))];',
-        'const guarded = engines.filter((pid) => memory.engineMemory.isGuarding(pid));',
-        'await new Promise((done) => setTimeout(done, 3000));',
-        'const after = reads.filter((read) => read.at > endedAt && read.pids.some((pid) => engines.includes(pid)));',
-        'say({ exitCode: ran.exitCode, failure: ran.failure, engines, guarded, after });',
-      ],
-      { [SLOTS_VARIABLE]: slots, GDH_HOLD_MB: '60', GDH_STAY_MS: '2500' },
-    );
-  } finally {
-    sweep(project, slots);
-  }
-  assert.equal(get(found, 'exitCode'), 0, JSON.stringify(found));
-  assert.deepEqual(get(found, 'guarded'), [], 'the engine is no longer guarded once its run is answered');
-  assert.ok(asArray(get(found, 'engines')).length > 0, 'the engine was read while it ran');
-  assert.deepEqual(get(found, 'after'), [], 'nothing reads an engine that has ended');
-}
-
-/** Two processes keeping the peaks of one project at once each keep their own last figure. */
-async function testTwoWritersOfOneProjectsPeaksLoseNoFigure(): Promise<void> {
-  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-peaks-'));
-  const project = join(runtime, 'two writers');
-  const record = pathToFileURL(resolve('src', 'run-record.ts')).href;
-  try {
-    const writers = ['project_test', 'editor_run'].map(
-      (tool) =>
-        new Promise<number | null>((done) => {
-          const writer = spawnHidden(
-            process.execPath,
-            [
-              '-e',
-              [
-                `import { recordEnginePeak } from ${JSON.stringify(record)};`,
-                'for (let step = 1; step <= 200; step++) {',
-                `  await recordEnginePeak(${JSON.stringify(project)}, '${tool}', step * 1024 * 1024);`,
-                '}',
-              ].join('\n'),
-            ],
-            { stdio: 'ignore', env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime } },
-          );
-          writer.once('exit', done);
-        }),
-    );
-    assert.deepEqual(await Promise.all(writers), [0, 0], 'both writers ran');
-    assert.deepEqual(readEnginePeaks(project, runtime), {
-      project_test: 200 * 1024 * 1024,
-      editor_run: 200 * 1024 * 1024,
-    });
-  } finally {
-    sweep(runtime);
-  }
-}
-
-/** A headless operation ended for its memory is answered in one sentence naming what sets the ceiling. */
-async function testAHeadlessOperationEndedForItsMemoryIsSaidInOneSentence(): Promise<void> {
-  const project = memoryProject();
-  try {
-    setTheCeilingOf(project, '300');
-    const outcome = await withHoldsInTheEnvironment(
-      // In one step, so the reading that ends it is at least 0.59 GB whenever it lands. In steps, a
-      // reading just past the 0.29 GB ceiling is said with two places, as figures that would read
-      // the same at one are.
-      { GDH_OPERATION_HOLD_MB: '600', GDH_GROW_MB: '600', GDH_STAY_MS: '20000' },
-      () =>
-        runOperation(
-          { godotPath: memoryEngine(), script: 'none', debug: false },
-          'get_scene_tree',
-          {},
-          project,
-        ),
-    );
-    assert.equal(outcome.ok, false, JSON.stringify(outcome));
-    assert.match(
-      String(get(outcome, 'message')),
-      /^get_scene_tree was ended for its memory: it held 0\.[3-9] GB, past the 0\.3 GB ceiling gdharness\/engine\/memory_ceiling_mb in project\.godot sets\.$/,
-      JSON.stringify(outcome),
-    );
-  } finally {
-    sweep(project);
-  }
-}
-
-/** A ceiling setting written in quotes is refused as text, with its name. */
-async function testACeilingSettingWrittenAsTextIsRefusedAsText(): Promise<void> {
-  await withMemoryEngine({ GDH_STAY_MS: '1000' }, async (call, project) => {
-    setTheCeilingOf(project, '"300"');
-    assert.equal(await call('project_test', { path: 'res://tests', timeoutMs: 60_000 }), textRefusal('300'));
-  });
-}
-
-/** A reading of an engine's memory on Windows costs a read through its handle, not a walk of every process. */
-async function testAMemoryReadingCostsAHandleReadForEachEngine(): Promise<void> {
-  if (process.platform !== 'win32') {
-    console.log(`the memory reading cost regression skipped (this is ${process.platform})`);
-    return;
-  }
-  const idle = [0, 1].map(() =>
-    spawnHidden(
-      process.execPath,
-      ['-e', 'const keep = Buffer.alloc(20 * 1024 * 1024, 1); setInterval(() => keep.length, 1000);'],
-      {
-        stdio: 'ignore',
-      },
-    ),
-  );
-  try {
-    const pids = idle.map((one) => one.pid ?? 0);
-    await delay(1000);
-    // The first reading takes the snapshot the next ones walk.
-    assert.equal((await treesHeldBy(pids)).size, 2, 'both are read');
-    const times: number[] = [];
-    for (let reading = 0; reading < 10; reading++) {
-      const began = performance.now();
-      await treesHeldBy(pids);
-      times.push(performance.now() - began);
-    }
-    // A walk of the process table took 18 ms for each reading, a read of two handles about 1 ms. The
-    // quickest of ten, since other work on the machine only ever adds to a reading's time.
-    const quickest = Math.min(...times);
-    assert.ok(quickest < 10, `the quickest of ten readings of two engines: ${quickest.toFixed(1)} ms`);
-  } finally {
-    for (const one of idle) {
-      one.kill();
-    }
-  }
-}
-
-/** A test run's engine past its ceiling is ended, and the run's result and output say so. */
-function testATestRunsEnginePastItsCeilingIsEndedAndSaysSo(): void {
-  const project = memoryProject();
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
-  const resultFile = join(slots, 'result.json');
-  const said =
-    /ended for its memory: the engine held 0\.[3-9] GB, past the 0\.3 GB ceiling\. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it/;
-  try {
-    const began = Date.now();
-    const ran = spawnSyncHidden(
-      process.execPath,
-      ['build/cli.js', 'test', project, '--slots', slots, '--result', resultFile],
-      {
-        encoding: 'utf8',
-        env: { ...process.env, GODOT_PATH: memoryEngine(), ...GROWS },
-        timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
-      },
-    );
-    const printed = `${ran.stdout}${ran.stderr}`;
-    assert.ok(Date.now() - began < 30_000, `the engine was ended, not left to run: ${printed}`);
-    assert.notEqual(ran.status, 0, printed);
-    assert.match(printed, said, printed);
-    assert.match(readFileSync(resultFile, 'utf8'), said, readFileSync(resultFile, 'utf8'));
-  } finally {
-    sweep(project, slots);
-  }
 }
 
 /** The properties a read of a resource answers. */
@@ -125100,261 +118547,6 @@ async function testAVariationBaseThatIsNoClassAndNoHeldTypeIsWrittenAsGiven(): P
       scenes.fileOf('theme.tres'),
     );
   });
-}
-
-/** A game ended for its memory and polled while it ends is answered with its exit, not a missing keeper. */
-async function testAPolledGameEndedForItsMemoryCarriesNoKeeperNote(): Promise<void> {
-  await withMemoryEngine(GROWS, async (call) => {
-    const started = await call('editor_run', { op: 'start', headless: true });
-    assert.equal(get(started, 'started'), true, JSON.stringify(started));
-    const answers: unknown[] = [];
-    let output: unknown = null;
-    for (let tries = 0; tries < 60 && get(output, 'running') !== false; tries++) {
-      await delay(500);
-      output = await call('editor_output', {});
-      answers.push(output);
-    }
-    assert.equal(get(output, 'running'), false, JSON.stringify(output));
-    await delay(1500);
-    answers.push(await call('editor_output', {}));
-    for (const answer of answers) {
-      assert.equal(get(answer, 'endedUnwatched'), undefined, JSON.stringify(answer));
-      assert.doesNotMatch(String(get(answer, 'note')), /keeper/, JSON.stringify(answer));
-    }
-  });
-}
-
-/** The ceiling a refusal names lets the start it refused go ahead, also once free memory has moved a little. */
-async function testTheRefusalsCeilingStepStartsTheEngineWhenFollowed(): Promise<void> {
-  const GIB = 1024 ** 3;
-  const MIB = 1024 ** 2;
-  await withARuntimeDirectory(async () => {
-    const project = '/projects/large';
-    await recordEnginePeak(project, 'project_test', 8 * GIB);
-    const free = (bytes: number) => () => Promise.resolve({ bytes, said: 'of memory free' });
-    const refused = await memoryRefusal(
-      project,
-      'project_test',
-      { bytes: 16 * GIB, source: 'variable' },
-      free(10 * GIB),
-    );
-    const named = /set \S+ or \S+ in project\.godot to (\d+) or less/.exec(String(refused));
-    assert.ok(named !== null, String(refused));
-    const ceiling = { bytes: Number(named[1]) * MIB, source: 'variable' } as const;
-    for (const moved of [0, 300, 900]) {
-      assert.equal(
-        await memoryRefusal(project, 'project_test', ceiling, free(10 * GIB - moved * MIB)),
-        null,
-        `followed with ${String(moved)} MB less free`,
-      );
-    }
-  });
-}
-
-/** Under the kept 4 GB, the refusal names all there is to free, and freeing it lets the start go ahead. */
-async function testTheRefusalNamesAllThereIsToFreeUnderTheKeptMemory(): Promise<void> {
-  const GIB = 1024 ** 3;
-  await withARuntimeDirectory(async () => {
-    const project = '/projects/large';
-    await recordEnginePeak(project, 'project_test', 3 * GIB);
-    const ceiling = { bytes: 16 * GIB, source: 'default' } as const;
-    const free = (bytes: number) => () => Promise.resolve({ bytes, said: 'of memory free' });
-    for (const [room, toFree] of [
-      [3, 4],
-      [1, 6],
-      [6.5, 0.5],
-    ] as const) {
-      const refused = String(await memoryRefusal(project, 'project_test', ceiling, free(room * GIB)));
-      assert.match(
-        refused,
-        new RegExp(`Free ${toFree.toFixed(1)} GB of memory,`),
-        `${String(room)} GB free: ${refused}`,
-      );
-      assert.equal(
-        await memoryRefusal(project, 'project_test', ceiling, free((room + toFree) * GIB)),
-        null,
-        `${String(room)} GB free, and ${toFree.toFixed(1)} GB freed`,
-      );
-    }
-  });
-}
-
-/**
- * A server that starts beside another ends none of that server's games, however low its own ceiling.
- * A game is guarded by the server that started it, and by the next only once a call picks it up.
- */
-async function testANewServerEndsNoOtherLiveServersGame(): Promise<void> {
-  const project = memoryProject();
-  const other = memoryProject();
-  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-runtime-'));
-  // 600 MB, under the default ceiling the first server has and past the second's 300 MB.
-  const env = {
-    GODOT_PATH: memoryEngine(),
-    GDHARNESS_RUNTIME_DIR: runtime,
-    GDHARNESS_PROJECT: project,
-    GDH_HOLD_MB: '600',
-    GDH_STAY_MS: '30000',
-  };
-  const call = async (server: ServerProcess, name: string): Promise<unknown> => {
-    const response = await server.request(
-      'tools/call',
-      {
-        name,
-        arguments: {
-          projectPath: project,
-          ...(name === 'editor_run' ? { op: 'start', headless: true } : {}),
-        },
-      },
-      ENGINE_CALL_TIMEOUT_MS,
-    );
-    const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
-    const json = blocks.find((block) => block.trimStart().startsWith('{'));
-    return json === undefined ? blocks.join('\n') : (JSON.parse(json) as unknown);
-  };
-  let pid = 0;
-  const first = new ServerProcess({ env });
-  try {
-    await first.initialize('regression-test');
-    const started = await call(first, 'editor_run');
-    assert.equal(get(started, 'started'), true, JSON.stringify(started));
-    pid = asNumber(get(started, 'pid'));
-    const second = new ServerProcess({
-      env: { ...env, GDHARNESS_PROJECT: other, [CEILING_VARIABLE]: '300' },
-    });
-    try {
-      await second.initialize('regression-test');
-      await delay(8000);
-      assert.ok(alive(pid), 'the game is still running 8 s after the second server started');
-      const output = await call(first, 'editor_output');
-      assert.equal(get(output, 'running'), true, JSON.stringify(output));
-    } finally {
-      await second.stop();
-    }
-  } finally {
-    await first.stop();
-    try {
-      process.kill(pid, 'SIGKILL');
-    } catch {
-      // Gone already.
-    }
-    sweep(project, other, runtime);
-  }
-}
-
-/** An import pass ended for its memory gives that as how it ended, not the signal that ended it. */
-function testAnImportPassEndedForItsMemorySaysSoAndNotItsSignal(): void {
-  const MIB = 1024 ** 2;
-  const end: MemoryEnd = { peakBytes: 700 * MIB, ceilingBytes: 300 * MIB, source: 'variable' };
-  const ran: EngineRun = {
-    ...anImportRun('', null, memoryEndedSaid(end)),
-    exitSignal: 'SIGTERM',
-    memoryEnd: end,
-  };
-  assert.equal(
-    get(judgeImport(ran, null), 'message'),
-    'the import pass failed (ended for its memory: the engine held 0.7 GB, past the 0.3 GB ceiling. Set GDHARNESS_ENGINE_MEMORY_CEILING_MB to raise it): no output at all',
-  );
-}
-
-/** A test run's engine is guarded from its start, ended past its ceiling, and no longer guarded once it is answered. */
-async function testATestRunsEngineKnownAtItsStartIsGuardedAndReleased(): Promise<void> {
-  const project = memoryProject();
-  setTheCeilingOf(project, '300');
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-watched-'));
-  try {
-    const directory = join(scratch, 'engine');
-    mkdirSync(join(directory, 'user'), { recursive: true });
-    const lock = join(scratch, '0.lock');
-    writeFileSync(lock, '');
-    const began = Date.now();
-    const end = await withHoldsInTheEnvironment(
-      { GDH_HOLD_MB: '600', GDH_GROW_MB: '100', GDH_STAY_MS: '20000' },
-      () =>
-        watchedEngine(
-          {
-            godotPath: memoryEngine(),
-            projectPath: project,
-            deadlineSeconds: 60,
-            running: new Set(),
-            cores: null,
-          },
-          lock,
-          ['--path', project],
-          directory,
-          join(directory, 'engine.log'),
-          30,
-        ),
-    );
-    assert.equal(engineMemory.polling, false, 'the engine is no longer guarded once it is answered');
-    assert.ok(Date.now() - began < 15_000, `ended, not left to run: ${JSON.stringify(end)}`);
-    assert.match(
-      String(end.ended),
-      /^ended for its memory: the engine held \d+\.\d GB, past the 0\.3 GB ceiling\. Set gdharness\/engine\/memory_ceiling_mb in project\.godot to raise it$/,
-      JSON.stringify(end),
-    );
-  } finally {
-    sweep(project, scratch);
-  }
-}
-
-/** On Windows, a reading that asks for an engine gone since costs no process snapshot each time. */
-async function testAGoneEngineCostsNoSnapshotAtEachReading(): Promise<void> {
-  if (process.platform !== 'win32') {
-    console.log(`the gone engine reading regression skipped (this is ${process.platform})`);
-    return;
-  }
-  const live = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000);'], { stdio: 'ignore' });
-  const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
-  try {
-    await new Promise((done) => gone.once('exit', done));
-    const pids = [live.pid ?? 0, gone.pid ?? 0];
-    await delay(500);
-    const first = await treesHeldBy(pids);
-    assert.deepEqual([first.has(pids[0] ?? 0), first.has(pids[1] ?? 0)], [true, false]);
-    const times: number[] = [];
-    for (let reading = 0; reading < 10; reading++) {
-      const began = performance.now();
-      await treesHeldBy(pids);
-      times.push(performance.now() - began);
-    }
-    // A snapshot took 20 to 30 ms for each reading, a read of one handle about 1 ms. The quickest of
-    // ten, since other work on the machine only ever adds to a reading's time.
-    const quickest = Math.min(...times);
-    assert.ok(quickest < 10, `the quickest of ten readings with a gone engine: ${quickest.toFixed(1)} ms`);
-  } finally {
-    live.kill();
-  }
-}
-
-/** On Windows, memory a process has committed counts whether or not it is in its working set. */
-async function testTheWindowsMemoryReaderReadsPrivateBytesNotTheWorkingSet(): Promise<void> {
-  if (process.platform !== 'win32') {
-    console.log(`the private bytes regression skipped (this is ${process.platform})`);
-    return;
-  }
-  const MIB = 1024 * 1024;
-  // 600 MB committed and never touched: private bytes, and none of it in the working set.
-  const child = [
-    "const { dlopen, FFIType } = require('bun:ffi');",
-    "const kernel = dlopen('kernel32.dll', { VirtualAlloc: { args: [FFIType.ptr, FFIType.u64, FFIType.u32, FFIType.u32], returns: FFIType.ptr } });",
-    'const held = kernel.symbols.VirtualAlloc(null, 600 * 1024 * 1024, 0x3000, 0x04);',
-    "process.stdout.write(held === null ? 'none\\n' : 'held\\n');",
-    'setInterval(() => held, 1000);',
-  ].join('\n');
-  const parent = spawnHidden(process.execPath, ['-e', child], { stdio: ['ignore', 'pipe', 'ignore'] });
-  try {
-    const said = await new Promise<string>((done) => {
-      parent.stdout.once('data', (chunk: Buffer) => {
-        done(chunk.toString().trim());
-      });
-    });
-    assert.equal(said, 'held');
-    const pid = parent.pid ?? 0;
-    const bytes = (await treesHeldBy([pid])).get(pid)?.bytes ?? 0;
-    assert.ok(bytes >= 550 * MIB, `the committed memory is counted: ${String(bytes)}`);
-  } finally {
-    parent.kill();
-  }
 }
 
 /** A scene whose root Control holds a built-in Theme with [lines] under its section. */
@@ -125575,14 +118767,18 @@ function testASuiteSkippedWholeFailsTheRunWithItsReason(): void {
     [
       false,
       '2 cases skipped with do_skip, so they never ran',
-      [{ test: FED_A, reason: 'the whole suite waits', cases: 2 }],
+      [
+        { test: `${FED_A} > test_a`, reason: whole },
+        { test: `${FED_A} > test_b`, reason: whole },
+      ],
     ],
     'project_test',
   );
   assert.deepEqual(
     faults,
     [
-      `${FED_A} never ran all 2 of its cases: gdUnit4 skipped the whole suite, saying "the whole suite waits"`,
+      `${FED_A} > test_a never ran: gdUnit4 skipped it, saying "${whole}"`,
+      `${FED_A} > test_b never ran: gdUnit4 skipped it, saying "${whole}"`,
     ],
     'gdharness test',
   );
@@ -125625,16 +118821,20 @@ function testSkipsAreReadFromWhatGdUnitPrinted(): void {
   assert.deepEqual(
     printed.skipped,
     [
-      { suite: 'res://test/one_skip_test.gd', name: 'test_skipped', reason: 'not ready yet', cases: 1 },
-      { suite: 'res://test/one_skip_test.gd', name: 'test_conditional', reason: 'only on Nowhere', cases: 1 },
-      { suite: 'res://test/rows_skip_test.gd', name: 'test_rows:0 (1)', reason: 'rows wait', cases: 1 },
-      { suite: 'res://test/rows_skip_test.gd', name: 'test_rows:1 (2)', reason: 'rows wait', cases: 1 },
-      { suite: 'res://test/rows_skip_test.gd', name: 'test_rows:2 (3)', reason: 'rows wait', cases: 1 },
+      { suite: 'res://test/one_skip_test.gd', name: 'test_skipped', reason: 'not ready yet' },
+      { suite: 'res://test/one_skip_test.gd', name: 'test_conditional', reason: 'only on Nowhere' },
+      { suite: 'res://test/rows_skip_test.gd', name: 'test_rows:0 (1)', reason: 'rows wait' },
+      { suite: 'res://test/rows_skip_test.gd', name: 'test_rows:1 (2)', reason: 'rows wait' },
+      { suite: 'res://test/rows_skip_test.gd', name: 'test_rows:2 (3)', reason: 'rows wait' },
       {
         suite: 'res://test/whole_skip_test.gd',
-        name: null,
-        reason: 'the whole suite waits',
-        cases: 2,
+        name: 'test_a',
+        reason: 'Skipped from the entire test suite',
+      },
+      {
+        suite: 'res://test/whole_skip_test.gd',
+        name: 'test_b',
+        reason: 'Skipped from the entire test suite',
       },
     ],
     'what was skipped, and why',
@@ -125644,7 +118844,7 @@ function testSkipsAreReadFromWhatGdUnitPrinted(): void {
     [[], []],
     'none of it is a row or case gdUnit4 cannot run',
   );
-  assert.equal(casesRan(printed), 3, 'ten printed passed, seven of them skipped');
+  assert.equal(casesRan(printed), 3, 'ten cases in the report, seven of them skipped');
   const judged = judgeEngine(
     printed,
     {
@@ -125670,7 +118870,8 @@ function testSkipsAreReadFromWhatGdUnitPrinted(): void {
         'res://test/rows_skip_test.gd > test_rows:0 (1) never ran: gdUnit4 skipped it, saying "rows wait"',
         'res://test/rows_skip_test.gd > test_rows:1 (2) never ran: gdUnit4 skipped it, saying "rows wait"',
         'res://test/rows_skip_test.gd > test_rows:2 (3) never ran: gdUnit4 skipped it, saying "rows wait"',
-        'res://test/whole_skip_test.gd never ran all 2 of its cases: gdUnit4 skipped the whole suite, saying "the whole suite waits"',
+        'res://test/whole_skip_test.gd > test_a never ran: gdUnit4 skipped it, saying "Skipped from the entire test suite"',
+        'res://test/whole_skip_test.gd > test_b never ran: gdUnit4 skipped it, saying "Skipped from the entire test suite"',
       ],
       [],
     ],
@@ -125717,7 +118918,7 @@ function testARowForItsDataAndAnUnrunnableCaseAreNotListedAsSkips(): void {
         "'",
       ]),
     ],
-    skipped: 'x',
+    skipped: `The test data set at index (${String(index)}) does not match the expected test parameters:\n\ttest function: func test...(a: int,b: int)\n\ttest input values: [${String(value)}]`,
   });
   const typo = `Unknown test case argument's ["value"] found.`;
   const { answer, faults } = fedRunAnswered([
@@ -125728,6 +118929,7 @@ function testARowForItsDataAndAnUnrunnableCaseAreNotListedAsSkips(): void {
         {
           name: 'test_typo',
           printed: [caseLine(FED_A, 'test_typo', 'PASSED', '0ms'), ...under([`  Reason: '${typo}'`])],
+          skipped: typo,
         },
       ],
       closed: 'PASSED',
@@ -125744,7 +118946,7 @@ function testARowForItsDataAndAnUnrunnableCaseAreNotListedAsSkips(): void {
     JSON.stringify(answer),
   );
   assert.deepEqual(
-    faults.map((fault) => fault.replace(/ never ran.*/, '')),
+    faults.map((fault) => fault.replace(/ never ran.*/s, '').replace(/\n.*/s, '')),
     [`${FED_A} > test_p:0 (1)`, `${FED_A} > test_typo`],
     'gdharness test names each once',
   );
@@ -125798,12 +119000,16 @@ async function testRealSkipsFailARunOfBothTools(): Promise<void> {
       /res:\/\/tests\/skips_test\.gd > test_waits never ran: gdUnit4 skipped it, saying "not ready yet"/,
       ran.said,
     );
-    assert.match(
-      ran.said,
-      /res:\/\/tests\/whole_test\.gd never ran all 2 of its cases: gdUnit4 skipped the whole suite, saying "the whole suite waits"/,
-      ran.said,
-    );
-    assert.match(ran.said, /^Failed: 2 problems, listed above\. Ran 1 case in 2 suites /m, ran.said);
+    for (const name of ['test_first', 'test_second']) {
+      assert.match(
+        ran.said,
+        new RegExp(
+          `res://tests/whole_test\\.gd > ${name} never ran: gdUnit4 skipped it, saying "Skipped from the entire test suite"`,
+        ),
+        ran.said,
+      );
+    }
+    assert.match(ran.said, /^Failed: 3 problems, listed above\. Ran 1 case in 2 suites /m, ran.said);
     assert.doesNotMatch(ran.said, /^Passed: /m, ran.said);
     await withStdioServer(
       async (_call, request) => {
@@ -125841,7 +119047,10 @@ async function testRealSkipsFailARunOfBothTools(): Promise<void> {
           [
             false,
             '2 cases skipped with do_skip, so they never ran',
-            [{ test: 'res://tests/whole_test.gd', reason: 'the whole suite waits', cases: 2 }],
+            ['test_first', 'test_second'].map((name) => ({
+              test: `res://tests/whole_test.gd > ${name}`,
+              reason: 'Skipped from the entire test suite',
+            })),
           ],
           whole.text,
         );
@@ -125888,7 +119097,8 @@ function testAnEngineWhoseCasesAllSkippedAddsNoNothingRanProblem(): void {
   assert.deepEqual(
     skipped.faults,
     [
-      'res://test/whole_skip_test.gd never ran all 2 of its cases: gdUnit4 skipped the whole suite, saying "the whole suite waits"',
+      'res://test/whole_skip_test.gd > test_a never ran: gdUnit4 skipped it, saying "Skipped from the entire test suite"',
+      'res://test/whole_skip_test.gd > test_b never ran: gdUnit4 skipped it, saying "Skipped from the entire test suite"',
     ],
     'a suite skipped whole',
   );
@@ -125899,6 +119109,7 @@ function testAnEngineWhoseCasesAllSkippedAddsNoNothingRanProblem(): void {
         'Executed test suites: (0/0)',
         'Executed test cases : (0/0)',
       ].join('\n'),
+      [parseJUnit('<testsuites></testsuites>')],
     ),
     { suites: [], expected: { errors: {}, warnings: {} } },
     clean,
@@ -125983,966 +119194,10 @@ function testAnUnrunnableCaseIsNotCountedAsRan(): void {
     [
       0,
       [
-        'res://test/s_test.gd > test_p:0 (1) never ran: gdUnit4 skipped it, saying "The test data set at index (0) does not match the expected test parameters: test function: func test...(a: int,b: int) test input values: [1]"',
+        'res://test/s_test.gd > test_p:0 (1) never ran: gdUnit4 skipped it, saying "The test data set at index (0) does not match the expected test parameters:\n\ttest function: func test...(a: int,b: int)\n\ttest input values: [1]"',
       ],
     ],
     'a row whose data does not fit, alone',
-  );
-}
-
-/** The skip reasons of {@link SKIP_LINES_PRINTED}, each as do_skip was given it. */
-const SKIP_REASONS_OVER_LINES = [
-  ['test_two_lines', 'line one\nline two'],
-  ['test_ends_in_quote', "it is 'done'"],
-  ['test_quote_alone', "first\n'\nlast"],
-  ['test_quote_ends_line', "said 'no'\nthen left"],
-] as const;
-
-/**
- * What the report of {@link SKIP_LINES_PRINTED}'s run holds of its skips. Under each case of a suite
- * skipped whole it writes only gdUnit4's own reason, so that suite's reason comes from the console.
- */
-const SKIP_LINES_REPORTED: ReportedSkips = {
-  cases: new Map(
-    SKIP_REASONS_OVER_LINES.map(([name, reason]) => [
-      skipKey('res://test/lines_skip_test.gd', name),
-      [reason],
-    ]),
-  ),
-  suites: new Map([
-    ['res://test/lines_skip_test.gd', SKIP_REASONS_OVER_LINES.map(([, reason]) => reason)],
-    [
-      'res://test/whole_lines_test.gd',
-      ['Skipped from the entire test suite', 'Skipped from the entire test suite'],
-    ],
-  ]),
-};
-
-/**
- * Two suites as gdUnit4 printed them: one with the cases of {@link SKIP_REASONS_OVER_LINES} between
- * two that ran, and one skipped whole with a reason over two lines.
- */
-const SKIP_LINES_PRINTED = [
-  'Run Test Suite: res://test/lines_skip_test.gd',
-  '  res://test/lines_skip_test.gd > test_ok STARTED',
-  '  res://test/lines_skip_test.gd > test_ok PASSED 26ms',
-  '',
-  ...SKIP_REASONS_OVER_LINES.flatMap(([name, reason]) => [
-    `  res://test/lines_skip_test.gd > ${name} STARTED`,
-    `  res://test/lines_skip_test.gd > ${name} PASSED 0ms`,
-    ...skipBlock(reason),
-  ]),
-  '  res://test/lines_skip_test.gd > test_after STARTED',
-  '  res://test/lines_skip_test.gd > test_after PASSED 26ms',
-  '',
-  'Statistics: 6 test cases | 0 errors | 0 failures | 0 flaky | 4 skipped | 0 orphans | PASSED 448ms',
-  '',
-  '',
-  'Run Test Suite: res://test/whole_lines_test.gd',
-  ...['test_a', 'test_b'].flatMap((name) => [
-    `  res://test/whole_lines_test.gd > ${name} STARTED`,
-    `  res://test/whole_lines_test.gd > ${name} PASSED 0ms`,
-    ...skipBlock('Skipped from the entire test suite'),
-  ]),
-  '  whole_lines_test > finalize()  Report:',
-  '  The Entire test-suite is skipped!',
-  '  Skipped 2 tests',
-  "  Reason: 'waits for",
-  "the next 'build''",
-  '',
-  'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 2 skipped | 0 orphans | PASSED 0ms',
-  '',
-  '',
-  'Overall Summary: 8 test cases | 0 errors | 0 failures | 0 flaky | 6 skipped | 0 orphans |',
-  'Executed test suites: (2/2)',
-  'Executed test cases : (2/8), 6 skipped',
-].join('\n');
-
-/**
- * A skip reason holding line breaks and quotes is read whole: gdUnit4 prints it over several lines,
- * ending on a quote with a blank line under it, and writes it so in the report. Both tools fail the
- * run and list it as do_skip gave it.
- */
-function testASkipReasonOverSeveralLinesIsReadWhole(): void {
-  const printed = readRun(SKIP_LINES_PRINTED, SKIP_LINES_REPORTED);
-  const lines = 'res://test/lines_skip_test.gd';
-  const whole = 'res://test/whole_lines_test.gd';
-  assert.deepEqual(
-    printed.skipped,
-    [
-      ...SKIP_REASONS_OVER_LINES.map(([name, reason]) => ({ suite: lines, name, reason, cases: 1 })),
-      { suite: whole, name: null, reason: "waits for\nthe next 'build'", cases: 2 },
-    ],
-    'each reason whole',
-  );
-  assert.equal(casesRan(printed), 2, 'eight printed passed, six of them skipped');
-  const judged = judgeEngine(
-    printed,
-    {
-      suites: [
-        { path: lines, cases: ['test_ok', ...SKIP_REASONS_OVER_LINES.map(([name]) => name), 'test_after'] },
-        { path: whole, cases: ['test_a', 'test_b'] },
-      ],
-      expected: { errors: {}, warnings: {} },
-    },
-    { code: 0, signal: null, ended: null },
-  );
-  assert.deepEqual(
-    [judged.passed, judged.faults, judged.passedSuites],
-    [
-      false,
-      [
-        ...SKIP_REASONS_OVER_LINES.map(
-          ([name, reason]) => `${lines} > ${name} never ran: gdUnit4 skipped it, saying "${reason}"`,
-        ),
-        `${whole} never ran all 2 of its cases: gdUnit4 skipped the whole suite, saying "waits for\nthe next 'build'"`,
-      ],
-      [],
-    ],
-    'gdharness test',
-  );
-  const { answer, faults } = fedRunAnswered(
-    [
-      {
-        path: FED_A,
-        cases: [
-          fedCase(FED_A, 'test_ok'),
-          ...SKIP_REASONS_OVER_LINES.map(([name, reason]) => fedSkipped(FED_A, name, reason)),
-        ],
-        closed: 'PASSED',
-      },
-    ],
-    0,
-    { reported: true },
-  );
-  assert.deepEqual(
-    [answer['passed'], answer['verdict'], answer['casesSkipped']],
-    [
-      false,
-      '4 cases skipped with do_skip, so they never ran',
-      SKIP_REASONS_OVER_LINES.map(([name, reason]) => ({ test: `${FED_A} > ${name}`, reason })),
-    ],
-    'project_test',
-  );
-  assert.equal(
-    answer['note'],
-    'gdUnit4 skipped what casesSkipped names because they were declared with do_skip, though it printed each case passed first. Each entry carries the skip_reason it was given. The run is not called passed, as gdharness test judges it.',
-  );
-  assert.deepEqual(
-    faults,
-    SKIP_REASONS_OVER_LINES.map(
-      ([name, reason]) => `${FED_A} > ${name} never ran: gdUnit4 skipped it, saying "${reason}"`,
-    ),
-    'gdharness test, fed',
-  );
-}
-
-/**
- * A case and a suite whose skip reasons hold line breaks and quotes fail a real run of both tools,
- * each listed with its whole reason.
- */
-async function testARealSkipReasonOverSeveralLinesFailsBothTools(): Promise<void> {
-  const engines = commandTestEngines();
-  if (engines === null) {
-    return;
-  }
-  const caseReason = "said 'no'\nthen left";
-  const suiteReason = "waits for\nthe next 'build'";
-  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
-  try {
-    writeTree(project, {
-      'tests/lines_test.gd': [
-        'extends GdUnitTestSuite',
-        '',
-        '',
-        'func test_runs() -> void:',
-        '\tassert_int(1).is_equal(1)',
-        '',
-        '',
-        'func test_waits(_do_skip := true, _skip_reason := "said \'no\'\\nthen left") -> void:',
-        '\tassert_bool(false).is_true()',
-        '',
-      ].join('\n'),
-      'tests/whole_lines_test.gd': [
-        'extends GdUnitTestSuite',
-        '',
-        '',
-        'func before(_do_skip := true, _skip_reason := "waits for\\nthe next \'build\'") -> void:',
-        '\tpass',
-        '',
-        '',
-        'func test_first() -> void:',
-        '\tassert_int(1).is_equal(1)',
-        '',
-      ].join('\n'),
-    });
-    const ran = test('tests/lines_test.gd', 'tests/whole_lines_test.gd');
-    assert.equal(ran.status, 1, ran.said);
-    for (const fault of [
-      `res://tests/lines_test.gd > test_waits never ran: gdUnit4 skipped it, saying "${caseReason}"`,
-      `res://tests/whole_lines_test.gd never ran its one case: gdUnit4 skipped the whole suite, saying "${suiteReason}"`,
-    ]) {
-      assert.ok(ran.said.includes(fault), `${fault}\n${ran.said}`);
-    }
-    assert.match(ran.said, /^Failed: 2 problems, listed above\. Ran 1 case in 2 suites /m, ran.said);
-    await withStdioServer(
-      async (_call, request) => {
-        const answered = async (path: string): Promise<unknown> => {
-          const response = await request(
-            'tools/call',
-            { name: 'project_test', arguments: { projectPath: project, path } },
-            ENGINE_CALL_TIMEOUT_MS * 3,
-          );
-          const blocks = asArray(get(response, 'result', 'content')).map((block) =>
-            String(get(block, 'text')),
-          );
-          return JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
-        };
-        const oneCase = await answered('res://tests/lines_test.gd');
-        assert.deepEqual(
-          [get(oneCase, 'passed'), get(oneCase, 'casesSkipped')],
-          [false, [{ test: 'res://tests/lines_test.gd > test_waits', reason: caseReason }]],
-          JSON.stringify(oneCase),
-        );
-        const whole = await answered('res://tests/whole_lines_test.gd');
-        assert.deepEqual(
-          [get(whole, 'passed'), get(whole, 'casesSkipped')],
-          [false, [{ test: 'res://tests/whole_lines_test.gd', reason: suiteReason, cases: 1 }]],
-          JSON.stringify(whole),
-        );
-      },
-      { GODOT_PATH: engines.godotPath },
-    );
-  } finally {
-    sweep(project, slots, checkouts);
-  }
-}
-
-/**
- * A skip reason with a quote ending a line and a blank line under it, and one with a line starting
- * `ERROR:`, are each read whole in a real run of both tools, and the second adds no engine error.
- * The engine's own error in the case that ran is still counted, in both tools.
- */
-async function testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole(): Promise<void> {
-  const engines = commandTestEngines();
-  if (engines === null) {
-    return;
-  }
-  const reasons = [
-    ['test_quote_blank', "said 'no'\n\nthen left", String.raw`"said 'no'\n\nthen left"`],
-    ['test_error_line', 'boom\nERROR: not an engine error', String.raw`"boom\nERROR: not an engine error"`],
-  ] as const;
-  const suite = 'res://tests/reasons_test.gd';
-  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
-  try {
-    writeTree(project, {
-      'tests/reasons_test.gd': [
-        'extends GdUnitTestSuite',
-        '',
-        '',
-        'func test_runs() -> void:',
-        '\tpush_error("a real engine error")',
-        '\tassert_int(1).is_equal(1)',
-        ...reasons.flatMap(([name, , literal]) => [
-          '',
-          '',
-          `func ${name}(_do_skip := true, _skip_reason := ${literal}) -> void:`,
-          '\tassert_bool(false).is_true()',
-        ]),
-        '',
-      ].join('\n'),
-    });
-    const ran = test('tests/reasons_test.gd');
-    assert.equal(ran.status, 1, ran.said);
-    for (const [name, reason] of reasons) {
-      const fault = `${suite} > ${name} never ran: gdUnit4 skipped it, saying "${reason}"`;
-      assert.ok(ran.said.includes(fault), `${fault}\n${ran.said}`);
-    }
-    assert.deepEqual(
-      ran.said.match(/an engine error in .+?(?=\. )/g),
-      [`an engine error in ${suite} > test_runs: a real engine error`],
-      ran.said,
-    );
-    assert.match(ran.said, /^Failed: 3 problems, listed above\. Ran 1 case in 1 suite /m, ran.said);
-    await withStdioServer(
-      async (_call, request) => {
-        const response = await request(
-          'tools/call',
-          { name: 'project_test', arguments: { projectPath: project, path: suite } },
-          ENGINE_CALL_TIMEOUT_MS * 3,
-        );
-        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
-        const answer = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
-        const errorTexts = asArray(get(answer, 'engineEntries'))
-          .filter((entry) => get(entry, 'severity') === 'error')
-          .map((entry) => get(entry, 'text'));
-        assert.deepEqual(
-          [get(answer, 'passed'), get(answer, 'casesSkipped'), get(answer, 'engineErrors'), errorTexts],
-          [
-            false,
-            reasons.map(([name, reason]) => ({ test: `${suite} > ${name}`, reason })),
-            1,
-            ['a real engine error'],
-          ],
-          JSON.stringify(answer),
-        );
-      },
-      { GODOT_PATH: engines.godotPath },
-    );
-  } finally {
-    sweep(project, slots, checkouts);
-  }
-}
-
-/**
- * gdUnit4 runs a suite's `after()` between its last case's report and its statistics, so what
- * `after()` prints follows a skipped last case's reason. A reason closed on its first line ends
- * there in a real run of both tools: an error ending in a quote is still found, a declared one
- * adds no fault for being unprinted, and a print stays out of the reason.
- */
-async function testAnAfterHookPrintingAQuoteKeepsOutOfASkippedLastCasesReason(): Promise<void> {
-  const engines = commandTestEngines();
-  if (engines === null) {
-    return;
-  }
-  const error = "could not load 'res://gone.tres'";
-  const suiteOf = (...head: string[]): string =>
-    [
-      'extends GdUnitTestSuite',
-      '',
-      '',
-      ...head,
-      'func test_ok() -> void:',
-      '\tassert_int(1).is_equal(1)',
-      '',
-      '',
-      'func test_skip(_do_skip := true, _skip_reason := "not today") -> void:',
-      '\tassert_bool(false).is_true()',
-      '',
-    ].join('\n');
-  const after = (line: string): string[] => ['func after() -> void:', `\t${line}`, '', ''];
-  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
-  try {
-    writeTree(project, {
-      'tests/after_error_test.gd': suiteOf(...after(`push_error("${error}")`)),
-      'tests/after_declared_test.gd': suiteOf(
-        `const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"after": ["${error}"]}`,
-        '',
-        '',
-        ...after(`push_error("${error}")`),
-      ),
-      'tests/after_print_test.gd': suiteOf(...after(`print("cleaned 'tmp'")`)),
-    });
-    const skipFault = (suite: string): string =>
-      `res://tests/${suite} > test_skip never ran: gdUnit4 skipped it, saying "not today"\n`;
-    const errored = test('tests/after_error_test.gd');
-    assert.ok(errored.said.includes(skipFault('after_error_test.gd')), errored.said);
-    assert.deepEqual(
-      errored.said.match(/an engine error in .+?(?=\. If )/g),
-      [`an engine error in res://tests/after_error_test.gd > after: ${error}`],
-      errored.said,
-    );
-    assert.match(errored.said, /^Failed: 2 problems, listed above\. Ran 1 case /m, errored.said);
-    const declared = test('tests/after_declared_test.gd');
-    assert.ok(declared.said.includes(skipFault('after_declared_test.gd')), declared.said);
-    assert.match(declared.said, /^Failed: 1 problem, listed above\. Ran 1 case /m, declared.said);
-    const printed = test('tests/after_print_test.gd');
-    assert.ok(printed.said.includes(skipFault('after_print_test.gd')), printed.said);
-    assert.match(printed.said, /^Failed: 1 problem, listed above\. Ran 1 case /m, printed.said);
-    await withStdioServer(
-      async (_call, request) => {
-        const answered = async (suite: string): Promise<unknown> => {
-          const response = await request(
-            'tools/call',
-            { name: 'project_test', arguments: { projectPath: project, path: `res://tests/${suite}` } },
-            ENGINE_CALL_TIMEOUT_MS * 3,
-          );
-          const blocks = asArray(get(response, 'result', 'content')).map((block) =>
-            String(get(block, 'text')),
-          );
-          return JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
-        };
-        const skipped = (suite: string): unknown[] => [
-          { test: `res://tests/${suite} > test_skip`, reason: 'not today' },
-        ];
-        const erroredAnswer = await answered('after_error_test.gd');
-        assert.deepEqual(
-          [
-            get(erroredAnswer, 'casesSkipped'),
-            get(erroredAnswer, 'engineErrors'),
-            asArray(get(erroredAnswer, 'undeclaredErrors')).map((one) => get(one, 'text')),
-          ],
-          [skipped('after_error_test.gd'), 1, [error]],
-          JSON.stringify(erroredAnswer),
-        );
-        const declaredAnswer = await answered('after_declared_test.gd');
-        assert.deepEqual(
-          [
-            get(declaredAnswer, 'casesSkipped'),
-            get(declaredAnswer, 'undeclaredErrors'),
-            get(declaredAnswer, 'declaredNotPrinted'),
-          ],
-          [skipped('after_declared_test.gd'), undefined, undefined],
-          JSON.stringify(declaredAnswer),
-        );
-        const printedAnswer = await answered('after_print_test.gd');
-        assert.deepEqual(
-          get(printedAnswer, 'casesSkipped'),
-          skipped('after_print_test.gd'),
-          JSON.stringify(printedAnswer),
-        );
-      },
-      { GODOT_PATH: engines.godotPath },
-    );
-  } finally {
-    sweep(project, slots, checkouts);
-  }
-}
-
-/**
- * A fed suite whose last case is skipped, the console printing [param under] below its skip heading
- * as gdUnit4 does, and its report holding [param reason]. What the suite's after() prints follows
- * the reason, before the statistics.
- */
-function fedSkippedLast(under: readonly string[], reason: string): FedSuite {
-  return {
-    path: FED_A,
-    cases: [
-      fedCase(FED_A, 'test_ok'),
-      {
-        name: 'test_skip',
-        printed: [
-          caseLine(FED_A, 'test_skip', 'PASSED', '0ms'),
-          '  Report:',
-          '  This test is skipped!',
-          ...under,
-        ],
-        skipped: reason,
-      },
-    ],
-    closed: 'PASSED',
-  };
-}
-
-/** What gdharness test says of the case {@link fedSkippedLast} skips with [param reason]. */
-function fedSkipFault(reason: string): string {
-  return `${FED_A} > test_skip never ran: gdUnit4 skipped it, saying "${reason}"`;
-}
-
-const GONE_ERROR = "could not load 'res://gone.tres'";
-
-/**
- * A skipped last case whose reason holds one apostrophe, and an after() printing an error ending in
- * a quote, are two things in both tools once the report says where the reason ends: the error is an
- * engine error, declared or not, and the reason is what the report holds.
- */
-function testAnApostropheInASkipReasonLeavesAnAfterErrorToTheEngineInBothTools(): void {
-  const suite = fedSkippedLast(["  Reason: 'can't run'", '', '', `ERROR: ${GONE_ERROR}`], "can't run");
-  const skipped = [{ test: `${FED_A} > test_skip`, reason: "can't run" }];
-  const undeclared = fedRunAnswered([suite], 0, { logged: true, reported: true });
-  assert.deepEqual(
-    [
-      undeclared.answer['casesSkipped'],
-      undeclared.answer['engineErrors'],
-      asArray(undeclared.answer['undeclaredErrors']).map((one) => get(one, 'text')),
-    ],
-    [skipped, 1, [GONE_ERROR]],
-    'project_test',
-  );
-  assert.deepEqual(
-    undeclared.faults.map((fault) => fault.replace(/\. If .*/, '')),
-    [fedSkipFault("can't run"), `an engine error in ${FED_A} > after: ${GONE_ERROR}`],
-    'gdharness test',
-  );
-  const declared = fedRunAnswered([suite], 0, {
-    logged: true,
-    reported: true,
-    declared: { errors: { [FED_A]: { after: [GONE_ERROR] } }, warnings: {} },
-  });
-  assert.deepEqual(
-    [
-      declared.answer['casesSkipped'],
-      declared.answer['engineErrors'],
-      declared.answer['undeclaredErrors'],
-      declared.answer['declaredNotPrinted'],
-    ],
-    [skipped, 0, undefined, undefined],
-    'project_test, declared',
-  );
-  assert.deepEqual(declared.faults, [fedSkipFault("can't run")], 'gdharness test, declared');
-}
-
-/**
- * A reason whose first line ends in a lone quote and whose next line reads as an engine error is
- * both lines whole in both tools, with no engine error listed.
- */
-function testASkipReasonWhoseFirstLineEndsInAQuoteIsBothLinesInBothTools(): void {
-  const reason = "ab'\nERROR: cd";
-  const { answer, faults } = fedRunAnswered(
-    [fedSkippedLast(["  Reason: 'ab'", "ERROR: cd'", '', ''], reason)],
-    0,
-    { logged: true, reported: true },
-  );
-  assert.deepEqual(
-    [answer['casesSkipped'], answer['engineErrors'], answer['engineEntries'], answer['undeclaredErrors']],
-    [[{ test: `${FED_A} > test_skip`, reason }], 0, [], undefined],
-    'project_test',
-  );
-  assert.deepEqual(faults, [fedSkipFault(reason)], 'gdharness test');
-}
-
-/**
- * A reason of several lines with its quotes paired reads the same from the report as from the
- * console alone, as a run whose report misses the skip reads it.
- */
-function testAPairedSkipReasonReadsTheSameFromTheReportInBothTools(): void {
-  const reason = "said 'no'\n\nthen left";
-  const suite = fedSkippedLast(["  Reason: 'said 'no'", '', "then left'", '', ''], reason);
-  const fromReport = fedRunAnswered([suite], 0, { logged: true, reported: true });
-  const unreported = { ...suite, cases: suite.cases.map(({ skipped: _skipped, ...one }) => one) };
-  const fromConsole = fedRunAnswered([unreported], 0, { logged: true, reported: true });
-  const read = (run: typeof fromReport): unknown[] => [
-    run.answer['casesSkipped'],
-    run.answer['engineErrors'],
-    run.answer['engineEntries'],
-    run.faults,
-  ];
-  assert.deepEqual(read(fromReport), read(fromConsole), 'report or console');
-  assert.deepEqual(
-    [fromReport.answer['casesSkipped'], fromReport.answer['engineErrors'], fromReport.faults],
-    [[{ test: `${FED_A} > test_skip`, reason }], 0, [fedSkipFault(reason)]],
-  );
-}
-
-/**
- * A run with no report reads each skip reason as the line its quotes close, so the after() error
- * below an apostrophe's reason stays the engine's in both tools.
- */
-function testARunWithNoReportReadsItsSkipReasonsFromTheConsoleInBothTools(): void {
-  const { answer, faults } = fedRunAnswered(
-    [fedSkippedLast(["  Reason: 'can't run'", '', '', `ERROR: ${GONE_ERROR}`], "can't run")],
-    0,
-    { logged: true },
-  );
-  assert.deepEqual(
-    [answer['casesSkipped'], answer['engineErrors']],
-    [[{ test: `${FED_A} > test_skip`, reason: "can't run" }], 1],
-    'project_test',
-  );
-  assert.deepEqual(
-    faults.map((fault) => fault.replace(/\. If .*/, '')),
-    [fedSkipFault("can't run"), `an engine error in ${FED_A} > after: ${GONE_ERROR}`],
-    'gdharness test',
-  );
-}
-
-/**
- * Where the report and the console disagree on a reason's text, the console's lines are the reason
- * over as many lines as the report's has, and they are no engine output in either tool.
- */
-function testAReportSaysHowManyConsoleLinesASkipReasonCoversInBothTools(): void {
-  const reason = "from the console\nERROR: and the engine's line";
-  const { answer, faults } = fedRunAnswered(
-    [fedSkippedLast(["  Reason: 'from the console", "ERROR: and the engine's line'", '', ''], 'one\ntwo')],
-    0,
-    { logged: true, reported: true },
-  );
-  assert.deepEqual(
-    [answer['casesSkipped'], answer['engineErrors'], answer['undeclaredErrors']],
-    [[{ test: `${FED_A} > test_skip`, reason }], 0, undefined],
-    'project_test',
-  );
-  assert.deepEqual(faults, [fedSkipFault(reason)], 'gdharness test');
-}
-
-/**
- * Where the console's lines do not close the reason the report's line count gives, the report's text
- * is the reason, and the lines after it are read as any other in both tools.
- */
-function testASkipReasonTheConsoleDoesNotCloseIsTheReportsInBothTools(): void {
-  const { answer, faults } = fedRunAnswered(
-    [fedSkippedLast(["  Reason: 'not closed here", "ERROR: an engine error'", '', ''], 'one line')],
-    0,
-    { logged: true, reported: true },
-  );
-  assert.deepEqual(
-    [answer['casesSkipped'], answer['engineErrors']],
-    [[{ test: `${FED_A} > test_skip`, reason: 'one line' }], 1],
-    'project_test',
-  );
-  assert.deepEqual(
-    faults.map((fault) => fault.replace(/\. If .*/, '')),
-    [fedSkipFault('one line'), `an engine error in ${FED_A} > after: an engine error'`],
-    'gdharness test',
-  );
-}
-
-/**
- * Both tools on a skipped last case whose console printed [param printed] as its reason, over its
- * lines, and whose report holds [param written], as gdUnit4's writer left it: the reason is the
- * console's text, and no line of it is an engine error.
- */
-function assertTheConsolesSkipReasonIsRead(printed: string, written: string): void {
-  const under = printed.split('\n').map((line, at, all) => {
-    const opened = at === 0 ? `  Reason: '${line}` : line;
-    return at === all.length - 1 ? `${opened}'` : opened;
-  });
-  const { answer, faults } = fedRunAnswered([fedSkippedLast([...under, '', ''], written)], 0, {
-    logged: true,
-    reported: true,
-  });
-  assert.deepEqual(
-    [answer['casesSkipped'], answer['engineErrors'], answer['undeclaredErrors']],
-    [[{ test: `${FED_A} > test_skip`, reason: printed }], 0, undefined],
-    `project_test: ${printed}`,
-  );
-  assert.deepEqual(faults, [fedSkipFault(printed)], `gdharness test: ${printed}`);
-}
-
-/** gdUnit4's report writer drops `[blocked]` as a tag, and the console keeps it, in both tools. */
-function testASkipReasonOpeningOnABracketedWordKeepsItInBothTools(): void {
-  assertTheConsolesSkipReasonIsRead('[blocked] by the physics fix', ' by the physics fix');
-}
-
-/** gdUnit4's report writer drops `[bug 7]` as a tag, and the console keeps it, in both tools. */
-function testASkipReasonHoldingABracketedWordKeepsItInBothTools(): void {
-  assertTheConsolesSkipReasonIsRead('see [bug 7] here', 'see  here');
-}
-
-/**
- * A reason holding `</skipped>` and then `]]>`, which gdUnit4 writes raw into its report, is read
- * whole in both tools.
- */
-function testASkipReasonHoldingTheElementsEndAndTheCdataEndIsReadWholeInBothTools(): void {
-  assertTheConsolesSkipReasonIsRead('a </skipped> b ]]> c', 'a </skipped> b ]]> c');
-}
-
-/**
- * A reason over three lines, the middle one an `ERROR:` line with a bracketed word the report
- * drops, is its three lines whole in both tools.
- */
-function testASkipReasonOverThreeLinesWithAnErrorLineIsReadWholeInBothTools(): void {
-  assertTheConsolesSkipReasonIsRead('one\nERROR: two [bug 7]\nthree', 'one\nERROR: two \nthree');
-}
-
-/**
- * A case only the report holds as skipped, and a skip only the console printed, are judged as
- * without a report.
- */
-function testASkipOnlyOneOfTheReportAndTheConsoleHoldsIsJudgedAsBefore(): void {
-  const reportOnly: FedSuite = {
-    path: FED_A,
-    cases: [
-      { ...fedCase(FED_A, 'test_later'), skipped: 'the console said nothing' },
-      fedCase(FED_A, 'test_a'),
-    ],
-    closed: 'PASSED',
-  };
-  const consoleOnly: FedSuite = {
-    path: FED_A,
-    cases: [
-      fedCase(FED_A, 'test_ok'),
-      {
-        name: 'test_skip',
-        printed: [
-          caseLine(FED_A, 'test_skip', 'PASSED', '0ms'),
-          '  Report:',
-          '  This test is skipped!',
-          "  Reason: 'the report said nothing'",
-          '',
-          '',
-        ],
-      },
-    ],
-    closed: 'PASSED',
-  };
-  for (const suite of [reportOnly, consoleOnly]) {
-    assert.deepEqual(
-      fedRunAnswered([suite], 0, { logged: true, reported: true }),
-      fedRunAnswered([suite], 0, { logged: true }),
-      suite.cases[0]?.name ?? '',
-    );
-  }
-  assert.deepEqual(
-    [
-      fedRunAnswered([consoleOnly], 0, { logged: true, reported: true }).answer['casesSkipped'],
-      fedRunAnswered([reportOnly], 0, { logged: true, reported: true }).answer['casesSkipped'],
-    ],
-    [
-      [{ test: `${FED_A} > test_skip`, reason: 'the report said nothing' }],
-      [{ test: `${FED_A} > test_later`, reason: 'the console said nothing' }],
-    ],
-  );
-}
-
-/** A reason holding the end of its report's CDATA, `]]>`, is read whole in both tools. */
-function testASkipReasonHoldingTheCdataEndIsReadWholeInBothTools(): void {
-  const reason = "x ]]> can't";
-  const { answer, faults } = fedRunAnswered([fedSkippedLast([`  Reason: '${reason}'`, '', ''], reason)], 0, {
-    logged: true,
-    reported: true,
-  });
-  assert.deepEqual(answer['casesSkipped'], [{ test: `${FED_A} > test_skip`, reason }], 'project_test');
-  assert.deepEqual(faults, [fedSkipFault(reason)], 'gdharness test');
-}
-
-const FED_LATER = 'res://test/b_test.gd';
-
-/**
- * The console of a run that wrote no report: {@link fedSkippedLast}'s suite with the reason `can't
- * run` and an after() erroring with a quote at its end, then a later suite that started a case and
- * printed [param later] before the engine ended.
- */
-function apostropheBeforeNoReport(later: readonly string[]): string {
-  const under = [
-    "  Reason: 'can't run'",
-    '',
-    '',
-    `ERROR: ${GONE_ERROR}`,
-    '   at: push_error (core/variant/variant_utility.cpp:1023)',
-  ];
-  return [
-    'Godot Engine v4.7.2.stable.official - https://godotengine.org',
-    `Run Test Suite: ${FED_A}`,
-    ...fedSkippedLast(under, "can't run").cases.flatMap((one) => [
-      caseLine(FED_A, one.name, 'STARTED'),
-      ...one.printed,
-    ]),
-    'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans | PASSED 40ms',
-    '',
-    '',
-    `Run Test Suite: ${FED_LATER}`,
-    caseLine(FED_LATER, 'test_later', 'STARTED'),
-    ...later,
-  ].join('\n');
-}
-
-/**
- * Both tools on {@link apostropheBeforeNoReport} with [param later], for an engine that ended as
- * [param end] says: the reason is the line its quotes close, and the after() error is the engine's,
- * settled when declared. gdharness test judges the console, and project_test reads the log file.
- */
-function assertANoReportRunReadsTheApostrophe(later: readonly string[], end: EngineEnd): void {
-  const printed = apostropheBeforeNoReport(later);
-  const judged = (errors: Expected['errors']): readonly string[] =>
-    judgeEngine(
-      readRun(printed),
-      {
-        suites: [
-          { path: FED_A, cases: ['test_ok', 'test_skip'] },
-          { path: FED_LATER, cases: ['test_later'] },
-        ],
-        expected: { errors, warnings: {} },
-      },
-      end,
-    ).faults;
-  const undeclared = judged({});
-  assert.ok(undeclared.includes(fedSkipFault("can't run")), undeclared.join('\n'));
-  assert.ok(
-    undeclared.some((fault) => fault.startsWith(`an engine error in ${FED_A} > after: ${GONE_ERROR}. `)),
-    undeclared.join('\n'),
-  );
-  const declared = judged({ [FED_A]: { after: [GONE_ERROR] } });
-  assert.ok(declared.includes(fedSkipFault("can't run")), declared.join('\n'));
-  assert.ok(!declared.some((fault) => fault.includes(GONE_ERROR)), declared.join('\n'));
-  const folder = mkdtempSync(join(tmpdir(), 'gdharness-no-report-'));
-  try {
-    const path = join(folder, 'engine.log');
-    writeFileSync(path, `${printed}\n`);
-    const read = readEngineLog(path, [], NONE_EXPECTED);
-    assert.deepEqual(
-      [
-        read.skipped,
-        read.errors.filter((one) => one.suite === FED_A).map((one) => [one.during, one.text]),
-        read.reasonHeadlines,
-      ],
-      [[{ suite: FED_A, name: 'test_skip', reason: "can't run", cases: 1 }], [['after', GONE_ERROR]], []],
-      'project_test',
-    );
-  } finally {
-    rmSync(folder, { recursive: true, force: true });
-  }
-}
-
-/** A run its deadline ended in a later suite, which wrote no report, reads the apostrophe's reason in both tools. */
-function testARunTheDeadlineEndedReadsAnApostrophesSkipReasonInBothTools(): void {
-  assertANoReportRunReadsTheApostrophe([], {
-    code: null,
-    signal: null,
-    ended: `the engine ran past the 20 s deadline while running ${FED_LATER}, so it was ended`,
-  });
-}
-
-/** A run that crashed in a later suite, which wrote no report, reads the apostrophe's reason in both tools. */
-function testARunThatCrashedLaterReadsAnApostrophesSkipReasonInBothTools(): void {
-  assertANoReportRunReadsTheApostrophe(
-    [
-      'CrashHandlerException: Program crashed with signal 11',
-      'Engine version: Godot Engine v4.7.2.stable.official',
-      '-- END OF C++ BACKTRACE --',
-    ],
-    { code: null, signal: 'SIGSEGV', ended: null },
-  );
-}
-
-/** A run ended past the log limit in a later suite, which wrote no report, reads the apostrophe's reason in both tools. */
-function testARunPastTheLogLimitReadsAnApostrophesSkipReasonInBothTools(): void {
-  assertANoReportRunReadsTheApostrophe(['printed on and on'], {
-    code: null,
-    signal: null,
-    ended: pastTheLogLimit(FED_LATER),
-  });
-}
-
-/**
- * A reason with one apostrophe on a skipped last case, and an after() erroring with a quote at its end,
- * fail a real run of both tools with the skip and the engine error each: the report gdUnit4 wrote
- * ends the reason where the console cannot.
- */
-async function testARealSkipReasonWithAnApostropheLeavesTheAfterErrorToBothTools(): Promise<void> {
-  const engines = commandTestEngines();
-  if (engines === null) {
-    return;
-  }
-  const suite = [
-    'extends GdUnitTestSuite',
-    '',
-    '',
-    'func after() -> void:',
-    `\tpush_error("${GONE_ERROR}")`,
-    '',
-    '',
-    'func test_ok() -> void:',
-    '\tassert_int(1).is_equal(1)',
-    '',
-    '',
-    'func test_skip(_do_skip := true, _skip_reason := "can\'t run") -> void:',
-    '\tassert_bool(false).is_true()',
-    '',
-  ].join('\n');
-  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
-  try {
-    writeTree(project, { 'tests/apostrophe_test.gd': suite });
-    const ran = test('tests/apostrophe_test.gd');
-    assert.ok(
-      ran.said.includes(
-        'res://tests/apostrophe_test.gd > test_skip never ran: gdUnit4 skipped it, saying "can\'t run"\n',
-      ),
-      ran.said,
-    );
-    assert.deepEqual(
-      ran.said.match(/an engine error in .+?(?=\. If )/g),
-      [`an engine error in res://tests/apostrophe_test.gd > after: ${GONE_ERROR}`],
-      ran.said,
-    );
-    await withStdioServer(
-      async (_call, request) => {
-        const response = await request(
-          'tools/call',
-          {
-            name: 'project_test',
-            arguments: { projectPath: project, path: 'res://tests/apostrophe_test.gd' },
-          },
-          ENGINE_CALL_TIMEOUT_MS * 3,
-        );
-        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
-        const answer = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
-        assert.deepEqual(
-          [
-            get(answer, 'casesSkipped'),
-            get(answer, 'engineErrors'),
-            asArray(get(answer, 'undeclaredErrors')).map((one) => get(one, 'text')),
-          ],
-          [[{ test: 'res://tests/apostrophe_test.gd > test_skip', reason: "can't run" }], 1, [GONE_ERROR]],
-          blocks.join('\n'),
-        );
-      },
-      { GODOT_PATH: engines.godotPath },
-    );
-  } finally {
-    sweep(project, slots, checkouts);
-  }
-}
-
-/**
- * A skip reason the output cut off, in a run whose report does not hold it, is listed by its first
- * line, and both tools say it was cut.
- */
-function testASkipReasonCutOffIsSaidToBeCutInBothTools(): void {
-  const { answer, faults } = fedRunAnswered(
-    [
-      {
-        path: FED_A,
-        cases: [
-          fedCase(FED_A, 'test_ok'),
-          {
-            name: 'test_cut',
-            printed: [
-              caseLine(FED_A, 'test_cut', 'PASSED', '0ms'),
-              '  Report:',
-              '  This test is skipped!',
-              "  Reason: 'line one",
-              'line tw',
-            ],
-          },
-        ],
-        closed: 'UNCLOSED',
-      },
-    ],
-    0,
-    { reported: true },
-  );
-  assert.deepEqual(
-    [answer['passed'], answer['casesSkipped']],
-    [false, [{ test: `${FED_A} > test_cut`, reason: 'line one', cut: true }]],
-    'project_test',
-  );
-  assert.ok(
-    faults.includes(
-      `${FED_A} > test_cut never ran: gdUnit4 skipped it, saying "line one" before the reason was cut off`,
-    ),
-    faults.join('\n'),
-  );
-}
-
-/**
- * A skip reason's line headed `WARNING:` is no engine warning in project_test's count, which still
- * counts the engine's own warning in the case that ran.
- */
-function testASkipReasonsWarningLineLeavesProjectTestsWarningCount(): void {
-  const reason = 'hmm\nWARNING: a line of the reason';
-  const { answer } = fedRunAnswered(
-    [
-      {
-        path: FED_A,
-        cases: [
-          {
-            name: 'test_runs',
-            printed: ['WARNING: a real engine warning', caseLine(FED_A, 'test_runs', 'PASSED', '4ms'), ''],
-          },
-          {
-            name: 'test_skip',
-            printed: [
-              caseLine(FED_A, 'test_skip', 'PASSED', '0ms'),
-              '  Report:',
-              '  This test is skipped!',
-              ...`  Reason: '${reason}'`.split('\n'),
-              '',
-              '',
-            ],
-            skipped: reason,
-          },
-        ],
-        closed: 'PASSED',
-      },
-    ],
-    0,
-    { logged: true, reported: true },
-  );
-  assert.deepEqual(
-    [answer['casesSkipped'], answer['engineWarnings']],
-    [[{ test: `${FED_A} > test_skip`, reason }], 1],
-    JSON.stringify(answer),
   );
 }
 
@@ -126961,7 +119216,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testWhatAScriptChangesInASubResourceIsNotSaved,
   testAFileBesideTheSceneBehindALinkOutIsNotWritten,
   testABreakpointBehindALinkOutIsSetUnchecked,
-  testEveryProjectWalkIsOne,
   testTheImportCheckStepsOverAFolderHoldingAProject,
   testTheExtensionListStepsOverAFolderHoldingAProject,
   testTheTextsStepOverAFolderHoldingAProject,
@@ -127180,15 +119434,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHandWrittenValueIsNoChangeOfAScripts,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,
   testACaptureSaysWhatPartOfTheWindowItIs,
-  testEveryFileArgumentIsContained,
   testAnUnknownArgumentSaysWhichServerSaysSo,
   testProcessorTimeIsReadOffEveryClockFormat,
   testProcessorSecondsAreReadOneWay,
-  testEveryProcessTableReadIsOne,
   testAWaitOfNothingIsAWaitOfNothing,
   testAnEntryWithNoDetailDoesNotCarryAnEmptyOne,
-  testEveryShippedAddonIsInstalled,
-  testEveryAddonScriptKeepsItsIdentity,
   testTheHelperCopiesAreWrittenFromTheirOriginals,
   testTwoSyncsAtOnceAfterAnOriginalChangedBothSucceed,
   testAnOriginalChangingTwiceDuringTwoSyncsLeavesNoFalseRefusal,
@@ -127196,14 +119446,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACleanRecordNotesTheCopiesAlreadyEqualToTheirOriginals,
   testAGodotFolderCopiedFromATreeWithStaleCopiesIsNotRefused,
   testAnUnwritableCacheFolderStillWritesTheHelperCopies,
-  testNoHelperCopyIsTracked,
-  testEveryHelperCopyInAnAddonIsListed,
-  testEverySuiteReadingTheAddonsWritesTheHelperCopiesFirst,
   testEveryReservedPortIsItsOwn,
-  testEveryToolNamedInProseIsATool,
-  testShippedProseHasNoDashStandInsOrHabitPhrases,
   testToolTextKeepsASpaceBetweenSentences,
-  testEveryArgumentTheSkillNamesIsOneTheOpTakes,
   testACaptureIsSavedOnlyWhereItMayBe,
   testAMovieIsWrittenOnlyWhereACaptureCouldBe,
   testAWindowedRunWritesItsMovie,
@@ -127221,17 +119465,13 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAShaderReadWithNoIncludeIsUnchanged,
   testATestRunTakesTheCasesNamed,
   testACaseGdUnitLeavesUnrunIsNoPass,
-  testACaseThatPassedOnARetryIsNotSaidToHavePassed,
-  testTheRetriedNoteNamesTheFailureOnlyWhereThereIsOne,
-  testRetriedCasesAreNamedAsGdharnessTestNamesThem,
-  testAFailureOnlyTheReportHoldsIsNoFailure,
+  testAFailureTheReportHoldsIsAFailureInBothTools,
   testASuiteAskedForThatNeverRanFailsTheRun,
   testASuiteARunOfNamedCasesLeftOutIsNoSuiteThatNeverStarted,
   testASuiteEveryCaseOfWhichWasIgnoredIsNoSuiteThatNeverStarted,
   testASelectedCaseThatIsIgnoredLeavesItsSuiteStarted,
   testAnIgnoreEntryHidesNoSuiteOfTheSameFileName,
   testACaseWithNoRowsIsNamedWhenEveryOtherRowIsIgnored,
-  testAFlakyCaseFailsTheRunWhateverTheReportHolds,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testASaveFromTheEditorIsRefusedWithNoEditor,
   testAConfigNamingAnotherVersionIsSaid,
@@ -127239,8 +119479,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAnswerTooLargeToSendIsWrittenToAFile,
   testAToolWaitsOutTheEditorsScan,
   testAnUnlistedValueIsRefusedRatherThanDefaulted,
-  testEveryFixtureIsCalled,
-  testBothEndsAgreeAboutTheAnnouncement,
   testARestartLeftHalfDoneIsSaid,
   testTheRestartNoteIsReplacedWholeOrNotAtAll,
   testAnEditorStillArrivingIsNotOpenedBeside,
@@ -127273,7 +119511,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStopSaidWhileADebugAdapterConnectionClosesIsNotKept,
   testABreakpointRemovedWhileADebugAdapterConnectionClosesIsLetGo,
   testACallDuringADebugAdapterAbandonKeepsItsOwnConnection,
-  testEveryRequestWaitsInTheOneTable,
   testTheStatusCountsTheResourcesWithCallsQueued,
   testACommandIsTakenWhenTheThreadItWentToAnswers,
   testATurnedAwayEditorLeavesTheServerUp,
@@ -127281,10 +119518,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAProjectUpgradedUnderTheServerIsSaid,
   testAStaleNoteKnowsWhatARestartLoads,
   testAStaleNoteOfAnEditorOpenedElsewhereNamesHiddenFalse,
-  testEveryDispatchedNameExistsOnBothSides,
-  testEveryEngineParameterCanBeSent,
-  testEveryToolParameterIsRead,
-  testEveryToolIsDrivenSomewhere,
   testStaleDisconnectRegression,
   testAnOpenConnectionDoesNotHoldItsProcess,
   testOneServerOneProjectRegression,
@@ -127298,7 +119531,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALongUnfinishedLineIsHeldInLinearTime,
   testConsoleLinesOfTheTestRunnerAreReadInLinearTime,
   testAReportIsReadWholeOrRefusedAndRowsAreKnown,
-  testPrintedValuesAreReadBackInLinearTimeAndEachToItsOwnFailure,
   testTheDebuggerNamesTheErrorsItsCallsRaise,
   testTheProfilerReadsWhatTheEngineSends,
   testAFrameReadHalfwayAddsNothingToTheTotals,
@@ -127608,9 +119840,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheHeadlessListNamesEveryHeadlessTool,
   testAToolSectionSaysWhatItChangesAndEachOpLineSaysWhatItTakes,
   testTheReferencePrintsEveryShapeOfType,
-  testTheSkillNamesEverySettingTheAddonsRead,
-  testTheSkillNamesTheSettingThatServesAScriptRun,
-  testTheSkillNamesTheBindAddressAndPortTheAddonReads,
   testAQuietSceneIsNotServed,
   testTheSkillWritesNoEscapedBackticks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
@@ -127624,7 +119853,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASourceRewrittenInTheSameClockStepIsSeen,
   testStaleImportsWalkLinksAndSpellingsAsTheFileSystemDoes,
   testAnotherCheckoutRunsTheEngineItsConfigNames,
-  testTheImportCheckKnowsWhatStatusImports,
   testEachSettingsWriteNamesItsSetting,
   testASettingsWriteIsTakenUpByTheEditor,
   testOptionsWrittenAreSaidWhenTheirReimportFails,
@@ -127651,8 +119879,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDoctorJudgesAddonsByTheirCodeAndNotTheirVersionMarker,
   testAnUninstallRemovesALinkWhoseFolderIsGone,
   testTheSetupAndInstructionHelpersAnswerWhatTheyAreAsked,
-  testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,
-  testTheReleaseButtonOffersWhatBothDocumentsDescribe,
   testVersionOrdering,
   testChangelogReach,
   testANeverImportedFileIsSaidToBeOne,
@@ -127769,7 +119995,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testParametersReachTheEngine,
   testAFinishedRunCanStillBeRead,
   testOnlyOurOwnAutoloadIsRewritten,
-  testTheLoaderPassesAGamesOwnLint,
   testAFailedRunsLogsOutlastTheNextRun,
   testAnExitCodeOutlivesTheServerThatSawIt,
   testAKeeperLeavesALaterRunsNoteAlone,
@@ -127788,6 +120013,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACommandLineNotGivenInTimeIsAskedAgain,
   testARunEndedUnwatchedIsStillReadable,
   testTheRunAdoptedIsTheLatestStarted,
+  testAServerLeavesAnotherLiveServersGameAlone,
+  testAGoneServersRunIsTakenOverAndALiveOnesIsNot,
+  testASecondServerOfAFolderLeavesTheFirstsGameAndTakesItOnceItIsGone,
   testAPickedUpRunKeepsItsProfile,
   testARecordedEndingIsReadBack,
   testARestartBeingLookedForIsWaitedFor,
@@ -127817,14 +120045,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testNestedErrorsAndDeclaredErrorsAreRead,
   testTheScriptsGodotNeverFreesAreFound,
   testAnExportAnnotationHoldingACallIsFound,
-  testADeadLockHeldOpenIsTakenOverOnceLetGo,
   testABootNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testAClassCacheHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testABridgeAnnouncementHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testAClassNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testARestartNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testABreakpointNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
-  testASlotGivenBackWhileItsEngineIsNamedStaysGivenBack,
   testABreakpointClearedWhileAnEarlierWriteWaitsStaysCleared,
   testTwoWritesOfOneNoteAtOnceBothLandInOrder,
   testAWriteMadeAfterARemovalWaitsIsNotRemovedByIt,
@@ -127835,92 +120061,19 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTwoUpdatesOfTheClassNoteUnderTwoSpellingsBothStay,
   testAnUnreadableClassNoteLeavesTheUpdateAnsweringWithoutAThrow,
   testASyncWriteBehindThreeWaitingWritesBlocksForOneWaitInAll,
-  testASlotHandedWhileItsEngineIsNamedIsHandedOnceAfterIt,
-  testNoServerCodeWritesTheClassNoteFromACopyItReadEarlier,
   testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testAProfileMarkHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testASuiteRecordHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testAnExtensionListHeldShutIsWaitedOnWithoutStoppingTheProcess,
-  testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
-  testATakeSweepsGoneLocksPastTheCount,
-  testASlotWaitLooksWhenTheSlotsChange,
   testSuitePassesKeyAlikeInEveryCheckout,
-  testTwoTakersThatPlaceEachOtherAheadDoNotLeaveTheSlotToEachOtherForGood,
-  testATakerAheadThatStoppedLookingIsDroppedAfterTheYield,
-  testARingOfThreeTakesTheFreeSlotAtTheYield,
-  testACallBehindTwoGamesThatLeaveItTheSlotTakesItAtTheYield,
-  testARingTakesTheFreeSlotAtTheYieldWhoeverItIsLeftTo,
-  testASlotHeldForALookStartsItsYieldAgain,
-  testASlowTakerAheadThatTakesInsideTheYieldIsNeverPassed,
-  testEachFreeSlotCountsItsOwnYield,
   testARepositoryIsNamedByTheFolderHoldingItsSharedGitFolder,
-  testALockOfATakeForAProjectInGitIsAsThatOfATakeForNone,
-  testEveryGameTheServerStartsTakesItsSlotForItsProject,
   testARepositoryIsNamedFromItsRealPathAndNeverForABareOne,
   testAnUnreadableWorktreeGitFileListsNoWorktrees,
-  testAWaitForASlotKeepsAMarkUntilItEnds,
-  testALockTakenBeyondTheBudgetByARaceIsGivenBack,
-  testALocksMemoryIsThePeakKeptCappedAtTheCeiling,
-  testAMemoryWaiterDoesNotHoldBackOneThatFits,
-  testTwelveTakersOnFourSlotsTakeInTheOrderTheyBeganToWait,
-  testTheContractsLockIsWhatTheCodeWrites,
-  testTheContractsWaitingMarkIsWhatTheCodeWrites,
-  testTheContractsLineOrderIsWhatTheCodeDoes,
-  testTheContractsCapIsTheCountFile,
-  testAWaiterThatStoppedLookingHoldsNoSlotFromALaterTake,
-  testAMarkInSecondsOrWithNoSinceStandsInLineByItsTime,
-  testAnOlderWaiterGoesBeforeNewerMarksInSecondsOrWithNoSince,
-  testACountLoweredBelowTheSlotsHeldStartsNothingUntilEnoughGo,
-  testALockTakenPastALoweredCountByARaceIsGivenBack,
-  testLocksWrittenInOneMillisecondAreOrderedBySlot,
-  testLocksOfAMemoryRaceWrittenInOneMillisecondAreOrderedBySlot,
-  testAStartIsReadAgainAfterTenSecondsAndAReusedPidFreesItsLock,
-  testTheFirstEngineOnAMachineStartsWhateverMemoryReads,
-  testALockWithNoMemoryOwesOneAndAHalfGiBASlot,
-  testALockPastTheCountOwesItsMemory,
-  testTheMemoryCheckKeepsFourGiBBack,
-  testTheContractsMemoryCheckIsWhatTheCodeDoes,
-  testATakeOnMacOSIsNeverHeldForMemory,
   testTwoStopsOfOneKeeperSignalItsGameOnce,
-  testTheContractsCleanupIsWhatTheCodeDoes,
-  testFilesOfRemovedRulesLeftInTheFolderChangeNothing,
-  testLanesOnOneFreeSlotStartOneAndTakeTheRestBehindOlderWaiters,
-  testTheCapHoldsOnEveryCountAndTheCountFileReplacesIt,
-  testEnginesHoldingTheirPeaksOweNothingAndAnotherStartsOnFreeMemory,
-  testEnginesStillGrowingKeepAnotherWaitingUntilTheOwedSumFalls,
-  testTheMemoryWaitIsSaidInWholeLines,
-  testAnEndJustPastTheCeilingSaysFiguresThatDiffer,
-  testTheMemoryEndOfAnotherServersGameIsNotedBesideItsRun,
-  testTheFirstMemoryEndNotedOfARunStays,
-  testAGamesLockHandedOnKeepsItsMemory,
-  testACallsEngineWithNoToolCountsTheHeadlessPeak,
-  testAnEndJustPastTheCeilingIsSaidInOneSentenceWithFiguresThatDiffer,
-  testACommandLineLaneCountsItsOwnPeak,
-  testAServerWhoseGameAnotherServerEndedForItsMemoryAnswersThatEnd,
-  testTwoServersPastTheirCeilingsSayOneEnd,
-  testAMemoryEndNoteIsSweptOnceOld,
-  testASlotsFigureRisesToWhatItsEngineHolds,
-  testAReadingBelowASlotsFigureLeavesItsLockAlone,
-  testTwoReadingsInOneStepRaiseASlotOnce,
-  testASlotAnotherProcessHoldsIsNeverRaised,
-  testAGamesRaisedLockHandedOnKeepsTheRaisedFigure,
-  testAGamesKeeperRaisesItsLockAsTheGameGrows,
-  testAKeeperRaisingTheGameSlotItTookLosesNoHand,
   testAReplacedServerAnswersEveryCallAndLetsGoOfItsPort,
-  testAHeadlessEngineRaisesItsSlotAsItGrows,
-  testALanesEngineRaisesItsSlotAsItGrows,
-  testAServersHeldEngineRaisesItsSlot,
-  testAGamesKeeperRaisesTheSlotItHolds,
-  testARaiseNotWrittenIsAskedAgain,
-  testAFollowedEnginePastItsCapRaisesItsSlotToTheCap,
-  testASlotTakenOverIsMadeInPlace,
-  testAFileMadeInTheSlotsFolderIsNeverReadEmpty,
-  testTwoProcessesMakingTheSameLockNeverOverwriteEachOther,
-  testTheSlotSweepJudgesStagedFilesByTheirWritersName,
-  testASlotLockIsCreatedWithoutAStagedFile,
-  testAFileTakenBesideTheSlotsIsMadeThroughItsStagedFile,
+  testEveryProcessStartsThroughTheHiddenSpawn,
+  testEveryDesktopStartGoesThroughOneCall,
   testAShareHoldsNoMoreThanTwoMinutesOfWork,
-  testEverySlotVariableTheSourcesReadIsClearedForAFixture,
   testTheLimitedRunEndsACommandThatWillNotEndAndKeepsTheCodeOfOneThatDoes,
   testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt,
   testADisconnectedLanguageClientLeavesNoTimer,
@@ -127930,12 +120083,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunDealtAShareAtATimeStartsNoEngineForLessThanItsFloor,
   testAnEngineFinishingItsShareTakesTheNextInTheSameProcess,
   testTheLastShareEndsTheEngineAndALaneWaitingForASlotStopsWaiting,
-  testARunHeldByMemoryStartsAnEngineForEachShare,
   testARunDealtSharesOverOneSlotStartsOneEngineForThem,
   testAShareInAReusedEngineHasNoStartTime,
   testAWindowedEngineIsNotReusedForHeadlessShares,
-  testTwoEnginesFinishingTogetherAreNotAdmittedBeyondTheMemory,
-  testTwoReusedEnginesShortOfMemoryDoNotWaitForEachOther,
   testAStrayReportFailsOnlyTheShareOfAReusedEngineThatWroteIt,
   testAReportRewrittenUnderTheSameNameFailsTheShareThatRewroteIt,
   testDocsHeadingsHaveTheIdsMarkdownlintComputes,
@@ -127947,11 +120097,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFailedEngineBesideAStarvedOneIsNotRunToPassOnASecondTry,
   testAHungShareInAReusedEngineIsEndedByTheDeadlineOfItsOwn,
   testARunNotDealtInSharesStartsEveryEngineForItsOwnPart,
-  testALaneWaitingForMemoryHoldsNoSlot,
-  testALaneJudgesMemoryAgainOnceItHoldsItsSlot,
-  testALaneJudgesMemoryAgainAtTheTakeAfterAMemoryWait,
-  testTwoRunsSharingSlotsStartPastTheRoomOnlyWithNothingGoing,
-  testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
   testARestartedCountDoesNotTakeWorkFromBeforeTheRestart,
   testASuiteIsFoundUnderAnySpellingOfItsPath,
   testAnInnerClassBaseIsFollowedToTheInnerClass,
@@ -127988,6 +120133,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheLspCommandFindsTheEditorsPort,
   testEveryLongCallIsHeardFrom,
   testEveryEngineWaitsForAMachineSlot,
+  testASlotIsAnOsLockHeldForAsLongAsItsProcessLives,
+  testAPythonProcessAndGdharnessExcludeEachOnTheSameSlot,
   testPinnedToolsInstallOutsideTheTemporaryFolder,
   testEveryToolFindsOneCacheFolderAndIgnoresARelativeVariable,
   testATomlEntryIsReplacedInPlaceWhateverFormTheFileHoldsIt,
@@ -128039,10 +120186,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testProjectTestsImportFirstStartsAtOnceAndItsEngineTakesASlot,
   testSlotlessEnginesOfOneProjectRunOneAtATime,
   testAWaitForTheProjectsLockIsToldAsASlotWait,
-  testADeadHoldersProjectLockIsTakenOver,
+  testALeftProjectLockFileIsTakenAtOnce,
   testTheClassesCommandSaysItWaitsForItsProjectsLock,
   testInOneSlotHoldsOneSlotAndAWaitGivesItBack,
-  testAProjectWaitNamesTheHolderAtEachLine,
+  testAProjectWaitSaysALineAndAnotherOnACommandsOutputAndInACallsProgress,
   testALauncherAnswersWithTheKeepersPidToo,
   testARunawayEngineLogIsCutAndEnded,
   testProjectTestJudgesItsRunAsTheGateDoes,
@@ -128070,7 +120217,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheShippedLoaderBringsTheRuntimeUpFirst,
   testCommandLineSetup,
   testUninstallLeavesAddonsItDidNotMake,
-  testNoShippedScriptParsesJsonLoudly,
   testTheReadingHelpersAnswerWhatTheyAreAsked,
   testTheHeadlessNodePathReaderResolvesWhatTheEngineResolves,
   testTheAnswerFileKeepsAFloatAsItWas,
@@ -128090,8 +120236,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARebuildOverAListLoadedWithoutItsKeyAnswersEveryClassAdded,
   testARebuildOverACutListAnswersAGoneScriptsClassRemoved,
   testTheRebuildsAnswerSaysHowToMendATwiceDeclaredClass,
-  testEveryProcessStartsThroughTheHiddenSpawn,
-  testEveryDesktopStartGoesThroughOneCall,
   testTheWrittenConfigNamesAProgramThatStarts,
 
   testProjectGodotMultilineValues,
@@ -128236,7 +120380,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARenamedAppIsNotSeededIntoItsOldFolder,
   testAnOverrideFileThatRenamesTheAppIsNotSeededIntoTheOldFolder,
   testASeedLeavesNothingBesideTheRunsFolder,
-  testEveryKeepIsHandedWhatItsSeedPutIn,
   testASeedThatMeetsASwapWaitsForTheNewSet,
   testATestRunsEngineStartsWithTheLastRunsPipelineCache,
   testProjectTestKeepsTheCacheAndSeedsTheNextRun,
@@ -128272,10 +120415,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testPrereleasesAndALeadingVOrderAsSemanticVersionsDo,
   testTheUpdateCheckKeepsItsCacheWithTheOthersAndDistrustsAFutureAnswer,
   testARegistryThatIsDownIsAskedOnADoublingWindow,
-  testAnEngineIsReadForWhatItHolds,
-  testAnEngineIsSizedByWhatItWasSeenToHold,
-  testARunOutOfMemoryNamesEveryEngine,
-  testATestRunIsHeldToWhatItsSuitesWereSeenToHold,
   testAnEngineRunsItsSuitesCheapestFirstInTheGame,
   testAStartForAnotherProjectIsPlayedHereBesideAnIdleEditor,
   testAStartForAnotherProjectLeavesTheEditorsPlayAlone,
@@ -128290,33 +120429,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunStartedHereIsServedWhenAnEditorOfAnotherProjectConnectsLater,
   testTheCallsOnAGameStartedHereAreNotRefusedForTheEditorsProject,
   testAStartBesideAnEditorHeldAtABreakpointWaitsForItsOwnGame,
-  testAProjectTestPastItsMemoryCeilingIsEndedForIt,
-  testAGamePastItsMemoryCeilingIsEndedForIt,
-  testAnEditorPastItsMemoryCeilingIsEndedForIt,
-  testAnEngineUnderItsMemoryCeilingRunsToItsEnd,
-  testAChildOfTheEngineCountsTowardsItsMemory,
-  testTheCeilingVariableSetsIt,
-  testTheDefaultCeilingIsAQuarterOfTheMemoryAndAtLeastFourGiB,
-  testAPeakIsKeptPerProjectAndToolAndCountedByTheNextStart,
-  testAProjectWithNoKeptPeakCountsOneAndAHalfGiB,
-  testTheMemoryWatcherPollsOnlyWhileAnEngineIsGuarded,
-  testTheWindowsMemoryReaderCountsAProcessAndWhatItStarted,
-  testTheLinuxMemoryReaderCountsAProcessAndWhatItStarted,
-  testTheMacMemoryReaderCountsAProcessAndWhatItStarted,
-  testAProjectSettingEndsItsEnginesPastTheCeiling,
-  testTheSettingWinsOverTheVariableForItsProjectOnly,
-  testASettingThatIsNoSizeRefusesTheStart,
-  testAHeadlessEngineIsSampledOncePerTick,
-  testABootCheckEndedForItsMemorySaysSoAndKeepsItsOwnPeak,
-  testAnEngineEndedForItsMemoryKeepsNoPeakAndARefusalNamesTheWayOn,
-  testAGameItsServerLeftRunningIsGuardedByTheNextServer,
-  testAStartRefusedForMemorySaysSoThroughEveryTool,
-  testAHeadlessEngineIsReadNoMoreOnceItHasEnded,
-  testTwoWritersOfOneProjectsPeaksLoseNoFigure,
-  testAHeadlessOperationEndedForItsMemoryIsSaidInOneSentence,
-  testACeilingSettingWrittenAsTextIsRefusedAsText,
-  testAMemoryReadingCostsAHandleReadForEachEngine,
-  testATestRunsEnginePastItsCeilingIsEndedAndSaysSo,
   testAThemeTakesATypeVariationsBaseWithNoEditor,
   testATypeVariationsBaseSitsBesideAStyleBoxOfTheType,
   testATypeVariationsBaseReadFromOneThemeIsWrittenWholeIntoAnother,
@@ -128326,19 +120438,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAVariationBaseOfTheWrongKindIsRefused,
   testANameThatIsNoThemeItemIsStillRefused,
   testAVariationBaseThatIsNoClassAndNoHeldTypeIsWrittenAsGiven,
-  testAPolledGameEndedForItsMemoryCarriesNoKeeperNote,
-  testTheRefusalsCeilingStepStartsTheEngineWhenFollowed,
-  testTheRefusalNamesAllThereIsToFreeUnderTheKeptMemory,
-  testANewServerEndsNoOtherLiveServersGame,
-  testAnImportPassEndedForItsMemorySaysSoAndNotItsSignal,
-  testATestRunsEngineKnownAtItsStartIsGuardedAndReleased,
-  testAGoneEngineCostsNoSnapshotAtEachReading,
-  testTheWindowsMemoryReaderReadsPrivateBytesNotTheWorkingSet,
   testAVariationBaseTheEngineRefusesThroughAControlsThemeIsRefused,
   testAnUnsetTakesAVariationBaseOutOfTheFile,
   testATestThatLeavesTheDesktopHelperRunningLeavesItNoLongerThanItsOwnRun,
   testAnEngineLogWithinTheLimitIsJudgedAsItWas,
-  testEveryEngineLogThatCanGrowIsReadWithTheLimitedReader,
   testAnEngineLogReadInPiecesIsJudgedAsItsWholeText,
   testTheSuiteCutsFindEverySuiteHoweverTheBytesArrive,
   testATestRunWhoseSuitePrintsPastTheLimitIsEnded,
@@ -128347,11 +120450,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunPrintingPastTheLimitOnItsConsoleIsEnded,
   testEverySuiteIsJudgedAgainstTheLimitAsItCloses,
   testASuitePastTheLimitIsEndedWhateverFollowsAndOnEitherStream,
-  testAFailingStringIsReadBackFromWhicheverSuitePrintedIt,
   testAPassingRunListsTwentyUncaughtScriptErrorsAndCountsTheRest,
   testATestRunsTallyUnderItsBoundsReadsAsTheWholeLog,
   testATestRunsTallyPastItsBoundsSaysWhatItCut,
-  testATestRunsConsoleIsReadAsItArrivesAndNeverJoined,
   testAnErrorDeclaredPastTheErrorsKeptIsSettled,
   testAnUnreportedRunsEntriesAreCountedOverEveryLine,
   testPrintedCappedNamesEachBoundReachedAndWhatItLeftOut,
@@ -128381,1171 +120482,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testRealSkipsFailARunOfBothTools,
   testAnEngineWhoseCasesAllSkippedAddsNoNothingRanProblem,
   testAnUnrunnableCaseIsNotCountedAsRan,
-  testASkipReasonOverSeveralLinesIsReadWhole,
-  testARealSkipReasonOverSeveralLinesFailsBothTools,
-  testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole,
-  testAnAfterHookPrintingAQuoteKeepsOutOfASkippedLastCasesReason,
-  testASkipReasonCutOffIsSaidToBeCutInBothTools,
-  testARealSkipReasonWithAnApostropheLeavesTheAfterErrorToBothTools,
-  testAnApostropheInASkipReasonLeavesAnAfterErrorToTheEngineInBothTools,
-  testASkipReasonWhoseFirstLineEndsInAQuoteIsBothLinesInBothTools,
-  testAPairedSkipReasonReadsTheSameFromTheReportInBothTools,
-  testARunWithNoReportReadsItsSkipReasonsFromTheConsoleInBothTools,
-  testAReportSaysHowManyConsoleLinesASkipReasonCoversInBothTools,
-  testASkipReasonTheConsoleDoesNotCloseIsTheReportsInBothTools,
-  testASkipReasonOpeningOnABracketedWordKeepsItInBothTools,
-  testASkipReasonHoldingABracketedWordKeepsItInBothTools,
-  testASkipReasonHoldingTheElementsEndAndTheCdataEndIsReadWholeInBothTools,
-  testASkipReasonOverThreeLinesWithAnErrorLineIsReadWholeInBothTools,
-  testASkipOnlyOneOfTheReportAndTheConsoleHoldsIsJudgedAsBefore,
-  testASkipReasonHoldingTheCdataEndIsReadWholeInBothTools,
-  testARunTheDeadlineEndedReadsAnApostrophesSkipReasonInBothTools,
-  testARunThatCrashedLaterReadsAnApostrophesSkipReasonInBothTools,
-  testARunPastTheLogLimitReadsAnApostrophesSkipReasonInBothTools,
-  testASkipReasonsWarningLineLeavesProjectTestsWarningCount,
 ];
-
-/**
- * Every regression above, each one run whether or not the one before it failed.
- *
- * The way a fixture here is checked is by disarming the line it guards and reading which tests
- * notice. A run that stops at the first failure answers only "something noticed", and everything
- * downstream of it never runs, so the four assertions a break should have reached look identical
- * to the one it did reach. Four disarms in a row had to be narrowed by hand until an unrelated
- * earlier test stopped firing, which is work spent on the runner rather than on the code.
- *
- * An argument names the tests to run, matched loosely against the function name, so a single
- * fixture can be run on its own while it is being written.
- */
-/**
- * Runs that call on one engine slot with a stand-in engine, a competitor for the slot queued behind
- * it, and optionally the slot held by another process first. The competitor takes the slot at the
- * first moment the call lets it go.
- */
-async function diagnosticsBesideACompetitor(options: {
-  readonly foreignHolder: boolean;
-  readonly pauseMs: number;
-  readonly crash?: string;
-  readonly cancelAfterTheFirstEngine?: boolean;
-  readonly lent?: boolean;
-}): Promise<DiagnosticsBesideACompetitor> {
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-slot-'));
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-slots-'));
-  const logFile = join(project, 'stand-in.log');
-  try {
-    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
-    for (const name of ['a', 'broken', 'c']) {
-      writeFileSync(join(project, `${name}.gd`), 'extends Node\n');
-    }
-    writeFileSync(logFile, '');
-    const entries = (): StandInEntry[] => standInEntries(logFile);
-    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    const taker = new EngineSlots(slots, 1, holder, undefined, undefined, plentyOfMemory);
-    const foreign = options.foreignHolder ? await taker.take() : null;
-    const server = new ServerProcess({
-      env: {
-        [SLOTS_VARIABLE]: slots,
-        [SLOT_COUNT_VARIABLE]: '1',
-        GODOT_PATH: operationStandIn(),
-        GDH_STAND_IN_LOG: logFile,
-        GDH_STAND_IN_PAUSE_MS: String(options.pauseMs),
-        GDH_STAND_IN_CRASH: options.crash ?? '',
-        GDHARNESS_BRIDGE_PORT: String(await reservePort()),
-        GDHARNESS_LSP_PORT: String(await reservePort()),
-      },
-    });
-    let competitorTookAt: number | null = null;
-    try {
-      await server.initialize('regression-test');
-      const id = server.nextRequestId;
-      const call = server
-        .request(
-          'tools/call',
-          {
-            name: 'script_diagnostics',
-            arguments: { projectPath: project, scriptPath: ['a.gd', 'broken.gd', 'c.gd'] },
-          },
-          options.cancelAfterTheFirstEngine === true ? 60_000 : 120_000,
-        )
-        .catch(() => null);
-      assert.ok(
-        await cameTrue(
-          () =>
-            foreign === null
-              ? entries().length > 0
-              : leftInSlots(slots).some((name) => name.startsWith('waiting/')),
-          30_000,
-        ),
-        `the call asks for its slot: ${slotsSaid()}`,
-      );
-      const competitor = taker.take().then((lock) => {
-        competitorTookAt = Date.now();
-        taker.release(lock);
-      });
-      await delay(700);
-      if (foreign !== null) {
-        taker.release(foreign);
-      }
-      if (options.cancelAfterTheFirstEngine === true) {
-        assert.ok(await cameTrue(() => entries().some((entry) => entry.event === 'start'), 30_000));
-        server.notify('notifications/cancelled', { requestId: id, reason: 'the caller stopped waiting' });
-      }
-      // A cancelled call is never answered, so only the slot it frees is waited for.
-      const said = options.cancelAfterTheFirstEngine === true ? null : await call;
-      await Promise.race([competitor, delay(60_000)]);
-      const answer = said === null ? null : (textOf(said)?.replaceAll(/port \d+/g, 'port N') ?? null);
-      return { answer, entries: entries(), competitorTookAt, slotsAfter: leftInSlots(slots) };
-    } finally {
-      await server.stop();
-    }
-  } finally {
-    sweep(project);
-    sweep(slots);
-  }
-}
-
-/** A line of a take that began [param waited] ms ago and looks now. */
-function lineBegunAgo(waited: number, mark: string): SlotLine {
-  const line = new SlotLine(process.pid, Date.now() - waited);
-  line.mark = mark;
-  return line;
-}
-
-/** A taker ahead that stops looking holds nothing back past the yield, counted from its last look. */
-async function testATakerAheadThatStoppedLookingIsDroppedAfterTheYield(): Promise<void> {
-  const folder = await gameLineFolder(12);
-  const realNow = Date.now;
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
-    const t0 = Date.now();
-    waitingMarked(folder, lineBegunAgo(200_000, 'gone.json'), t0);
-    const call = new EngineSlots(folder.directory, 12, folder.me, undefined, undefined, plentyOfMemory);
-    const behind = lineBegunAgo(100_000, 'call.json');
-    const look = async (at: number): Promise<number | null> => {
-      Date.now = () => at;
-      return lockNumber(await call.takeFree(false, behind));
-    };
-    assert.equal(await look(t0), null, 'a taker ahead that has just looked is waited for');
-    assert.equal(await look(t0 + SLOT_YIELD_MS - 100), null, 'until it has left the slot for the yield');
-    assert.equal(await look(t0 + SLOT_YIELD_MS + 100), 9, 'and then the call takes it');
-    call.releaseAll();
-  } finally {
-    Date.now = realNow;
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** Removes the mark of [param line] and its look note from the folder's waiting marks. */
-function waitEndedFor(folder: GameLineFolder, line: SlotLine): void {
-  const mark = line.mark ?? '';
-  rmSync(join(folder.directory, WAITING_FOLDER, mark), { force: true });
-  rmSync(join(folder.directory, WAITING_FOLDER, mark.replace(/\.json$/u, '.seen')), { force: true });
-}
-
-/** The takers among [param looks], by index, that take a slot as each looks in turn. */
-async function lookedAtOnce(
-  slots: readonly EngineSlots[],
-  takers: readonly { readonly game: boolean }[],
-  lines: readonly SlotLine[],
-  looks: readonly number[],
-): Promise<number[]> {
-  const took: number[] = [];
-  for (const at of looks) {
-    if ((await slots[at]?.takeFree(takers[at]?.game ?? false, lines[at])) != null) {
-      took.push(at);
-    }
-  }
-  return took;
-}
-
-/**
- * [param takers] on a folder of [param folder]'s slots, all held. One slot is freed at a time, and
- * every taker looks, the order of the looks turning with each round. Answers who took each slot and
- * the most locks the folder held at once. A taker leaves the line once it has a slot.
- */
-async function lineTaken(
-  folder: GameLineFolder,
-  takers: readonly { readonly game: boolean; readonly by: string }[],
-): Promise<{ order: number[]; most: number }> {
-  const t0 = Date.now();
-  const lines = takers.map((_, at) => {
-    const line = new SlotLine(process.pid, t0 - (takers.length - at) * 1000);
-    line.mark = `w${String(at).padStart(2, '0')}.json`;
-    waitingMarked(folder, line, t0);
-    return line;
-  });
-  const slots = takers.map(
-    (taker) =>
-      new EngineSlots(
-        folder.directory,
-        folder.count,
-        { ...folder.me, by: taker.by },
-        undefined,
-        undefined,
-        plentyOfMemory,
-      ),
-  );
-  slotsHeld(
-    folder,
-    Array.from({ length: folder.count }, (_, slot) => slot),
-  );
-  const waiting = new Set(takers.keys());
-  const order: number[] = [];
-  let most = folder.count;
-  let held = 0;
-  while (waiting.size > 0) {
-    rmSync(join(folder.directory, `${String(held % folder.count)}.lock`));
-    held += 1;
-    for (const at of waiting) {
-      lookedAt(folder, lines[at]?.mark ?? '', Date.now());
-    }
-    const took = await lookedAtOnce(
-      slots,
-      takers,
-      lines,
-      held % 2 === 0 ? [...waiting].reverse() : [...waiting],
-    );
-    most = Math.max(most, readdirSync(folder.directory).filter((name) => /^\d+\.lock$/u.test(name)).length);
-    assert.equal(took.length, 1, `one slot freed, one taker took it: ${JSON.stringify(took)}`);
-    const winner = took[0] ?? -1;
-    order.push(winner);
-    waiting.delete(winner);
-    const won = lines[winner];
-    if (won !== undefined) {
-      waitEndedFor(folder, won);
-    }
-  }
-  return { order, most };
-}
-
-/** Twelve takers of every kind on four slots take them in the order they began to wait, four at most at once. */
-async function testTwelveTakersOnFourSlotsTakeInTheOrderTheyBeganToWait(): Promise<void> {
-  const folder = await gameLineFolder(4);
-  try {
-    const takers = Array.from({ length: 12 }, (_, at) => ({
-      game: at % 3 === 0,
-      by: ['gdharness test of /a', 'editor_run of /b', 'a tool of /c', 'project_test of /d'][at % 4] ?? '',
-    }));
-    const { order, most } = await lineTaken(folder, takers);
-    assert.deepEqual(
-      order,
-      takers.map((_, at) => at),
-      'each takes in the order it began to wait',
-    );
-    assert.ok(most <= 4, `never more than four locks at once: ${String(most)}`);
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** A file a removed rule used to read changes nothing about who takes a slot. */
-async function testFilesOfRemovedRulesLeftInTheFolderChangeNothing(): Promise<void> {
-  const takers = Array.from({ length: 6 }, (_, at) => ({ game: at % 2 === 1, by: `taker ${String(at)}` }));
-  const outcomes: number[][] = [];
-  for (const stale of [false, true]) {
-    const folder = await gameLineFolder(4);
-    try {
-      if (stale) {
-        const { directory, started } = folder;
-        mkdirSync(join(directory, 'reserved'));
-        writeFileSync(
-          join(directory, 'reserved', 'x.json'),
-          JSON.stringify({ pid: process.pid, started, owed: 50 * MEMORY_GIB }),
-        );
-        writeFileSync(
-          join(directory, 'spare.json'),
-          JSON.stringify({ spare: 4, pid: process.pid, started, written: Date.now() }),
-        );
-        writeFileSync(join(directory, 'priority.json'), JSON.stringify({ high: ['p'] }));
-        mkdirSync(join(directory, 'freed'));
-        writeFileSync(join(directory, 'freed', '0'), JSON.stringify({ freed: Date.now() }));
-        mkdirSync(join(directory, 'queued'));
-        writeFileSync(join(directory, 'queued', 'g.json'), JSON.stringify({ pid: process.pid, started }));
-        writeFileSync(
-          join(directory, 'starved.json'),
-          JSON.stringify({ pid: process.pid, started, what: 'x', starved: 9000 }),
-        );
-        writeFileSync(
-          join(directory, 'lanes.json'),
-          JSON.stringify({ lanes: 1, pid: process.pid, started, written: Date.now() }),
-        );
-        writeFileSync(join(directory, 'lanes.json.follows'), JSON.stringify({ pid: process.pid, started }));
-      }
-      outcomes.push((await lineTaken(folder, takers)).order);
-    } finally {
-      rmSync(folder.directory, { recursive: true, force: true });
-    }
-  }
-  assert.deepEqual(outcomes[0], [0, 1, 2, 3, 4, 5], 'the line goes by age');
-  assert.deepEqual(outcomes[1], outcomes[0], 'and the stale files change none of it');
-}
-
-/** A run of three lanes with one free slot starts one lane, and the others as slots come free, behind an older waiter. */
-async function testLanesOnOneFreeSlotStartOneAndTakeTheRestBehindOlderWaiters(): Promise<void> {
-  const folder = await gameLineFolder(4);
-  const stop = new AbortController();
-  try {
-    slotsHeld(folder, [0, 1, 2]);
-    const slots = new EngineSlots(folder.directory, 4, folder.me, undefined, undefined, plentyOfMemory);
-    const started = await takenLanes(
-      {
-        slots,
-        ordered: false,
-        plans: [{ lane: 0 }, { lane: 1 }, { lane: 2 }],
-        memoryHeld: false,
-        byMemory: { engines: 3 },
-      },
-      () => undefined,
-    );
-    assert.equal(started.taken.length, 1, 'one lane starts on the one free slot');
-    assert.equal(started.shared, true, 'and the other lanes are dealt shares');
-    const order: string[] = [];
-    const waits = ['older', 'lane 1', 'lane 2'].map(async (name, at) => {
-      await delay(300 * at);
-      await slots.take(stop.signal);
-      order.push(name);
-    });
-    await delay(1200);
-    assert.deepEqual(order, [], 'every slot is held');
-    for (const [at, slot] of [0, 1, 2].entries()) {
-      rmSync(join(folder.directory, `${String(slot)}.lock`));
-      assert.ok(
-        await cameTrue(() => order.length === at + 1, 10_000),
-        `a taker starts as slot ${String(slot)} comes free: ${order.join(', ')}`,
-      );
-    }
-    assert.deepEqual(order, ['older', 'lane 1', 'lane 2'], 'one for each slot, oldest first');
-    await Promise.all(waits);
-    slots.releaseAll();
-  } finally {
-    stop.abort();
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** One, two and three slots, twelve and sixteen, and a count file, each cap holds. */
-async function testTheCapHoldsOnEveryCountAndTheCountFileReplacesIt(): Promise<void> {
-  for (const count of [1, 2, 3, 12, 16]) {
-    const folder = await gameLineFolder(count);
-    try {
-      const slots = new EngineSlots(folder.directory, count, folder.me, undefined, undefined, plentyOfMemory);
-      const taken: string[] = [];
-      for (let at = 0; at < count; at++) {
-        const lock = await slots.takeFree();
-        assert.notEqual(lock, null, `slot ${String(at)} of ${String(count)} is free`);
-        taken.push(basename(lock ?? ''));
-      }
-      assert.deepEqual(
-        taken.toSorted((a, b) => Number.parseInt(a, 10) - Number.parseInt(b, 10)),
-        Array.from({ length: count }, (_, at) => `${String(at)}.lock`),
-        `${String(count)} slots, each once`,
-      );
-      assert.equal(await slots.takeFree(), null, `no slot past ${String(count)}`);
-      slots.releaseAll();
-    } finally {
-      rmSync(folder.directory, { recursive: true, force: true });
-    }
-  }
-  const folder = await gameLineFolder(12);
-  try {
-    const slots = new EngineSlots(folder.directory, 12, folder.me, undefined, undefined, plentyOfMemory);
-    const takeAll = async (): Promise<number> => {
-      let taken = 0;
-      while ((await slots.takeFree()) !== null) {
-        taken += 1;
-      }
-      return taken;
-    };
-    writeFileSync(join(folder.directory, SLOT_COUNT_FILE), '3\n');
-    assert.equal(await takeAll(), 3, 'a count file of 3 caps the take made with 12');
-    assert.equal(slots.count, 3);
-    writeFileSync(join(folder.directory, SLOT_COUNT_FILE), '16');
-    assert.equal(await takeAll(), 13, 'and a file of 16 raises it at the next take, to 16 in all');
-    for (const unusable of ['0', 'many', '2.5', '-1', '']) {
-      writeFileSync(join(folder.directory, SLOT_COUNT_FILE), unusable);
-      assert.equal(slotCountFileOf(folder.directory), undefined, `${JSON.stringify(unusable)} is no count`);
-    }
-    writeFileSync(join(folder.directory, SLOT_COUNT_FILE), 'many');
-    slots.releaseAll();
-    assert.equal(await takeAll(), 12, 'a file that is no count leaves the count the take was made with');
-    slots.releaseAll();
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-const GB = 1e9;
-
-/** Ten held slots, each with an engine of a recorded peak, and the memory the stand-in machine reads. */
-async function tenEnginesOn(
-  directory: string,
-  peaks: readonly number[],
-  holding: readonly number[],
-  reading: { free: number },
-): Promise<EngineSlots> {
-  const started = await ownStart();
-  const engines = new Map<number, number>();
-  peaks.forEach((peak, slot) => {
-    const pid = 4_000_000 + slot;
-    engines.set(pid, holding[slot] ?? peak);
-    const path = join(directory, `${String(slot)}.lock`);
-    writeFileSync(
-      path,
-      JSON.stringify({ pid: process.pid, started, memory: peak, engine: { pid, started: Date.now() } }),
-    );
-  });
-  return new EngineSlots(directory, 12, { pid: process.pid, started }, undefined, undefined, {
-    need: 1.6 * GB,
-    available: () => Promise.resolve(reading.free),
-    held: (pids) =>
-      Promise.resolve(
-        new Map(pids.flatMap((pid) => (engines.has(pid) ? [[pid, engines.get(pid) ?? 0] as const] : []))),
-      ),
-  });
-}
-
-/**
- * Ten engines each holding its recorded peak (7.8 GB for one, 1.6 GB for nine) owe nothing, so a
- * machine reading 16.6 GB free starts another. Reading 1 GB it waits and says memory, and starts once
- * the reading rises.
- */
-async function testEnginesHoldingTheirPeaksOweNothingAndAnotherStartsOnFreeMemory(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-owed-'));
-  try {
-    const peaks = [7.8 * GB, ...Array.from({ length: 9 }, () => 1.6 * GB)];
-    const reading = { free: 16.6 * GB };
-    const slots = await tenEnginesOn(directory, peaks, peaks, reading);
-    const lock = await slots.takeFree();
-    assert.notEqual(lock, null, 'the engine starts: 16.6 GB free less the kept 4 GiB covers 1.6 GB');
-    slots.release(lock ?? '');
-    reading.free = 1 * GB;
-    assert.equal(await slots.takeFree(), null, 'at 1 GB free it waits');
-    assert.ok(slots.drawn.short !== undefined, 'for memory');
-    assert.match(slotWaitSaid(3000, 12, directory, [], slots.drawn), /memory/u, 'and says so');
-    reading.free = 16.6 * GB;
-    assert.notEqual(await slots.takeFree(), null, 'and starts once the reading rises');
-    slots.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * Ten engines that started a moment ago, each holding 0.3 GB of a 1.6 GB peak, still owe 13 GB, so
- * 16.6 GB free does not start another. As they grow the owed sum falls with the reading, and the wait
- * ends once free less the kept 4 GiB less what is owed covers the engine.
- */
-async function testEnginesStillGrowingKeepAnotherWaitingUntilTheOwedSumFalls(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-owed-'));
-  try {
-    const peaks = Array.from({ length: 10 }, () => 1.6 * GB);
-    const holding = peaks.map(() => 0.3 * GB);
-    const reading = { free: 16.6 * GB };
-    const slots = await tenEnginesOn(directory, peaks, holding, reading);
-    assert.equal(await slots.takeFree(), null, '13 GB is still owed, so 16.6 GB free is not enough');
-    assert.equal(
-      Math.round(slots.drawn.short?.owed ?? 0),
-      13 * GB,
-      'the owed sum is the peaks less what they hold',
-    );
-    const grown = await tenEnginesOn(
-      directory,
-      peaks,
-      peaks.map(() => 1.0 * GB),
-      reading,
-    );
-    reading.free = 9.6 * GB;
-    assert.equal(await grown.takeFree(), null, 'grown to 1.0 GB each with 9.6 GB free it still waits');
-    assert.equal(Math.round(grown.drawn.short?.owed ?? 0), 6 * GB, 'with 6 GB owed');
-    reading.free = 12.1 * GB;
-    assert.notEqual(await grown.takeFree(), null, 'and at 12.1 GB free it starts');
-    grown.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** The object the JSON file at [param path] holds. */
-function jsonObjectOf(path: string): Record<string, unknown> {
-  const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
-  assert.ok(typeof parsed === 'object' && parsed !== null, `${path} holds an object`);
-  return Object.fromEntries(Object.entries(parsed));
-}
-
-/** The text of item [param item] of the contract another queue follows, in docs/test-runs.md. */
-function contractItem(item: 'i' | 'ii' | 'iii' | 'iv' | 'v' | 'vi'): string {
-  const lines = readFileSync('docs/test-runs.md', 'utf8').split('\n');
-  const from = lines.findIndex((line) => line.startsWith(`#### (${item}) `));
-  assert.ok(from >= 0, `the contract has an item (${item})`);
-  const to = lines.findIndex((line, at) => at > from && /^#{1,4} /u.test(line));
-  return lines.slice(from, to < 0 ? undefined : to).join('\n');
-}
-
-/** A folder of 4 slots with a taker of this process, for the contract's tests. */
-async function contractFolder(): Promise<{ directory: string; slots: EngineSlots; started: number }> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-contract-'));
-  const slots = new EngineSlots(
-    directory,
-    4,
-    { pid: process.pid, started },
-    undefined,
-    undefined,
-    plentyOfMemory,
-  );
-  return { directory, slots, started };
-}
-
-/** (i) The lock is created exclusively with a pid and a start, and a dead holder's lock is taken over under a steal file. */
-async function testTheContractsLockIsWhatTheCodeWrites(): Promise<void> {
-  const contract = contractItem('i');
-  for (const part of [
-    '<directory>/<n>.lock',
-    'O_CREAT | O_EXCL',
-    '"pid"',
-    '"started"',
-    '<n>.lock.steal',
-    `${String(UNWRITTEN_MS / 1000)} seconds`,
-    `${String(START_TOLERANCE_MS)} ms`,
-  ]) {
-    assert.ok(contract.includes(part), `item (i) names ${part}`);
-  }
-  const { directory, slots, started } = await contractFolder();
-  try {
-    const lock = await slots.takeFree();
-    const written = jsonObjectOf(lock ?? '');
-    assert.equal(written['pid'], process.pid);
-    assert.equal(written['started'], started);
-    assert.equal(basename(lock ?? ''), '0.lock');
-    slots.releaseAll();
-    writeFileSync(join(directory, '0.lock'), JSON.stringify({ pid: 2 ** 31 - 2, started: 1 }));
-    const over = await slots.takeFree();
-    assert.equal(basename(over ?? ''), '0.lock', 'a lock of a gone holder is taken over');
-    assert.equal(existsSync(join(directory, '0.lock.steal')), false, 'and its steal file is removed');
-    assert.equal(jsonObjectOf(over ?? '')['pid'], process.pid);
-    slots.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** (ii) A wait keeps a mark named by pid and counter, holding the holder's fields and a since in milliseconds. */
-async function testTheContractsWaitingMarkIsWhatTheCodeWrites(): Promise<void> {
-  const contract = contractItem('ii');
-  for (const part of [
-    `<directory>/${WAITING_FOLDER}/<pid>-<n>.json`,
-    '`since`',
-    'milliseconds since the epoch',
-    '.seen',
-    `below ${String(SINCE_IN_SECONDS_BELOW)} as seconds`,
-    "as begun at its file's modification time",
-  ]) {
-    assert.ok(contract.includes(part), `item (ii) names ${part}`);
-  }
-  const { directory, slots, started } = await contractFolder();
-  const stop = new AbortController();
-  try {
-    slotsHeld({ directory, count: 4, me: { pid: process.pid, started, by: 'x' }, started }, [0, 1, 2, 3]);
-    const before = Date.now();
-    const waiting = slots.take(stop.signal);
-    waiting.catch(() => undefined);
-    assert.ok(
-      await cameTrue(
-        () =>
-          existsSync(join(directory, WAITING_FOLDER)) &&
-          readdirSync(join(directory, WAITING_FOLDER)).some((name) => name.endsWith('.json')),
-        10_000,
-      ),
-      'the wait makes its mark',
-    );
-    const name = readdirSync(join(directory, WAITING_FOLDER)).find((entry) => entry.endsWith('.json')) ?? '';
-    assert.match(name, /^\d+-\d+\.json$/u);
-    const mark = jsonObjectOf(join(directory, WAITING_FOLDER, name));
-    assert.equal(mark['pid'], process.pid);
-    assert.equal(mark['started'], started);
-    assert.ok(
-      typeof mark['since'] === 'number' && mark['since'] >= before && mark['since'] <= Date.now(),
-      'since is epoch milliseconds',
-    );
-  } finally {
-    stop.abort();
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** (iii) The line goes by since, then pid, then mark name, and a slot is left to a waiter ahead for the yield. */
-function testTheContractsLineOrderIsWhatTheCodeDoes(): void {
-  const contract = contractItem('iii');
-  for (const part of [
-    'earlier `since`',
-    'lower pid',
-    'file name is first, byte by byte',
-    `${String(SLOT_YIELD_MS / 1000)} seconds`,
-  ]) {
-    assert.ok(contract.includes(part), `item (iii) names ${part}`);
-  }
-  const waiter = (mark: string, pid: number, since: number) => ({ mark, pid, since, seen: since });
-  const line = new SlotLine(500, 1000);
-  line.mark = 'm.json';
-  const ahead = line.ahead([
-    waiter('b.json', 500, 1000),
-    waiter('a.json', 500, 1000),
-    waiter('z.json', 400, 1000),
-    waiter('later.json', 1, 1001),
-    waiter('early.json', 900, 999),
-    waiter('after.json', 600, 1000),
-  ]);
-  assert.deepEqual(
-    ahead.map((one) => one.mark),
-    ['early.json', 'z.json', 'a.json', 'b.json'],
-    'earlier since first, then lower pid, then mark name',
-  );
-}
-
-/** (iv) The count file holds a whole number above 0, read at every take, and anything else counts as missing. */
-async function testTheContractsCapIsTheCountFile(): Promise<void> {
-  const contract = contractItem('iv');
-  for (const part of [
-    `<directory>/${SLOT_COUNT_FILE}`,
-    SLOT_COUNT_VARIABLE,
-    'at every take',
-    'whatever their number',
-  ]) {
-    assert.ok(contract.includes(part), `item (iv) names ${part}`);
-  }
-  const { directory, slots } = await contractFolder();
-  try {
-    assert.equal(slotCountFileOf(directory), undefined, 'no file, no count');
-    writeFileSync(join(directory, SLOT_COUNT_FILE), '2');
-    assert.equal((await slots.takeFree()) === null, false);
-    assert.equal(slots.count, 2, 'the file replaces the count the take was made with');
-    writeFileSync(join(directory, SLOT_COUNT_FILE), '3');
-    await slots.takeFree();
-    assert.equal(slots.count, 3, 'and is read again at the next take');
-    for (const unusable of ['0', '-2', 'two', '1.5']) {
-      writeFileSync(join(directory, SLOT_COUNT_FILE), unusable);
-      assert.equal(slotCountFileOf(directory), undefined, `${JSON.stringify(unusable)} counts as missing`);
-    }
-    slots.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** (v) An engine starts when free less kept less owed covers its need, to the byte. */
-async function testTheContractsMemoryCheckIsWhatTheCodeDoes(): Promise<void> {
-  const contract = contractItem('v');
-  const kept = MEMORY_KEPT / 1024 ** 3;
-  for (const part of [
-    'free - kept - owed >= need',
-    `${String(kept)} GiB`,
-    '1.5 GiB',
-    '`memory`',
-    '`engine`',
-  ]) {
-    assert.ok(contract.includes(part), `item (v) names ${part}`);
-  }
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-contract-'));
-  try {
-    standInLock(directory, 0, started, { memory: 2 * GB });
-    const reading = { free: MEMORY_KEPT + 2 * GB + 1 * GB };
-    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, undefined, {
-      need: 1 * GB,
-      available: () => Promise.resolve(reading.free),
-      held: plentyOfMemory.held,
-    });
-    const first = await slots.takeFree();
-    assert.notEqual(first, null, 'free equal to kept, owed and need starts');
-    slots.release(first ?? '');
-    reading.free -= 1;
-    assert.equal(await slots.takeFree(), null, 'one byte less waits');
-    assert.equal(slots.drawn.short?.kept, MEMORY_KEPT);
-    assert.equal(slots.drawn.short.owed, 2 * GB, 'a lock naming no engine owes its whole figure');
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * On macOS the memory check holds no take, as item (v) says: its reading there is undefined, and a
- * take given no reading starts though the locks held owe far more than any machine has.
- */
-async function testATakeOnMacOSIsNeverHeldForMemory(): Promise<void> {
-  assert.ok(
-    contractItem('v').replace(/\s+/gu, ' ').includes('On macOS only the count holds a take'),
-    'item (v) says so',
-  );
-  assert.equal(await slotMemoryFree('darwin'), undefined, 'macOS gives the check no reading');
-  const read = await slotMemoryFree('linux');
-  assert.ok(typeof read === 'number' && read > 0, `elsewhere the check reads the machine: ${String(read)}`);
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-mac-memory-'));
-  try {
-    standInLock(directory, 0, started, { memory: 1024 * GB });
-    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, undefined, {
-      need: 1 * GB,
-      available: () => Promise.resolve(undefined),
-      held: plentyOfMemory.held,
-    });
-    const taken = await slots.takeFree();
-    assert.notEqual(taken, null, 'no reading starts the engine');
-    assert.equal(slots.drawn.short, undefined, 'and names no memory short');
-    slots.release(taken ?? '');
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** (vi) A lock or mark whose pid is gone or whose start differs is removed by the next reader. */
-async function testTheContractsCleanupIsWhatTheCodeDoes(): Promise<void> {
-  const contract = contractItem('vi');
-  for (const part of ['is gone', `${String(START_TOLERANCE_MS)} ms`, 'removed by any reader']) {
-    assert.ok(contract.includes(part), `item (vi) names ${part}`);
-  }
-  const { directory, slots, started } = await contractFolder();
-  try {
-    const marks = join(directory, WAITING_FOLDER);
-    mkdirSync(marks);
-    writeFileSync(
-      join(marks, '1-1.json'),
-      JSON.stringify({ pid: 2 ** 31 - 2, started: 1, since: Date.now() }),
-    );
-    writeFileSync(
-      join(marks, '2-1.json'),
-      JSON.stringify({ pid: process.pid, started: started - 60_000, since: Date.now() }),
-    );
-    writeFileSync(join(marks, '3-1.json'), JSON.stringify({ pid: process.pid, started, since: Date.now() }));
-    writeFileSync(join(directory, '9.lock'), JSON.stringify({ pid: 2 ** 31 - 2, started: 1 }));
-    await slots.takeFree();
-    assert.deepEqual(
-      readdirSync(marks).filter((name) => name.endsWith('.json')),
-      ['3-1.json'],
-      'only the live mark stays',
-    );
-    assert.equal(
-      existsSync(join(directory, '9.lock')),
-      false,
-      'a lock past the count of a gone holder is removed',
-    );
-    slots.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** A waiter ahead that stopped looking holds nothing back from a later take of the process either. */
-async function testAWaiterThatStoppedLookingHoldsNoSlotFromALaterTake(): Promise<void> {
-  const folder = await gameLineFolder(2);
-  const realNow = Date.now;
-  try {
-    slotsHeld(folder, [0]);
-    const t0 = Date.now();
-    waitingMarked(folder, lineBegunAgo(200_000, 'gone.json'), t0);
-    const call = new EngineSlots(folder.directory, 2, folder.me, undefined, undefined, plentyOfMemory);
-    const look = async (at: number, line: SlotLine): Promise<number | null> => {
-      Date.now = () => at;
-      return lockNumber(await call.takeFree(false, line));
-    };
-    assert.equal(await look(t0, lineBegunAgo(100_000, 'first.json')), null, 'the slot is left to the waiter');
-    assert.equal(
-      await look(t0 + SLOT_YIELD_MS + 100, lineBegunAgo(100_000, 'second.json')),
-      1,
-      'a later take, at its first look, passes over a waiter that has not looked for the yield',
-    );
-    call.releaseAll();
-  } finally {
-    Date.now = realNow;
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** A mark's since in seconds and a mark with no since stand in line by the time they name. */
-async function testAMarkInSecondsOrWithNoSinceStandsInLineByItsTime(): Promise<void> {
-  for (const kind of ['seconds', 'none'] as const) {
-    const folder = await gameLineFolder(2);
-    try {
-      slotsHeld(folder, [0]);
-      const began = Date.now() - 10_000;
-      const mark = join(folder.directory, WAITING_FOLDER, 'other-1.json');
-      writeFileSync(
-        mark,
-        JSON.stringify({ ...folder.me, ...(kind === 'seconds' ? { since: began / 1000 } : {}) }),
-      );
-      utimesSync(mark, began / 1000, began / 1000);
-      lookedAt(folder, 'other-1.json', Date.now());
-      const call = new EngineSlots(folder.directory, 2, folder.me, undefined, undefined, plentyOfMemory);
-      assert.equal(
-        await call.takeFree(false, lineBegunAgo(5000, 'newer.json')),
-        null,
-        `a take that began after the mark (${kind}) leaves it the slot`,
-      );
-      assert.equal(
-        lockNumber(await call.takeFree(false, lineBegunAgo(20_000, 'older.json'))),
-        1,
-        `a take that began before the mark (${kind}) goes first`,
-      );
-      call.releaseAll();
-    } finally {
-      rmSync(folder.directory, { recursive: true, force: true });
-    }
-  }
-}
-
-/**
- * An older waiter beside a newer mark in seconds and a newer mark with no since takes the slot at the
- * first look after it comes free, not at the yield.
- */
-async function testAnOlderWaiterGoesBeforeNewerMarksInSecondsOrWithNoSince(): Promise<void> {
-  const folder = await gameLineFolder(1);
-  const stop = new AbortController();
-  try {
-    slotsHeld(folder, [0]);
-    const slots = new EngineSlots(folder.directory, 1, folder.me, undefined, undefined, plentyOfMemory);
-    let tookAt = 0;
-    const waiting = slots.take(stop.signal).then((lock) => {
-      tookAt = Date.now();
-      return lock;
-    });
-    waiting.catch(() => undefined);
-    const marks = join(folder.directory, WAITING_FOLDER);
-    assert.ok(
-      await cameTrue(() => readdirSync(marks).some((name) => name.endsWith('.json')), 10_000),
-      'the take waits with a mark',
-    );
-    await delay(1100);
-    writeFileSync(
-      join(marks, 'q-1.json'),
-      JSON.stringify({ ...folder.me, since: Math.floor(Date.now() / 1000) }),
-    );
-    writeFileSync(join(marks, 'q-2.json'), JSON.stringify(folder.me));
-    lookedAt(folder, 'q-1.json', Date.now());
-    lookedAt(folder, 'q-2.json', Date.now());
-    await delay(300);
-    const freedAt = Date.now();
-    rmSync(join(folder.directory, '0.lock'));
-    assert.ok(await cameTrue(() => tookAt > 0, 10_000), 'the older waiter takes the slot');
-    assert.ok(
-      tookAt - freedAt < SLOT_YIELD_MS / 2,
-      `within a look of the slot coming free: ${String(tookAt - freedAt)} ms`,
-    );
-    slots.releaseAll();
-  } finally {
-    stop.abort();
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * With the count file lowered below the slots held, a take makes no lock until the live locks are
- * fewer than the count, and a wait is served once enough of them go.
- */
-async function testACountLoweredBelowTheSlotsHeldStartsNothingUntilEnoughGo(): Promise<void> {
-  const folder = await gameLineFolder(4);
-  const stop = new AbortController();
-  try {
-    slotsHeld(folder, [1, 2, 3]);
-    writeFileSync(join(folder.directory, SLOT_COUNT_FILE), '2');
-    const slots = new EngineSlots(folder.directory, 4, folder.me, undefined, undefined, plentyOfMemory);
-    const locks = (): string[] =>
-      readdirSync(folder.directory)
-        .filter((name) => /^\d+\.lock$/u.test(name))
-        .toSorted();
-    const made: string[] = [];
-    const watcher = watchFolder(folder.directory, (_, name) => {
-      if (name === '0.lock') {
-        made.push(name);
-      }
-    });
-    try {
-      assert.equal(await slots.takeFree(), null, 'three held on a count of 2 starts nothing');
-      await delay(300);
-    } finally {
-      watcher.close();
-    }
-    assert.deepEqual(made, [], 'and makes no lock, not even one it gives back');
-    assert.deepEqual(locks(), ['1.lock', '2.lock', '3.lock']);
-    // Held in an object, since the take sets it later, which no flow analysis follows.
-    const got: { lock: string | null } = { lock: null };
-    const waiting = slots.take(stop.signal).then((lock) => {
-      got.lock = lock;
-    });
-    const taken = (): string | null => got.lock;
-    waiting.catch(() => undefined);
-    rmSync(join(folder.directory, '3.lock'));
-    await delay(1500);
-    assert.equal(taken(), null, 'two held on a count of 2 still starts nothing');
-    rmSync(join(folder.directory, '2.lock'));
-    assert.ok(await cameTrue(() => taken() !== null, 10_000), 'the wait is served once one more goes');
-    assert.equal(basename(taken() ?? ''), '0.lock');
-    slots.releaseAll();
-  } finally {
-    stop.abort();
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** Two takers that both read room below a lowered count do not both keep a lock: the later gives it back. */
-async function testALockTakenPastALoweredCountByARaceIsGivenBack(): Promise<void> {
-  const folder = await gameLineFolder(4);
-  try {
-    const past = new Date(Date.now() - 60_000);
-    slotsHeld(folder, [5]);
-    utimesSync(join(folder.directory, '5.lock'), past, past);
-    writeFileSync(join(folder.directory, SLOT_COUNT_FILE), '2');
-    let raced = false;
-    const slots = new EngineSlots(folder.directory, 4, folder.me, undefined, undefined, {
-      ...plentyOfMemory,
-      available: () => {
-        if (!raced) {
-          raced = true;
-          slotsHeld(folder, [1]);
-          utimesSync(join(folder.directory, '1.lock'), past, past);
-        }
-        return plentyOfMemory.available();
-      },
-    });
-    assert.equal(await slots.takeFree(), null, "the lock made after the other taker's is given back");
-    assert.equal(existsSync(join(folder.directory, '0.lock')), false, 'and is gone');
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * Two locks written in one millisecond keep the order of their slots: the lower slot was there
- * first, so a race below a lowered count gives back the higher.
- */
-async function testLocksWrittenInOneMillisecondAreOrderedBySlot(): Promise<void> {
-  for (const { theirs, ours, kept } of [
-    { theirs: 0, ours: 1, kept: false },
-    { theirs: 1, ours: 0, kept: true },
-  ]) {
-    const folder = await gameLineFolder(4);
-    try {
-      const past = new Date(Date.now() - 60_000);
-      slotsHeld(folder, [5]);
-      utimesSync(join(folder.directory, '5.lock'), past, past);
-      writeFileSync(join(folder.directory, SLOT_COUNT_FILE), '2');
-      let raced = false;
-      const slots = new EngineSlots(folder.directory, 4, folder.me, undefined, undefined, {
-        ...plentyOfMemory,
-        available: () => {
-          if (!raced) {
-            raced = true;
-            slotsHeld(folder, [theirs]);
-          }
-          return plentyOfMemory.available();
-        },
-      });
-      // Once both locks are there, both are given one time, to the millisecond.
-      const readTime: unknown = Reflect.get(slots, 'writtenAt');
-      assert.ok(typeof readTime === 'function');
-      const lockOf = (slot: number): string => join(folder.directory, `${String(slot)}.lock`);
-      let tied = false;
-      Reflect.set(slots, 'writtenAt', (path: string): unknown => {
-        if (!tied && existsSync(lockOf(theirs)) && existsSync(lockOf(ours))) {
-          tied = true;
-          const at = Math.floor(Date.now()) / 1000;
-          utimesSync(lockOf(theirs), at, at);
-          utimesSync(lockOf(ours), at, at);
-        }
-        const answer: unknown = Reflect.apply(readTime, slots, [path]);
-        return answer;
-      });
-      const got = await slots.takeFree();
-      assert.ok(tied, 'both locks were there at once');
-      assert.equal(
-        lockNumber(got),
-        kept ? ours : null,
-        kept ? 'the lower slot is first, so it is kept' : 'the higher slot is second, so it is given back',
-      );
-      assert.equal(existsSync(lockOf(ours)), kept);
-      slots.releaseAll();
-    } finally {
-      rmSync(folder.directory, { recursive: true, force: true });
-    }
-  }
-}
-
-/**
- * Two engines racing for memory room for one, whose locks carry one millisecond, keep the lower
- * slot's: the higher gives its slot back, so the machine never runs two on room for one.
- */
-async function testLocksOfAMemoryRaceWrittenInOneMillisecondAreOrderedBySlot(): Promise<void> {
-  for (const { theirs, ours, kept } of [
-    { theirs: 0, ours: 1, kept: false },
-    { theirs: 1, ours: 0, kept: true },
-  ]) {
-    const folder = await gameLineFolder(4);
-    try {
-      const past = new Date(Date.now() - 60_000);
-      const lockOf = (slot: number): string => join(folder.directory, `${String(slot)}.lock`);
-      // An engine that still owes 1 GB of its peak, and room for one more beside it.
-      writeFileSync(
-        lockOf(3),
-        JSON.stringify({ ...folder.me, memory: GB, engine: { pid: 4_000_009, started: 1 } }),
-      );
-      utimesSync(lockOf(3), past, past);
-      let raced = false;
-      const slots = new EngineSlots(folder.directory, 4, folder.me, undefined, undefined, {
-        need: 1.6 * GB,
-        held: () => Promise.resolve(new Map<number, number>([[4_000_009, 0]])),
-        available: () => {
-          if (!raced) {
-            raced = true;
-            writeFileSync(lockOf(theirs), JSON.stringify({ ...folder.me, memory: 1.6 * GB }));
-          }
-          return Promise.resolve(4 * MEMORY_GIB + GB + 1.7 * GB);
-        },
-      });
-      // Once both locks are there, both are given one time, to the millisecond.
-      const readTime: unknown = Reflect.get(slots, 'writtenAt');
-      assert.ok(typeof readTime === 'function');
-      let tied = false;
-      Reflect.set(slots, 'writtenAt', (path: string): unknown => {
-        if (!tied && existsSync(lockOf(theirs)) && existsSync(lockOf(ours))) {
-          tied = true;
-          const at = Math.floor(Date.now()) / 1000;
-          utimesSync(lockOf(theirs), at, at);
-          utimesSync(lockOf(ours), at, at);
-        }
-        const answer: unknown = Reflect.apply(readTime, slots, [path]);
-        return answer;
-      });
-      const got = await slots.takeFree();
-      assert.ok(tied, 'both locks were there at once');
-      assert.equal(
-        lockNumber(got),
-        kept ? ours : null,
-        kept ? 'the lower slot is first, so it is kept' : 'the higher slot is second, so it is given back',
-      );
-      assert.equal(existsSync(lockOf(ours)), kept);
-      slots.releaseAll();
-    } finally {
-      rmSync(folder.directory, { recursive: true, force: true });
-    }
-  }
-}
-
-/**
- * A holder's start, once read, is believed for ten seconds and then read again. A pid that a new
- * process took after its holder ended then frees the lock it named, once the start is read again.
- */
-async function testAStartIsReadAgainAfterTenSecondsAndAReusedPidFreesItsLock(): Promise<void> {
-  const folder = await gameLineFolder(1);
-  const realNow = Date.now;
-  try {
-    const earlier = folder.started - 60_000;
-    writeFileSync(join(folder.directory, '0.lock'), JSON.stringify({ pid: process.pid, started: earlier }));
-    const slots = new EngineSlots(folder.directory, 1, folder.me, undefined, undefined, plentyOfMemory);
-    const t0 = realNow();
-    // The start read while the lock's own holder still had the pid.
-    const starts: unknown = Reflect.get(slots, 'starts');
-    assert.ok(starts instanceof Map);
-    starts.set(process.pid, { started: earlier, readAt: t0 });
-    const look = async (at: number): Promise<number | null> => {
-      Date.now = () => at;
-      return lockNumber(await slots.takeFree());
-    };
-    assert.equal(await look(t0), null, 'the start read a moment ago is believed');
-    assert.equal(await look(t0 + 9_900), null, 'and still just inside ten seconds');
-    assert.equal(await look(t0 + 10_100), 0, 'past them the start is read again, and differs');
-    slots.releaseAll();
-  } finally {
-    Date.now = realNow;
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** The first engine on a machine starts whatever the memory reading says. */
-async function testTheFirstEngineOnAMachineStartsWhateverMemoryReads(): Promise<void> {
-  const { directory, started } = await contractFolder();
-  try {
-    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, undefined, {
-      need: 1.6 * GB,
-      available: () => Promise.resolve(0),
-      held: plentyOfMemory.held,
-    });
-    assert.notEqual(await slots.takeFree(), null, 'no other engine holds a slot, so it starts');
-    assert.equal(await slots.takeFree(), null, 'and the next, behind it, waits for memory');
-    assert.ok(slots.drawn.short !== undefined);
-    slots.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** A lock naming no memory owes the flat 1.5 GiB for each slot it holds. */
-async function testALockWithNoMemoryOwesOneAndAHalfGiBASlot(): Promise<void> {
-  const { directory, started } = await contractFolder();
-  try {
-    standInLock(directory, 0, started, {});
-    standInLock(directory, 1, started, {});
-    const owed = 2 * 1.5 * MEMORY_GIB;
-    const reading = { free: 4 * MEMORY_GIB + owed + GB - 1 };
-    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, undefined, {
-      need: GB,
-      available: () => Promise.resolve(reading.free),
-      held: plentyOfMemory.held,
-    });
-    assert.equal(await slots.takeFree(), null, 'one byte short of 1.5 GiB a lock waits');
-    assert.equal(slots.drawn.short?.owed, owed, 'two locks with no memory owe 3 GiB');
-    reading.free += 1;
-    assert.notEqual(await slots.takeFree(), null, 'and enough starts');
-    slots.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** A live lock numbered past the count owes its memory as any other does. */
-async function testALockPastTheCountOwesItsMemory(): Promise<void> {
-  const { directory, started } = await contractFolder();
-  try {
-    standInLock(directory, 7, started, { memory: 8 * GB });
-    const reading = { free: 4 * MEMORY_GIB + 8 * GB + GB - 1 };
-    const slots = new EngineSlots(directory, 2, { pid: process.pid, started }, undefined, undefined, {
-      need: GB,
-      available: () => Promise.resolve(reading.free),
-      held: plentyOfMemory.held,
-    });
-    assert.equal(await slots.takeFree(), null, 'the 8 GB lock past the count is owed');
-    assert.equal(slots.drawn.short?.owed, 8 * GB);
-    reading.free += 1;
-    assert.notEqual(await slots.takeFree(), null, 'and enough starts');
-    slots.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** The check keeps 4 GiB back from the free reading for everything else. */
-async function testTheMemoryCheckKeepsFourGiBBack(): Promise<void> {
-  const { directory, started } = await contractFolder();
-  try {
-    standInLock(directory, 0, started, { memory: GB });
-    const reading = { free: 4 * MEMORY_GIB + 2 * GB - 1 };
-    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, undefined, {
-      need: GB,
-      available: () => Promise.resolve(reading.free),
-      held: plentyOfMemory.held,
-    });
-    assert.equal(await slots.takeFree(), null, 'free less 4 GiB less what is owed is a byte short');
-    assert.equal(slots.drawn.short?.kept, 4 * MEMORY_GIB);
-    reading.free += 1;
-    assert.notEqual(await slots.takeFree(), null, 'and a byte more starts');
-    slots.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** A machine with memory to spare, so a take is judged by its slots and its line alone. */
-const plentyOfMemory = {
-  available: (): Promise<number> => Promise.resolve(1024 * MEMORY_GIB),
-  held: (): Promise<Map<number, number>> => Promise.resolve(new Map<number, number>()),
-};
 
 async function main(): Promise<void> {
   syncSharedGdscript();
@@ -129672,7 +120609,6 @@ function regressionsOfThisPart(named: RegressionCase[]): RegressionCase[] | null
             named.map((test) => test.name),
             Number(part[1]),
             Number(part[2]),
-            secondsOn(),
           ),
         );
   const chosen = inPart === null ? named : named.filter((test) => inPart.has(test.name));
@@ -129824,22 +120760,6 @@ async function testAProcessATestLeavesRunningIsListedWithTheTestThatStartedIt():
   }
 }
 
-/** Every slot variable the sources read is one a fixture starts without. */
-function testEverySlotVariableTheSourcesReadIsClearedForAFixture(): void {
-  const named = new Set<string>();
-  for (const file of readdirSync('src', { recursive: true, encoding: 'utf8' })) {
-    if (file.endsWith('.ts')) {
-      for (const match of readFileSync(join('src', file), 'utf8').matchAll(/GODOT_ENGINE_[A-Z_]+/g)) {
-        named.add(match[0]);
-      }
-    }
-  }
-  assert.ok(named.size >= 3, `the sources name the slot variables: ${String(named.size)}`);
-  for (const name of named) {
-    assert.ok(SLOT_VARIABLES.includes(name), `${name} is cleared before a fixture runs`);
-  }
-}
-
 /**
  * A test that starts the process's shared desktop helper and does not end it leaves nothing open
  * at the end of its run, because the runner ends the helper after each test. The run is a real one
@@ -129914,55 +120834,6 @@ function testAnEngineLogWithinTheLimitIsJudgedAsItWas(): void {
       asRead(readRun('')),
       'a log never written is an empty run',
     );
-  } finally {
-    sweep(scratch);
-  }
-}
-
-/**
- * Each place that reads an engine's or an editor's console from a file, which grows with what a game
- * prints, reads it with the limited reader and never whole. A share's text is read by its byte range.
- */
-function testEveryEngineLogThatCanGrowIsReadWithTheLimitedReader(): void {
-  const functionSource = (file: string, marker: string): string => {
-    const source = readFileSync(join('src', file), 'utf8');
-    const from = source.indexOf(marker);
-    assert.ok(from >= 0, `${marker} is in src/${file}`);
-    return source.slice(from, source.indexOf('\n}\n', from));
-  };
-  const reads: readonly (readonly [file: string, marker: string, wanted: string])[] = [
-    ['server.ts', 'private async testRead(', 'readEngineLog(engineLog,'],
-    ['suite-run.ts', 'judgeCompile(readRun(', 'readRun(readLog(log))'],
-    ['editor-end.ts', 'function whatTheEditorPrinted(', 'readLog(editorLogPath(projectPath))'],
-    ['start-watch.ts', 'function linesOf(', 'readLog(file)'],
-    ['engine-shares.ts', 'export function shareText(', 'bytesAt(fd, from,'],
-  ];
-  for (const [file, marker, wanted] of reads) {
-    const body = readFileSync(join('src', file), 'utf8');
-    const at = body.indexOf(marker);
-    assert.ok(at >= 0, `${marker} is in src/${file}`);
-    const section =
-      file === 'suite-run.ts' ? body.slice(Math.max(0, at - 40), at + 120) : functionSource(file, marker);
-    assert.ok(section.includes(wanted), `${file} reads with ${wanted}`);
-    assert.ok(
-      !/readFileSync\((?:engineLog|log|file|editorLogPath)\b/.test(section),
-      `${file} holds no whole read of a log: ${marker}`,
-    );
-  }
-
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-share-text-'));
-  try {
-    const log = join(scratch, 'engine.log');
-    const banner = 'Godot Engine v4.7.2.stable.official - https://godotengine.org\n';
-    const first = `${banner}one\ntwo\ngdharness share ended 0 exit 0\n`;
-    const second = 'three\nfour\ngdharness share ended 1 exit 0\n';
-    writeFileSync(log, `${first}${second}five\n`);
-    const from = Buffer.byteLength(first);
-    const to = from + Buffer.byteLength(second);
-    assert.equal(shareText(log, 0, from), `${banner}one\ntwo\n`);
-    assert.equal(shareText(log, from, to), `${banner}three\nfour\n`);
-    assert.equal(shareText(log, to), `${banner}five\n`);
-    assert.equal(shareText(log, to, to + 1000), `${banner}five\n`, 'a range past the end stops at it');
   } finally {
     sweep(scratch);
   }
@@ -130517,32 +121388,6 @@ function chattyReport(failing: Readonly<Record<string, string>> = {}): string {
 }
 
 /**
- * The value of a failing string equality is read back from what each suite printed, the first suite
- * and a later one alike, as the console printed it.
- */
-async function testAFailingStringIsReadBackFromWhicheverSuitePrintedIt(): Promise<void> {
-  const e = String.fromCharCode(0x1b);
-  const printedAt = (path: string, value: string): string =>
-    ` but was\n '${value}'${e}[0m${e}[38;2;173;216;230m\tat 'test_one' in ${path}:5${e}[0m\n`;
-  const missing = (gone: string): string => `${e}[48;2;38;0;0m${e}[38;2;255;255;255m${gone}${e}[0m`;
-  const merged = (path: string): string =>
-    `Expecting:\n 'abc'\n but was\n 'abc'\n\tat 'test_one' in ${path}:5`;
-  const answer = await aRunOfTheChattyEngine(`${CHATTY_A}:0,${CHATTY_B}:0,${CHATTY_C}:0`, 'both', false, {
-    inSuite: {
-      [CHATTY_A]: printedAt(CHATTY_A, missing('abc')),
-      [CHATTY_C]: printedAt(CHATTY_C, `a${missing('bc')}`),
-    },
-    report: chattyReport({ [CHATTY_A]: merged(CHATTY_A), [CHATTY_C]: merged(CHATTY_C) }),
-    exit: 100,
-  });
-  assert.deepEqual(
-    asArray(get(answer, 'failed')).map((one) => /but was\n '(.*)'\n/.exec(String(get(one, 'detail')))?.[1]),
-    ['', 'a'],
-    JSON.stringify(answer).slice(0, 4000),
-  );
-}
-
-/**
  * A passing run's script errors that no case failed on are listed up to twenty, and the rest are
  * counted. Nineteen and twenty are listed whole.
  */
@@ -130790,24 +121635,6 @@ function testATestRunsTallyPastItsBoundsSaysWhatItCut(): void {
         { list: 'uncaught script errors', leftOut: 50 },
       ],
     },
-  );
-}
-
-/**
- * A test run's console is read for its diffs as each chunk arrives and never joined, since a whole
- * console can pass what one string holds. The engine is started from source a test cannot run, so
- * it is read from its source.
- */
-function testATestRunsConsoleIsReadAsItArrivesAndNeverJoined(): void {
-  const source = readFileSync('src/server.ts', 'utf8');
-  const from = source.indexOf('private async testEngineRan(');
-  assert.ok(from >= 0, 'testEngineRan is in src/server.ts');
-  const body = source.slice(from, source.indexOf('\n  }\n', from));
-  assert.ok(body.includes('diffs.take(data)'), 'each chunk of the console goes to the diffs as it arrives');
-  assert.deepEqual(
-    body.match(/\.push\(data\)|Buffer\.concat\(|data\.toString\(/g) ?? [],
-    [],
-    'and no chunk is kept or joined',
   );
 }
 

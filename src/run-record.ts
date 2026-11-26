@@ -23,7 +23,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { errorCode, errorMessage } from './errors.js';
 import { isSameDirectory, realAsFarAsItExists } from './paths.js';
@@ -67,6 +67,12 @@ export interface RunRecord {
    * reached the game. Absent for a server that names no project.
    */
   readonly servedBy?: string;
+  /**
+   * The process of the server that started the run. Only that server answers for the run while the
+   * process lives, and the next server of the folder takes the run over once it has gone. Absent in a
+   * note a keeper wrote for no server.
+   */
+  readonly serverPid?: number;
   /**
    * Where the keeper holding the game listens for a stop: see `keeper-channel.ts`. Absent for a
    * keeper that could not listen.
@@ -239,75 +245,6 @@ export function readLatestRun(servedBy: string, directory = runtimeDirectory()):
 }
 
 /**
- * The engines whose memory peak is kept for their project: a tool's, editor_run check's boot, which
- * is kept apart from the game editor_run start counts, and a lane of `gdharness test` or
- * `gdharness spread`, whose engines run a share of a run rather than the whole project.
- */
-export type PeakTool =
-  | 'project_test'
-  | 'editor_run'
-  | 'editor_launch'
-  | 'headless'
-  | 'boot_check'
-  | 'test_lane'
-  | 'spread_lane';
-
-const PEAK_TOOLS: readonly PeakTool[] = [
-  'project_test',
-  'editor_run',
-  'editor_launch',
-  'headless',
-  'boot_check',
-  'test_lane',
-  'spread_lane',
-];
-
-/**
- * One file for each project and tool, written whole, so two servers keeping peaks of one project at
- * once never write over each other's figure.
- */
-function enginePeakPath(projectPath: string, tool: PeakTool, directory = runtimeDirectory()): string {
-  return join(directory, 'runs', `memory-${projectKey(projectPath)}-${tool}.json`);
-}
-
-/** The most bytes the last engine of each tool held for [param projectPath], by tool. */
-export function readEnginePeaks(
-  projectPath: string,
-  directory = runtimeDirectory(),
-): Partial<Record<PeakTool, number>> {
-  const peaks: Partial<Record<PeakTool, number>> = {};
-  for (const tool of PEAK_TOOLS) {
-    try {
-      const fields: unknown = JSON.parse(readFileSync(enginePeakPath(projectPath, tool, directory), 'utf8'));
-      const bytes = isRecord(fields) ? fields['bytes'] : undefined;
-      if (typeof bytes === 'number' && Number.isFinite(bytes) && bytes > 0) {
-        peaks[tool] = bytes;
-      }
-    } catch {
-      // Unkept or unreadable, so that tool counts the flat figure.
-    }
-  }
-  return peaks;
-}
-
-/** Keeps [param bytes] as what the last engine of [param tool] held for [param projectPath]. */
-export async function recordEnginePeak(projectPath: string, tool: PeakTool, bytes: number): Promise<void> {
-  try {
-    mkdirSync(runsDirectory(), { recursive: true });
-    await writeWholeAsync(enginePeakPath(projectPath, tool), JSON.stringify({ bytes: Math.round(bytes) }));
-  } catch {
-    // Unwritable leaves the next start counting the flat figure.
-  }
-}
-
-/**
- * A transcript nothing else is writing to, opened for appending.
- *
- * The descriptor is handed to the child as both its streams and closed here straight afterwards:
- * the child keeps its own copy, and this process has no reason to hold one open for a file it
- * only ever reads by offset.
- */
-/**
  * A new transcript for a run started at [startedAt], made by this call alone. The runs folder is one
  * for the machine, and servers woken by one gate freeing its slots start in the same millisecond, so
  * a name taken already gets a number after the time.
@@ -345,45 +282,6 @@ export function profileMarkPath(run: {
 }): string {
   const transcript = run.transcript ?? join(runsDirectory(), `run-${run.startedAt}.log`);
   return transcript.replace(/\.log$/, '.profile-mark.json');
-}
-
-/** Where the memory end of a run is noted: beside its transcript, and swept with it. */
-function memoryEndPath(run: { readonly transcript: string | null; readonly startedAt: number }): string {
-  const transcript = run.transcript ?? join(runsDirectory(), `run-${run.startedAt}.log`);
-  return transcript.replace(/\.log$/, '.memory-end.json');
-}
-
-/**
- * Notes that the server about to end [param run] does so for its memory, as [param endedBy] says. Any
- * other server holding the run that sees it gone reads it with {@link memoryEndOf}, since the note of
- * the run itself is cleared by the end. The first note stays: a server noting it later ends the game
- * later, and finds it gone.
- */
-export function noteMemoryEnd(
-  run: { readonly transcript: string | null; readonly startedAt: number },
-  endedBy: string,
-): void {
-  try {
-    mkdirSync(runsDirectory(), { recursive: true });
-    // Created whole in one write, before the game is ended, so nobody reads it part written.
-    writeFileSync(memoryEndPath(run), JSON.stringify({ endedBy }), { flag: 'wx' });
-  } catch {
-    // Noted already, or unwritable, which leaves the other server's answer without the reason.
-  }
-}
-
-/** What another server noted as the memory end of [param run], or undefined when it noted none. */
-export function memoryEndOf(run: {
-  readonly transcript: string | null;
-  readonly startedAt: number;
-}): string | undefined {
-  try {
-    const fields: unknown = JSON.parse(readFileSync(memoryEndPath(run), 'utf8'));
-    const said = isRecord(fields) ? fields['endedBy'] : undefined;
-    return typeof said === 'string' && said !== '' ? said : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 export function writeRunRecord(record: RunRecord): void {
@@ -634,8 +532,13 @@ function recordAt(path: string): RunRecord | null {
 /** The fields of a note that say who served the run, each present only when it holds something. */
 function namedFields(
   fields: Record<string, unknown>,
-): Pick<RunRecord, 'servedBy' | 'savesIn' | 'keeper' | 'keeperPid' | 'profile' | 'exported'> {
+): Pick<RunRecord, 'servedBy' | 'serverPid' | 'savesIn' | 'keeper' | 'keeperPid' | 'profile' | 'exported'> {
   return {
+    ...(typeof fields['serverPid'] === 'number' &&
+    Number.isInteger(fields['serverPid']) &&
+    fields['serverPid'] > 0
+      ? { serverPid: fields['serverPid'] }
+      : {}),
     ...(fields['exported'] === true ? { exported: true as const } : {}),
     ...(typeof fields['savesIn'] === 'string' && fields['savesIn'] !== ''
       ? { savesIn: fields['savesIn'] }
@@ -1173,10 +1076,7 @@ export function sweepTranscripts(keepMs = 24 * 60 * 60 * 1000, now = Date.now())
     // A partial file is what a writer that died between writing and renaming left behind.
     const transcript =
       entry.startsWith('run-') &&
-      (entry.endsWith('.log') ||
-        entry.endsWith('.profile.json') ||
-        entry.endsWith('.profile-mark.json') ||
-        entry.endsWith('.memory-end.json'));
+      (entry.endsWith('.log') || entry.endsWith('.profile.json') || entry.endsWith('.profile-mark.json'));
     if (!transcript && !entry.endsWith('.partial')) {
       continue;
     }

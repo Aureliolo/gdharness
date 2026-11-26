@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import pkg from '../package.json' with { type: 'json' };
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
+import { ADDON_FILE, PREBUILDS_FOLDER, PREBUILT_PLATFORMS } from '../src/os-lock.js';
 import { spawnSyncHidden } from '../src/spawn.js';
 import { asObject, get } from './support/json.js';
 
@@ -111,6 +112,8 @@ for (const requiredFile of [
   'package/package.json',
   'package/build/cli.js',
   'package/build/keeper.js',
+  `package/build/${PREBUILDS_FOLDER}/LICENSE`,
+  ...PREBUILT_PLATFORMS.map((platform) => `package/build/${PREBUILDS_FOLDER}/${platform}/${ADDON_FILE}`),
   ...operationsModules.map((module) => `package/build/godot/operations/${module}`),
   'package/build/godot/addons/auto_reload/plugin.cfg',
   'package/build/godot/addons/gdharness_editor/plugin.cfg',

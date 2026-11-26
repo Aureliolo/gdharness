@@ -148,16 +148,7 @@ import {
   restartUnderway,
   runtimeAddonOfAnotherRelease,
 } from './editor-open.js';
-import { memoryRefusal } from './engine-launch.js';
 import { projectSelfTypedExports, selfTypedSentence, WALK_STOPPED_SENTENCE } from './engine-leaks.js';
-import {
-  type Ceiling,
-  ceilingFor,
-  engineMemory,
-  type MemoryEnd,
-  memoryCeilingSaid,
-  memoryEndedSaid,
-} from './engine-memory.js';
 import {
   CONSOLE_CLOSED,
   diedAtStartOf,
@@ -171,9 +162,7 @@ import {
   handedRunSlot,
   inOneSlot,
   onTheSlot,
-  raiseSlotMemory,
   settledRunSlot,
-  slotEngineNamed,
   slotForCall,
   withTheSlotFree,
 } from './engine-slots.js';
@@ -233,16 +222,11 @@ import {
   leftOutNamed,
   orphansLeftSaid,
   type orphansPrinted,
-  type PrintedDiff,
   parseJUnit,
-  reportedSkips,
   type ScriptError,
-  SuiteDiffs,
-  skippedInReport,
   type TestReport,
   testProgressMessage,
   type whyNoReport,
-  withPrintedPassesSettled,
 } from './junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop } from './keeper-channel.js';
 import {
@@ -348,11 +332,8 @@ import {
   everyRunRecord,
   type LatestRun,
   listeningPid,
-  memoryEndOf,
   noteIsAbout,
-  noteMemoryEnd,
   openTranscript,
-  type PeakTool,
   profileMarkPath,
   profilePath,
   type RunRecord,
@@ -432,7 +413,6 @@ import { type SpawnOptions, spawnHidden, unstartedChild } from './spawn.js';
 import { ENGINE_STARTS, START_RETRY_MS } from './start-race.js';
 import { endedAsItStarted } from './start-watch.js';
 import {
-  casesRetried,
   declaringAdvice,
   ERRORS_KEPT,
   type ErrorsJudged,
@@ -440,15 +420,12 @@ import {
   funcOf,
   type LogRead,
   named,
-  printedPassing,
   pushErrorsFailedSentence,
   readEngineLog,
   readExpected,
-  reasonHeadlinesOf,
   SuiteCuts,
   suiteNotRunFault,
   uncollectedSaid,
-  withoutReasonHeadlines,
 } from './suite-judge.js';
 import {
   capsFrames,
@@ -1443,7 +1420,7 @@ export function endedWithoutACode(run: {
   if (!run.throughEditor) {
     return run.endedHere
       ? 'This run was started by another server, so nothing here held it and its exit code was never collected. Everything it printed is below, read back from its transcript.'
-      : 'This run was started by another server, the one this server replaced or one running beside it, and it ended with nothing here waiting on it, so its exit code was never collected. Everything it printed is below, read back from its transcript.';
+      : 'This run was started by another server, the one this server replaced, and it ended with nothing here waiting on it, so its exit code was never collected. Everything it printed is below, read back from its transcript.';
   }
   const kept =
     "A game the editor plays is the editor's own child, so its exit code stays with the editor and none was collected here.";
@@ -2737,14 +2714,13 @@ function withScanWait(outcome: HeadlessOutcome, scanned: ScanWait): HeadlessOutc
 }
 
 /**
- * The verdict part for what [param skipped] lists, counting every case it names and each a suite
- * skipped whole held. Undefined when nothing was skipped.
+ * The verdict part for what [param skipped] lists. Undefined when nothing was skipped.
  */
-function skippedVerdict(skipped: readonly { readonly cases?: number }[]): string | undefined {
-  if (skipped.length === 0) {
+function skippedVerdict(skipped: readonly unknown[]): string | undefined {
+  const count = skipped.length;
+  if (count === 0) {
     return undefined;
   }
-  const count = skipped.reduce((sum, one) => sum + (one.cases ?? 1), 0);
   return `${count === 1 ? 'one case' : `${String(count)} cases`} skipped with do_skip, so ${count === 1 ? 'it' : 'they'} never ran`;
 }
 
@@ -3862,7 +3838,7 @@ const OUTPUT_PATH_SOLUTIONS = [
  * project knows it by: both read `../outside.tscn` as a file to open and an absolute path as a
  * project file, so the boundary belongs on this side.
  */
-export const PROJECT_FILE_ARGUMENTS = [
+const PROJECT_FILE_ARGUMENTS = [
   'scenePath',
   'instancePath',
   'inherits',
@@ -5662,8 +5638,6 @@ interface TestRan extends TestPrepared {
   run: SpawnedTest;
   /** What the piped streams said, read as the run's log let each entry go. */
   tally: TestRunTally;
-  /** The diffs of failing strings the console printed, colours and all. */
-  diffs: readonly PrintedDiff[];
   timedOut: boolean;
   /** Why the engine was ended for printing past the limit a log may hold, or null when it was not. */
   capped: string | null;
@@ -5767,8 +5741,6 @@ interface TestAnswer extends TestErrorsJudged {
   unmatched: string[];
   testsNotRun: string[];
   casesNotRun: string[];
-  /** The cases that failed and then passed on a retry, as path > case. */
-  retried: string[];
   /** The suites asked for that never started or never finished, as gdharness test says it. */
   suitesNotRun: string[];
   declaredAs: string;
@@ -5778,7 +5750,7 @@ interface TestAnswer extends TestErrorsJudged {
    * The cases, rows and suites skipped with do_skip, how many cases never ran for it, and `cut` where
    * the reason was cut off.
    */
-  casesSkipped: { test: string; reason: string; cases?: number; cut?: true }[];
+  casesSkipped: { test: string; reason: string }[];
   engineEntriesShown: ReturnType<typeof foldedRepeats>;
 }
 
@@ -5897,8 +5869,6 @@ export class GodotServer {
    * printed and how it ended can still be read. Read through [pickRun] and [currentRun].
    */
   private readonly runs: GodotProcess[] = [];
-  /** The ending of each run ended for its memory, which an answer about the run waits for. */
-  private readonly memoryEndings = new WeakMap<GodotProcess, Promise<void>>();
   // When this server last answered an editor_run check, whose run is kept nowhere afterwards.
   private lastCheckAt: number | null = null;
   private readonly updates = new UpdateCheck(SERVER_VERSION);
@@ -5941,8 +5911,6 @@ export class GodotServer {
     readonly arguments: readonly string[];
     /** How it was started, so a start that died as it started can be made again the same way. */
     readonly start: EditorStart;
-    /** Set when the editor was ended for holding more memory than its ceiling. */
-    memoryEnd?: MemoryEnd;
   } | null = null;
 
   /**
@@ -10432,36 +10400,9 @@ export class GodotServer {
     });
   }
 
-  /**
-   * The ceiling for the engine of a call, or the refusal when the project's setting or
-   * GDHARNESS_ENGINE_MEMORY_CEILING_MB is not a size, or the machine has no room for what this
-   * project's last engine of [param tool] held.
-   */
-  private async memoryCeiling(
-    projectPath: string,
-    tool: PeakTool,
-  ): Promise<
-    { readonly ok: true; readonly ceiling: Ceiling } | { readonly ok: false; readonly response: ToolResponse }
-  > {
-    let ceiling: Ceiling;
-    try {
-      ceiling = ceilingFor(projectPath);
-    } catch (error) {
-      return { ok: false, response: this.createErrorResponse(errorMessage(error)) };
-    }
-    const refused = await memoryRefusal(projectPath, tool, ceiling);
-    return refused === null
-      ? { ok: true, ceiling }
-      : { ok: false, response: this.createErrorResponse(refused) };
-  }
-
   /** A test run's class cache rebuilt and its imports brought up to date, before the engine starts. */
   private async testRebuilt(run: TestEngine): Promise<ToolResponse> {
     const { project } = run;
-    const ceiling = await this.memoryCeiling(project.value.path, 'project_test');
-    if (!ceiling.ok) {
-      return ceiling.response;
-    }
     // The rebuild waits out the editor's scan before it runs, so what it waited is what this run
     // waited, and the engine below starts on the cache the rebuild left.
     const began = Date.now();
@@ -10609,7 +10550,7 @@ export class GodotServer {
       callSignal(),
       (one) => !one.timedOut && one.stopped.for === null && diedAtStartOf(one.run),
     );
-    const { run, tally, diffs, timedOut, capped, silentForMs, saidAnything, stopped } = attempt;
+    const { run, tally, timedOut, capped, silentForMs, saidAnything, stopped } = attempt;
     // The helper's own failure reaches only its file, and the exit it leaves says nothing.
     // Or its pid never came, which is a helper that hung until the run's limit ended it.
     const helperFailed = onDesktop
@@ -10631,7 +10572,6 @@ export class GodotServer {
       ...prepared,
       run,
       tally,
-      diffs,
       timedOut,
       capped,
       silentForMs,
@@ -10650,7 +10590,6 @@ export class GodotServer {
   ): Promise<{
     readonly run: SpawnedTest;
     readonly tally: TestRunTally;
-    readonly diffs: readonly PrintedDiff[];
     readonly timedOut: boolean;
     readonly capped: string | null;
     readonly silentForMs: number;
@@ -10682,18 +10621,12 @@ export class GodotServer {
       userDataIn(userData),
       onDesktop ? { directory: project.value.path, files: helperFiles } : undefined,
       log,
-      'project_test',
-      project.value.path,
     );
     // Once the engine has gone, whatever way it ended, and before the read below removes the folder.
     const keep = async (): Promise<void> => {
       await keepPipelineCache(userData, project.value.path, engine.value, undefined, seeded);
     };
     const keeping = run.settled.then(keep, keep);
-    // As printed, colours and all, beside the log that strips them: the colours are where gdUnit4
-    // marks which characters of a failing string were there, and its report drops them. Read a
-    // suite at a time, since the whole console can pass what one string holds.
-    const diffs = new SuiteDiffs();
     // A suite printing past what a log may hold ends the engine, as a share doing so ends gdharness
     // test's. Each suite is judged on the log and on the console, the console's errors counted with
     // its other lines, from where the suite began to where the next one does.
@@ -10713,7 +10646,6 @@ export class GodotServer {
     let lastSaid = Date.now();
     let saidAnything = false;
     run.process.stdout?.on('data', (data: Buffer) => {
-      diffs.take(data);
       consoleCuts.take(data);
       capPast(consoleCuts);
       lastSaid = Date.now();
@@ -10771,7 +10703,6 @@ export class GodotServer {
     return {
       run,
       tally,
-      diffs: diffs.finish(),
       timedOut,
       capped: capped.why,
       silentForMs,
@@ -10813,10 +10744,15 @@ export class GodotServer {
       } catch (error) {
         reportProblem = errorMessage(error);
       }
-      // Read after the report, which holds the skip reasons the console cannot always end, and before
-      // the folder the log is in is discarded.
-      const reported = report === null ? undefined : reportedSkips([report]);
-      casePrinted = readEngineLog(engineLog, tally.nested, declaredErrors, undefined, reported);
+      // Read after the report, which holds every case's outcome, and before the folder the log is in
+      // is discarded.
+      casePrinted = readEngineLog(
+        engineLog,
+        tally.nested,
+        declaredErrors,
+        undefined,
+        report === null ? undefined : [report],
+      );
     } finally {
       discard(reportsDir, userData);
       // The directory the runs share goes with the last report in it, so a project that has
@@ -10870,10 +10806,7 @@ export class GodotServer {
 
   /** Why a test run was ended before its engine finished, or null when it was not. */
   private cutShortBy(read: TestReadOut): { readonly verdict: string; readonly hung: boolean } | null {
-    const { run, tally, timedOut, timeoutMs, silentForMs, saidAnything } = read;
-    if (run.memoryEnd !== undefined) {
-      return { verdict: memoryEndedSaid(run.memoryEnd), hung: false };
-    }
+    const { tally, timedOut, timeoutMs, silentForMs, saidAnything } = read;
     return timedOut
       ? timedOutVerdict(timeoutMs, silentForMs, repeatingScriptError(tally.repeats), saidAnything)
       : null;
@@ -10881,12 +10814,12 @@ export class GodotServer {
 
   /** A test run's engine log and console judged: what it printed, how it exited and what the verdict is. */
   private async testJudged(read: TestReadOut): Promise<ToolResponse> {
-    const { run, asked, timedOut, capped, engine, project, notCompiled, report, tally, casePrinted } = read;
+    const { run, asked, timedOut, capped, engine, project, notCompiled, report, tally } = read;
     // An engine ended for printing too much is judged as one cut off by the limit.
     const cutOff = timedOut || capped !== null;
     // A verbose run's additions are ordinary lines, the leaked instances and the resources still in
     // use at exit among them, and they are what the flag was passed for. The tally took them so.
-    const engineEntries = withoutReasonHeadlines(tally.engine.result(), casePrinted.reasonHeadlines);
+    const engineEntries = tally.engine.result();
     const verdicts: Readonly<Record<number, string>> = {
       0: 'passed',
       100: failedVerdict(report),
@@ -10907,7 +10840,7 @@ export class GodotServer {
     // and `passed` is the one word a skimming reader must never be handed for one of those. Read off
     // every line, as the counts are: the newest two hundred lost an early suite's orphans, and with
     // them the warning, on any tier that printed a line per case.
-    const endedEarly = cutOff || run.memoryEnd !== undefined;
+    const endedEarly = cutOff;
     const nothingRan =
       endedEarly || notCompiled !== null ? null : tally.noReport.result()(asked.join(' and '));
     const cutShort = notCompiled === null ? this.cutShortBy(read) : null;
@@ -11063,7 +10996,6 @@ export class GodotServer {
                 exitSignal: run.exitSignal ?? undefined,
                 hung,
                 ...(timedOut ? { timedOut, silentForMs } : {}),
-                ...(run.memoryEnd === undefined ? {} : { memoryEnded: run.memoryEnd }),
                 ...(missing.length > 0 ? { missing } : {}),
                 ...nonEmpty(foldedScriptErrors(scriptErrors)),
                 ...atTheEnd,
@@ -11093,15 +11025,8 @@ export class GodotServer {
 
   /** The answer of a test run that wrote a report, judged against what the engine printed. */
   private testReported(reported: TestWithReport): ToolResponse {
-    const { tally, diffs, casePrinted, uncaught } = reported;
-    // A failure the report keeps from an attempt before a case's last is not the run's: gdUnit4 and
-    // gdharness test both go by what the case printed in the end.
-    const report = withPrintedPassesSettled(reported.report, (path, name) =>
-      printedPassing(casePrinted, path, name),
-    );
-    // From the diffs read off the console as it printed, since the whole console can pass what one
-    // string holds.
-    const { failed, briefed } = failedWithin(failedCases(report, diffs), FAILED_BUDGET);
+    const { tally, casePrinted, uncaught, report } = reported;
+    const { failed, briefed } = failedWithin(failedCases(report), FAILED_BUDGET);
     // What the report cannot say. gdUnit4 decides the run's state on orphan nodes and writes none
     // of that into its XML, so a tier that passed every case and left nodes behind arrived as the
     // word "warnings" and nothing else: no failure, no entry, nothing naming a suite. Read off
@@ -11366,31 +11291,11 @@ export class GodotServer {
       test: `${one.suite} > ${one.name}`,
       reason: one.reason,
     }));
-    // A case, row or suite skipped with do_skip never ran either. The console says each suite's reason
-    // and the report each case's, so what only the report holds is listed too.
-    const consoleSkipped = new Set(
-      [
-        ...casePrinted.mismatched,
-        ...casePrinted.unrunnable,
-        ...casePrinted.skipped.filter((one) => one.name !== null),
-      ].map((one) => `${one.suite} > ${one.name}`),
-    );
-    const skippedWhole = new Set(
-      casePrinted.skipped.filter((one) => one.name === null).map((one) => one.suite),
-    );
-    const casesSkipped = [
-      ...casePrinted.skipped.map((one) => ({
-        ...(one.name === null
-          ? { test: one.suite, reason: one.reason, cases: one.cases }
-          : { test: `${one.suite} > ${one.name}`, reason: one.reason }),
-        ...(one.cut === true ? { cut: one.cut } : {}),
-      })),
-      ...skippedInReport(report)
-        .filter((one) => !consoleSkipped.has(`${one.suite} > ${one.name}`) && !skippedWhole.has(one.suite))
-        .map((one) => ({ test: `${one.suite} > ${one.name}`, reason: one.reason })),
-    ];
-    // gdUnit4 exits 0 on such a case, and its report holds only the failure.
-    const retried = casesRetried(casePrinted);
+    // A case or row skipped with do_skip never ran either.
+    const casesSkipped = casePrinted.skipped.map((one) => ({
+      test: `${one.suite} > ${one.name}`,
+      reason: one.reason,
+    }));
     // A suite the runner was handed that printed no start or no end, which exits 0 beside the suites
     // that ran. A suite with no case, or every case of it left out, is one gdUnit4 has nothing to run
     // in. A case counts as left out by its rows when the runner said it left out any: gdUnit4 opens
@@ -11403,7 +11308,6 @@ export class GodotServer {
       .flatMap((suite) => suiteNotRunFault(casePrinted, suite.path) ?? []);
     return this.reportAnswer({
       ...judged,
-      retried,
       suitesNotRun,
       declaredAndPrinted,
       ranIn,
@@ -11452,7 +11356,6 @@ export class GodotServer {
       notSuites,
       nothingRan,
       report,
-      retried,
       rowsMismatched,
       suitesNotRun,
       testsNotRun,
@@ -11482,7 +11385,6 @@ export class GodotServer {
           missing,
           testsNotRun,
           casesNotRun,
-          retried,
           suitesNotRun,
           rowsMismatched,
           casesUnrunnable,
@@ -11501,7 +11403,6 @@ export class GodotServer {
       countedLeaks,
       declaredNotPrinted,
       notSuites,
-      retried,
       rowsMismatched,
       suitesNotRun,
       testsNotRun,
@@ -11517,7 +11418,6 @@ export class GodotServer {
           countedLeaks.length +
           testsNotRun.length +
           casesNotRun.length +
-          retried.length +
           suitesNotRun.length +
           rowsMismatched.length +
           casesUnrunnable.length +
@@ -11546,7 +11446,6 @@ export class GodotServer {
         testsNotRun.length + casesNotRun.length > 0
           ? `not run: ${[...testsNotRun, ...casesNotRun].join(', ')}`
           : undefined,
-        retried.length > 0 ? `passed only on a retry: ${retried.join(', ')}` : undefined,
         suitesNotRun.length > 0 ? suitesNotRun.join(', ') : undefined,
         rowsMismatched.length > 0
           ? `${rowsMismatched.length === 1 ? 'one row' : `${String(rowsMismatched.length)} rows`} skipped for data that does not fit the case`
@@ -11571,7 +11470,6 @@ export class GodotServer {
       hung,
       missing,
       notSuites,
-      retried,
       rowsMismatched,
       silentForMs,
       testsNotRun,
@@ -11583,7 +11481,6 @@ export class GodotServer {
       ...(testsNotRun.length + casesNotRun.length > 0
         ? { testsNotRun: [...testsNotRun, ...casesNotRun] }
         : {}),
-      ...(retried.length > 0 ? { passedOnARetry: retried } : {}),
       ...(rowsMismatched.length > 0 ? { rowsMismatched } : {}),
       ...(casesUnrunnable.length > 0 ? { casesUnrunnable } : {}),
       ...(casesSkipped.length > 0 ? { casesSkipped } : {}),
@@ -11672,13 +11569,10 @@ export class GodotServer {
 
   /** The sentences of a test run's note about what was asked for and did not run. */
   private notRunNotes(s: TestAnswer): (string | undefined)[] {
-    const { casesNotRun, failed, missingNote, retried, rowsMismatched, suitesNotRun, testsNotRun } = s;
+    const { casesNotRun, missingNote, rowsMismatched, suitesNotRun, testsNotRun } = s;
     return [
       missingNote,
       testsNotRun.length > 0 ? notRunSaid(testsNotRun) : undefined,
-      retried.length > 0
-        ? `${retried.join(', ')} failed before ${retried.length === 1 ? 'it' : 'they'} passed on a retry, which gdUnit4's flaky check counts as a pass. The run is not called passed, as gdharness test judges it${failed.length > 0 ? ', and failed holds the first failure' : ''}.`
-        : undefined,
       suitesNotRun.length > 0
         ? `${suitesNotRun.join(', ')}, though gdUnit4 exited without saying so. The run is not called passed, as gdharness test judges it.`
         : undefined,
@@ -11797,14 +11691,8 @@ export class GodotServer {
       suitesPassed: report.suites.length - unclean.length,
       // Less the ones a suite declared and printed, which are the run going as written, and the
       // lines of skip reasons, which gdUnit4 printed as text.
-      engineErrors: Math.max(
-        0,
-        run.log.count('error') - declaredAndPrinted - reasonHeadlinesOf(casePrinted.reasonHeadlines, 'error'),
-      ),
-      engineWarnings: Math.max(
-        0,
-        run.log.count('warning') - reasonHeadlinesOf(casePrinted.reasonHeadlines, 'warning'),
-      ),
+      engineErrors: Math.max(0, run.log.count('error') - declaredAndPrinted),
+      engineWarnings: run.log.count('warning'),
       // An entry already under uncaughtScriptErrors is named here without its detail again: a stack
       // overflow's backtrace is most of an answer, and it was carried twice.
       engineEntries: engineEntriesShown.map((entry) =>
@@ -13027,11 +12915,7 @@ export class GodotServer {
       launchedEditorEnded:
         status.connected || launchedIsUp || this.launchedEditor === null
           ? undefined
-          : `pid ${String(this.launchedEditor.pid)}: ${
-              this.launchedEditor.memoryEnd === undefined
-                ? howTheEditorEnded(this.launchedEditor.projectPath, this.launchedEditor.pid)
-                : memoryEndedSaid(this.launchedEditor.memoryEnd)
-            }`,
+          : `pid ${String(this.launchedEditor.pid)}: ${howTheEditorEnded(this.launchedEditor.projectPath, this.launchedEditor.pid)}`,
       // What the editor this server opened saved away on its way in, said once. The restart says
       // this in its own answer. An open cannot, because it returns before the save happens.
       ...(status.connected ? this.whatTheLaunchedEditorDropped() : {}),
@@ -14106,10 +13990,6 @@ export class GodotServer {
     // Read before the launch settles it, so the answer can say this open finished something
     // rather than started something.
     const unfinished = restartOwed(project.path);
-    const ceiling = await this.memoryCeiling(project.path, 'editor_launch');
-    if (!ceiling.ok) {
-      return ceiling.response;
-    }
     const opened = await this.openAnEditor(engine.value, project.path, ports, {
       hidden: args['hidden'] === true,
       silent: resolveSilent(args['silent']),
@@ -14220,32 +14100,10 @@ export class GodotServer {
     ports: EditorPorts,
     start: EditorStart,
   ): Promise<EditorOpened> {
-    let ceiling: Ceiling;
-    try {
-      ceiling = ceilingFor(projectPath);
-    } catch (error) {
-      return { pid: null, startedAt: null, error: errorMessage(error), arguments: [] };
-    }
     const opened = await openEditorProcess(engine, projectPath, ports, start);
     if (opened.pid === null) {
       return opened;
     }
-    const { pid } = opened;
-    engineMemory.guard(
-      pid,
-      ceiling,
-      (end) => {
-        if (this.launchedEditor?.pid === pid) {
-          this.launchedEditor.memoryEnd = end;
-        }
-        try {
-          process.kill(pid, 'SIGKILL');
-        } catch {
-          // Gone already.
-        }
-      },
-      { project: projectPath, tool: 'editor_launch' },
-    );
     // Remembered so that "nothing is coming" and "the editor this server just started is still
     // importing" stop being the same answer. The grace window is measured from the bridge taking
     // its port, which is the right reference for an editor that was already up and has to notice,
@@ -14504,6 +14362,12 @@ export class GodotServer {
     // that game and said nothing about it.
     await this.pickUpWhatTheEditorIsPlaying(project.value.path);
     await this.adoptRecordedRuns();
+    // The note of a place holds one run, so a start here would replace the note of a game another
+    // live server is running in the same place.
+    const placeTaken = readRunRecord(project.value.path, undefined, run.asked.savesIn);
+    if (placeTaken !== null && this.heldByAnotherServer(placeTaken) && alive(placeTaken.pid)) {
+      return this.anotherServersGameRefusal(placeTaken, true);
+    }
     let ended: EndedRun | null = null;
     // Only a run of this start's own place is ended: the same project writing into the same
     // `user://`. A run of another place goes on beside it, and ending it stopped a bench in one
@@ -14643,10 +14507,6 @@ export class GodotServer {
         : {}),
     });
     this.logDebug(`Running Godot project: ${engine.value} ${cmdArgs.join(' ')}`);
-    const memory = await this.memoryCeiling(project.value.path, 'editor_run');
-    if (!memory.ok) {
-      return memory.response;
-    }
     const launch = async (): Promise<GodotProcess | { error: string }> => {
       const game = await this.launchKeptGame(
         engine.value,
@@ -14663,16 +14523,6 @@ export class GodotServer {
         engineCalls,
         asked.savesIn,
       );
-      if (!('error' in game) && game.pid !== null) {
-        engineMemory.guard(
-          game.pid,
-          memory.ceiling,
-          (end) => {
-            this.endForItsMemory(game, end);
-          },
-          { project: project.value.path, tool: 'editor_run' },
-        );
-      }
       return game;
     };
     const started = await launch();
@@ -14683,34 +14533,6 @@ export class GodotServer {
     }
     this.holdTheStart(started, run);
     return await this.spawnedStartAnswer(run, started, cmdArgs, launch);
-  }
-
-  /**
-   * Ends [param game], a run ended for its memory, and says so on it. The ending is kept on the run
-   * until it is done, so an answer about the run waits for the exit its keeper writes rather than
-   * reading a game gone with no code.
-   */
-  private endForItsMemory(game: GodotProcess, end: MemoryEnd): void {
-    const endedBy = `its memory ceiling: ${memoryCeilingSaid(end)}`;
-    // Another server holding the game, still answering, finds it gone and reads why from here.
-    noteMemoryEnd(game, endedBy);
-    const ending = (async (): Promise<void> => {
-      if (this.runs.includes(game)) {
-        await this.endActiveGame(game, endedBy, true, false);
-        // Neither its keeper nor a signal from here reached the game: another server's end had, and
-        // that end is the one this server answers.
-        if (game.endedHere === endedBy && game.endedThrough === undefined) {
-          game.endedHere = null;
-        }
-      } else if (game.pid !== null) {
-        try {
-          process.kill(game.pid, 'SIGKILL');
-        } catch {
-          // Gone already.
-        }
-      }
-    })();
-    this.memoryEndings.set(game, ending);
   }
 
   /** Makes [param started] the run this server holds for a start spawned here. */
@@ -15312,7 +15134,7 @@ export class GodotServer {
 
     // In one of the machine's engine slots, like every engine started for a call, taken before the
     // play so a full machine holds the play rather than the game.
-    const slot = await slotForCall(true, projectPath);
+    const slot = await slotForCall();
     // Armed before the play rather than switched on after it, so the profiler goes on as the game's
     // debugger session starts, which is before any of its scripts have run.
     if (profiled) {
@@ -15388,7 +15210,7 @@ export class GodotServer {
     // A game that did not announce inside the wait is tied later or never, and nothing ends a lock
     // naming this server until it goes, so the slot is given back rather than held for a run it
     // cannot see end.
-    await settledRunSlot(played, callSignal());
+    settledRunSlot(played);
     return this.jsonTextResponse({
       started: true,
       through: 'editor',
@@ -16147,10 +15969,7 @@ export class GodotServer {
     env?: NodeJS.ProcessEnv,
     onDesktop?: { readonly directory: string; readonly files: HelperFiles },
     log?: GameLog,
-    tool: PeakTool = 'editor_run',
-    project?: string,
   ): Promise<SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void }> {
-    const ceiling = ceilingFor(project);
     if (onDesktop === undefined && process.platform === 'win32') {
       const compiled = await ensureHelperCompiled();
       if (compiled !== null) {
@@ -16160,7 +15979,7 @@ export class GodotServer {
     // In one of the machine's engine slots, taken before the engine starts and given back once its
     // log is whole, so the caller's own limit counts the engine's time and not the wait. [param
     // project] is the project the run is of, which gives the slot its repository and priority.
-    const held = await slotForCall(false, project, tool);
+    const held = await slotForCall();
     try {
       const run = this.spawnHeld(
         godotPath,
@@ -16170,23 +15989,9 @@ export class GodotServer {
         log,
       );
       void run.settled.finally(held.release);
-      void slotEngineNamed(held.lock, run, onDesktop?.files.pid ?? run.engineFiles?.pid);
       // The pid callers read is the engine's, which the helper writes down once it has started it.
       if (run.engineFiles !== undefined) {
         await this.engineKnown(run, run.engineFiles);
-      }
-      if (run.pid !== null) {
-        const guard = engineMemory.guard(
-          run.pid,
-          ceiling,
-          (end) => {
-            run.memoryEnd = end;
-            run.stop();
-          },
-          project === undefined ? undefined : { project, tool },
-          (bytes) => raiseSlotMemory(held.lock, bytes),
-        );
-        void run.settled.finally(guard.release);
       }
       return run;
     } catch (error) {
@@ -16383,7 +16188,7 @@ export class GodotServer {
     // the lock over once it has handed the game's pid back, and gives it back when the run ends,
     // since the run outlives this server. So a started run leaves the lock to it, and one the keeper
     // never took over names this server, which frees it by going.
-    const slot = await slotForCall(true, projectPath);
+    const slot = await slotForCall();
     // From the slot rather than the call, since the wait to announce is counted from here: counted
     // from the call, a 24-minute wait for a slot spent the whole of it before the engine began.
     const startedAt = Date.now();
@@ -16412,9 +16217,10 @@ export class GodotServer {
           projectPath,
           ...(savesIn === undefined ? {} : { savesIn }),
           ...this.servedBy(),
+          serverPid: process.pid,
           ...this.profileOfAKeptRun(profile, engineCalls),
           ...(debugged ? { breakpoints: this.breakpointsForAGame(projectPath) } : { debugged: false }),
-          slot: { lock: slot.lock, from: slot.from, by: `a game of ${projectPath} editor_run started` },
+          slot: { lock: slot.lock },
         },
         ...(desktop === undefined ? {} : { desktop }),
       });
@@ -16958,6 +16764,7 @@ export class GodotServer {
       if (
         this.runs.some((held) => held.transcript === record.transcript) ||
         !(this.couldBeOurs(record.projectPath) || this.couldBeOurs(record.servedBy ?? '')) ||
+        this.heldByAnotherServer(record) ||
         !alive(record.pid) ||
         !(await couldStillBeTheRecordedRun(record))
       ) {
@@ -16965,7 +16772,6 @@ export class GodotServer {
       }
       const adopted = this.adoptionOf(record);
       this.drainTranscript(adopted);
-      this.guardTheAdopted(adopted, record.projectPath);
       this.holdRun(adopted);
     }
     if (this.runs.length === 0) {
@@ -16982,7 +16788,8 @@ export class GodotServer {
     const record = this.recordOfTheRun(found, latest);
     if (
       record === null ||
-      !(this.couldBeOurs(record.projectPath) || this.couldBeOurs(record.servedBy ?? ''))
+      !(this.couldBeOurs(record.projectPath) || this.couldBeOurs(record.servedBy ?? '')) ||
+      this.heldByAnotherServer(record)
     ) {
       return;
     }
@@ -16993,35 +16800,76 @@ export class GodotServer {
     // for the run would report a finished bench as running and offer its number to be killed.
     if (!alive(record.pid) || !(await couldStillBeTheRecordedRun(record))) {
       this.settleAnEndedAdoption(adopted, record);
-    } else {
-      this.guardTheAdopted(adopted, record.projectPath);
     }
     this.holdRun(adopted);
   }
 
   /**
-   * Guards [param adopted], a game the server before this one started and left running, against
-   * its project's memory ceiling, as the server that started it did.
+   * Whether the run [param record] notes is another server's: the process that started it is still
+   * running. A server answers only for the games it started, and for those of a server that has
+   * gone, which the next server of the folder takes over. A note with no server process is read as
+   * one whose server has gone.
    */
-  private guardTheAdopted(adopted: GodotProcess, projectPath: string): void {
-    const { pid } = adopted;
-    if (pid === null || engineMemory.isGuarding(pid)) {
-      return;
+  private heldByAnotherServer(record: RunRecord): boolean {
+    const { serverPid } = record;
+    return serverPid !== undefined && serverPid !== process.pid && alive(serverPid);
+  }
+
+  /**
+   * The note of a game another live server started, among the games going with one of [param pids]
+   * as their process or as a process under it, or null. A worker a game opened is under its run's
+   * process, so the process tree is read once and only when such a server has a game going.
+   */
+  private async recordOfAnotherServersGame(pids: readonly number[]): Promise<RunRecord | null> {
+    if (pids.length === 0) {
+      return null;
     }
-    let ceiling: Ceiling;
-    try {
-      ceiling = ceilingFor(projectPath);
-    } catch {
-      // A setting that is not a size refuses the next start, and this game is already running.
-      return;
+    const going = everyRunRecord().filter((one) => this.heldByAnotherServer(one) && alive(one.pid));
+    if (going.length === 0) {
+      return null;
     }
-    engineMemory.guard(
-      pid,
-      ceiling,
-      (end) => {
-        this.endForItsMemory(adopted, end);
-      },
-      { project: projectPath, tool: 'editor_run' },
+    const direct = going.find((one) =>
+      pids.some((pid) => pid === one.pid || (one.restartedFrom ?? []).some((before) => before.pid === pid)),
+    );
+    if (direct !== undefined) {
+      return direct;
+    }
+    const tree = await processTree();
+    if (tree === undefined) {
+      return null;
+    }
+    return going.find((one) => pids.some((pid) => ancestorsIn(tree, pid, one.pid).includes(one.pid))) ?? null;
+  }
+
+  /**
+   * The refusal for a call that names or needs a game another live server started, or null when
+   * none of [param pids] is one. It names the folder whose server holds the game and where the call
+   * works.
+   */
+  private async refusedForAnotherServersGame(pids: readonly number[]): Promise<ToolResponse | null> {
+    const record = await this.recordOfAnotherServersGame(pids);
+    return record === null ? null : this.anotherServersGameRefusal(record, false);
+  }
+
+  /**
+   * The refusal naming the folder whose server runs the game [param record] notes. A start would
+   * replace that game's note, so it is told to use a folder or `savesIn` of its own instead.
+   */
+  private anotherServersGameRefusal(record: RunRecord, starting: boolean): ToolResponse {
+    const folder = record.servedBy ?? record.projectPath;
+    const held = `The game with pid ${record.pid} was started by the server of ${folder}, which is running`;
+    if (starting) {
+      return this.createErrorResponse(
+        `${held}, and it holds this project folder and its user:// folder, so nothing was started: a server answers only for the games it started. Start in the session serving ${folder}, or from a worktree of its own with its own server.`,
+        [
+          `Start in the session serving ${folder}`,
+          'A worktree is its own project folder, served by its own server',
+        ],
+      );
+    }
+    return this.createErrorResponse(
+      `${held}, so nothing was done to it: a server answers only for the games it started. Make this call in the session serving ${folder}.`,
+      [`Make the call in the session serving ${folder}`],
     );
   }
 
@@ -17458,21 +17306,12 @@ export class GodotServer {
     cmdArgs: string[],
     env: NodeJS.ProcessEnv | undefined,
     timeoutMs: number,
-    projectPath: string,
   ): Promise<{
     readonly boot: Awaited<ReturnType<GodotServer['spawnGame']>>;
     readonly hung: boolean;
     readonly crashedStarts?: number;
   }> {
-    const started = await this.spawnGame(
-      godotPath,
-      cmdArgs,
-      env,
-      undefined,
-      undefined,
-      'boot_check',
-      projectPath,
-    );
+    const started = await this.spawnGame(godotPath, cmdArgs, env, undefined, undefined);
     const hungUp = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         started.process.kill();
@@ -17503,10 +17342,6 @@ export class GodotServer {
     engineArgs: readonly string[],
     engineNote: string | null,
   ): Promise<ToolResponse> {
-    const memory = await this.memoryCeiling(projectPath, 'boot_check');
-    if (!memory.ok) {
-      return memory.response;
-    }
     const { frames, timeoutMs } = bootLimits(args);
     const cmdArgs = runArguments({
       projectPath,
@@ -17521,7 +17356,7 @@ export class GodotServer {
       : undefined;
     // An engine that died as it started never reached the project, so the boot is started again.
     const { boot, hung } = await startedUntilItRuns(
-      () => this.bootOnce(godotPath, cmdArgs, env, timeoutMs, projectPath),
+      () => this.bootOnce(godotPath, cmdArgs, env, timeoutMs),
       callSignal(),
       (one) => !one.hung && diedAtStartOf(one.boot),
     );
@@ -17541,8 +17376,6 @@ export class GodotServer {
     return this.jsonTextResponse({
       booted: !hung && boot.exitCode === 0 && errors === 0,
       hung,
-      endedBy: boot.memoryEnd === undefined ? undefined : memoryEndedSaid(boot.memoryEnd),
-      memoryEnded: boot.memoryEnd,
       engineNote: engineNote ?? undefined,
       exitCode: boot.neverStarted === true ? null : boot.exitCode,
       exitSignal: boot.exitSignal ?? undefined,
@@ -17579,7 +17412,7 @@ export class GodotServer {
     }
     const run = picked.run;
     if (!run) {
-      return this.noRunToAnswer(args);
+      return await this.noRunToAnswer(args);
     }
     const elsewhere = this.anotherProjectsRun(run.projectPath, args, 'read');
     if (elsewhere) {
@@ -17943,7 +17776,7 @@ export class GodotServer {
     }
     const run = picked.run;
     if (!run) {
-      return this.noRunToAnswer(args);
+      return await this.noRunToAnswer(args);
     }
     const elsewhere = this.anotherProjectsRun(run.projectPath, args, 'waited on');
     if (elsewhere !== null) {
@@ -18056,21 +17889,12 @@ export class GodotServer {
     // The keeper that holds the game writes its exit into the record the moment it ends, which can
     // be a moment after the process has gone: answered then, the run was over with no exit code
     // and nothing saying why.
-    if (!going && typeof run.endedHere !== 'string') {
-      // Another server holding the game that ended it for its memory says so here, since it clears
-      // the run's note, which is where its exit would be read.
-      const beside = memoryEndOf(run);
-      if (beside !== undefined) {
-        run.endedBeside = beside;
-      }
-    }
     if (
       !going &&
       run.pid !== null &&
       !exited(run) &&
       run.endedUnwatched !== true &&
       typeof run.endedHere !== 'string' &&
-      run.endedBeside === undefined &&
       !(await this.untilTheExitIsRecorded(run))
     ) {
       run.endedUnwatched = true;
@@ -18380,7 +18204,7 @@ export class GodotServer {
     }
     const run = picked.run;
     if (!run) {
-      return this.noRunToAnswer(args);
+      return await this.noRunToAnswer(args);
     }
     const elsewhere = this.anotherProjectNamed(
       args,
@@ -18389,9 +18213,6 @@ export class GodotServer {
     if (elsewhere !== null) {
       return elsewhere;
     }
-    // A run being ended for its memory is answered once that ending is done, with the exit its
-    // keeper wrote.
-    await this.memoryEndings.get(run);
     await this.tieThePlayedGame(run);
     this.drainEditorOutput(run);
     this.drainTranscript(run);
@@ -18524,7 +18345,7 @@ export class GodotServer {
   private settleARunThatEnded(run: GodotProcess, going: boolean): void {
     if (run.endedUnwatched !== true && !going) {
       run.log.finish();
-      run.endedUnwatched = noCodeWillCome(run) && run.endedBeside === undefined;
+      run.endedUnwatched = noCodeWillCome(run);
     }
   }
 
@@ -18542,7 +18363,7 @@ export class GodotServer {
     transcript: string | undefined;
   } {
     return {
-      endedBy: stillRunning(run) ? undefined : (run.endedHere ?? run.endedBeside ?? null),
+      endedBy: stillRunning(run) ? undefined : (run.endedHere ?? null),
       project: run.throughEditor ? undefined : (run.projectPath ?? undefined),
       transcript: run.transcript ?? undefined,
     };
@@ -18695,9 +18516,6 @@ export class GodotServer {
     if (typeof run.endedHere === 'string') {
       return [`This run was ended here, by ${run.endedHere}.`];
     }
-    if (run.endedBeside !== undefined && !stillRunning(run)) {
-      return [`This run was ended by another server of this project, by ${run.endedBeside}.`];
-    }
     if (stillRunning(run) || run.throughEditor) {
       return [];
     }
@@ -18814,7 +18632,7 @@ export class GodotServer {
       return picked.refusal;
     }
     if (!stopped) {
-      return this.createErrorResponse(this.nothingOfOursIsRunning(readNonEmptyString(args, 'projectPath')));
+      return await this.noRunToAnswer(args);
     }
     const elsewhere = this.anotherProjectsRun(stopped.projectPath, args, 'stopped');
     if (elsewhere !== null) {
@@ -18878,8 +18696,17 @@ export class GodotServer {
   }
 
   /** The refusal for a call whose pid or project names no run this server holds. */
-  private noRunToAnswer(args: OperationParams): ToolResponse {
+  private async noRunToAnswer(args: OperationParams): Promise<ToolResponse> {
     const pid = readNumber(args, 'pid');
+    const asked = readNonEmptyString(args, 'projectPath');
+    const another = await this.refusedForAnotherServersGame(
+      pid !== undefined
+        ? [pid]
+        : this.everyRuntimeOfOurs(this.anotherProjectThanOurs(asked)).map((one) => one.pid),
+    );
+    if (another !== null) {
+      return another;
+    }
     if (pid !== undefined) {
       return this.createErrorResponse(`This server holds no run with pid ${pid}.`, [
         'editor_status lists the games running on the machine under runtimes, and this server holds under game.run or game.runs',
@@ -18977,6 +18804,10 @@ export class GodotServer {
     andChildren: boolean,
     args: OperationParams,
   ): Promise<ToolResponse> {
+    const another = await this.refusedForAnotherServersGame([pid]);
+    if (another !== null) {
+      return another;
+    }
     const announced = runtimesAnnounced();
     const among = (project?: string): RuntimeEndpoint | UnspokenRuntime | undefined =>
       [
@@ -22408,7 +22239,7 @@ export class GodotServer {
     // whole runtime timeout, ten seconds, and then a guess that it may be paused at a breakpoint.
     // The session was told, so it says so at once and says what lets the game go. Knowledge and
     // not a default: a session opened after the stop has not been told and asks nothing here.
-    const heldRefusal = await this.refusedForAHeldGame(choice.endpoint, announced.running);
+    const heldRefusal = await this.refusedForTheGameChosen(choice.endpoint, announced.running);
     if (heldRefusal !== null) {
       return heldRefusal;
     }
@@ -22423,6 +22254,17 @@ export class GodotServer {
       chosenAmongSeveral,
       answeredBy,
     });
+  }
+
+  /** The refusal for a runtime call whose game is another live server's or is held by a debugger, or null. */
+  private async refusedForTheGameChosen(
+    endpoint: RuntimeEndpoint,
+    running: readonly RuntimeEndpoint[],
+  ): Promise<ToolResponse | null> {
+    return (
+      (await this.refusedForAnotherServersGame([endpoint.pid])) ??
+      (await this.refusedForAHeldGame(endpoint, running))
+    );
   }
 
   /** The refusal for a runtime call when the game it names is held by a debugger, or null. */

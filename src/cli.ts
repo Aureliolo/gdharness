@@ -10,7 +10,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serverServing } from './bridge-announce.js';
 import { editorOpenOptionsOf, holdTheEditors, openTheEditor } from './editor-open.js';
-import { nameSlotTaker, sayWaitsTo, withoutASlot } from './engine-slots.js';
+import { sayWaitsTo, withoutASlot } from './engine-slots.js';
 import { letWindowsReportCrashes } from './error-mode.js';
 import { EngineUsageError, Refusal } from './errors.js';
 import { GodotLocator } from './godot-path.js';
@@ -1110,15 +1110,6 @@ async function spread(): Promise<void> {
   process.exitCode = await runSpreadCommand(options, godotPath);
 }
 
-/** What the slot this process takes is called to whoever waits for it. */
-function slotTakerName(): string {
-  if (command !== undefined) {
-    return `gdharness ${command}`;
-  }
-  const served = process.env['GDHARNESS_PROJECT'];
-  return `a gdharness server${served === undefined || served === '' ? '' : ` of ${served}`}`;
-}
-
 /** Runs the commands that read their own options, and answers whether `command` was one of them. */
 async function ranOwnOptionsCommand(): Promise<boolean> {
   if (command !== undefined && asksForHelp()) {
@@ -1174,7 +1165,6 @@ async function main(): Promise<void> {
       console.error(`gdharness: ${line}`);
     });
   }
-  nameSlotTaker(slotTakerName());
   if (await ranOwnOptionsCommand()) {
     return;
   }

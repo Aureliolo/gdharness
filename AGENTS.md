@@ -96,6 +96,8 @@ the headless engine operations. Both are GDScript. `test/` holds the suites, wit
 - CI runs the suites, since the repository is public. Before calling a change done, push and read
   every suite CI runs: `test:ci`, `test:integration`, `test:metadata` and `test:packaging`, fifteen
   files in all, plus the engine and editor legs.
+- A pull request runs the engine legs on Linux and Windows only. macOS runs on the release pull
+  request and on `main` after a merge, so a macOS-only fault shows up there.
 - `build-and-test` leaves the regressions and `test:integration` to the engine legs, which run them
   with Godot, unless the legs are skipped.
 - Locally, start an engine only to debug a failing test, or to show a new test fails with its fix
@@ -138,18 +140,14 @@ author, not its content.
 
 ### Which findings get fixed
 
-A fault found by a check or probe is fixed only when a game hit it or can plausibly hit it: a real
-caller, writer or interleaving produces its input. A case with no real source is named in the check
-report and is not filed. It neither fails the check nor holds a release. The checker only proposes
-that call. The coordinator confirms it. A flag combination or argument value a caller can pass is always
-a real source.
+A fault is fixed when a user hit it: a game's report, a CI failure or a run that went wrong. A fault
+a check or probe found that no user hit is named in the check report and is not filed. It neither
+fails the check nor holds a release. Run no probe passes that look for faults no user met.
 
 ### Feature requests
 
-A downstream project's request for something new is judged before anything is built. Build it only
-if it fits what gdharness is for and other games could use it. First check whether the caller is
-using a tool wrongly, or could do the job with what exists or in its own code. If so, answer with
-that way and build nothing.
+A request for something new is built only when the caller is blocked without it and cannot do the
+job with what exists or in its own code. Otherwise answer with the way that works and build nothing.
 
 ### Versions
 

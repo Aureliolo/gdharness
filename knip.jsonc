@@ -26,5 +26,8 @@
   "project": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"],
   // uv is no npm package. It comes from `.github/actions/install-uv` in CI and from the setup in
   // CONTRIBUTING.md elsewhere, and its tools are pinned in uv.lock.
-  "ignoreBinaries": ["uv"]
+  "ignoreBinaries": ["uv"],
+  // fs-native-extensions is read as files: the build copies its prebuilt addons beside the bundle,
+  // and no source imports it.
+  "ignoreDependencies": ["fs-native-extensions"]
 }

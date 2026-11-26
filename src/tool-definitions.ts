@@ -223,7 +223,8 @@ export function theGamePicked(): string {
     'A call naming neither `projectPath` nor `pid` goes to the game this server started or is ' +
     'playing, named under `answeredBy` when others run too. Failing that, it goes to the only game ' +
     'running. Otherwise the call is refused. The refusal names every game and the argument that ' +
-    'tells them apart: `pid` within one project, `projectPath` across projects.'
+    'tells them apart: `pid` within one project, `projectPath` across projects. A game another live ' +
+    "server started is never answered for: the call is refused with that server's project folder."
   );
 }
 
@@ -237,11 +238,11 @@ const PROJECT_PATH: JsonSchema = {
 };
 const RUNNING_PROJECT_PATH: JsonSchema = {
   type: 'string',
-  description: 'Which game, when several run: its project folder.',
+  description: 'Game by project folder.',
 };
 const RUNNING_PID: JsonSchema = {
   type: 'number',
-  description: 'Its pid.',
+  description: "This server's game, by pid.",
 };
 const SCENE_PATH: JsonSchema = {
   type: 'string',
@@ -1003,7 +1004,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'scriptErrors holds the errors in full of a script that did not load, or of an autoload that did not compile. A script that does not load stops gdUnit4 before any suite runs, and an autoload that does not compile stops the run at once. The scripts that failed only because one they depend on did are listed by path under failedThroughDependency.',
       'A script in failedThroughDependency can fail on a class whose own script has a parser error, which gdUnit4 never names. Then the engine checks that script, and its error comes first, with the class it declares under declares. followFromUnresolved keeps apart the errors a script has only because that class did not resolve, which the engine reads as Variant.',
       "time is gdUnit4's own sum of the seconds its cases took, from its report. tookMs is the whole call in milliseconds, from the class rebuild to the engine's exit. tookMsBy splits it into the class rebuild (classes), the import after it (import) and the engine running the suites (engine). Each holds any wait for the editor's scan. classes and import hold any wait for another engine importing the project, and engine any wait for an engine slot. Within engine, engineStart is what the engine spent before its first suite, and engineCompile the part of it compiling the suites, which no case's time holds.",
-      'gdharness test judges a run the same way. A call that waited a second or more for engine slots, or for another engine of its project, in all has an engine_slot_wait block giving waitedMs and who held them. A run that ends without a report, at its timeout or otherwise, answers suitesFinished, suitesFailing with their failed cases, and suiteRunning, the one it was in. A suite that prints more than the 128 MiB a log may hold ends the engine, and the verdict names that suite. printedCapped names each list the answer cut and how many entries it left out. previousRunCut is a run a client cut off, kept in the project and carried by the next project_test there.',
+      'gdharness test judges a run the same way. A call that waited a second or more for engine slots, or for another engine of its project, in all has an engine_slot_wait block giving waitedMs and a note saying what it waited for. A run that ends without a report, at its timeout or otherwise, answers suitesFinished, suitesFailing with their failed cases, and suiteRunning, the one it was in. A suite that prints more than the 128 MiB a log may hold ends the engine, and the verdict names that suite. printedCapped names each list the answer cut and how many entries it left out. previousRunCut is a run a client cut off, kept in the project and carried by the next project_test there.',
       "classes is the class rebuild's answer. The classes each addon declares are counted under addedInAddons and changedInAddons rather than named. classes.lostSinceLastRebuild names a class the rebuild puts back that the cache had after the last rebuild. The editor loses it by writing its shorter list over the file on every save until restarted. uidsMissing names each suite the run ran with no .uid beside it, with uidsNote.",
       `engineNote names the engine the run used and its version, when it was not this server's. A project other than the server's own runs the engine its harness config names under GODOT_PATH. ${IMPORTED_FIRST}`,
       "A user:// of its own is made for the run on Windows and Linux and goes when the run ends. On macOS the engine reads user:// off HOME, so the run writes to the player's own, and savesNote says so. A client sending a progress token is told as each suite finishes, and at least every twenty seconds.",
@@ -1011,8 +1012,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'windowNote names the suites that needed a window. It also names any suite saying it runs headless whose every case was left out of a run that had a window. engines is 2 when the set mixed windowed and headless suites and ran as two engines, the windowed one first. The answer then has the counts and lists of both, and arguments the command line of each engine under windowed and headless. hung and timedOut are true when either engine was, and an engine that wrote no report has its explanation as a text part before the answer.',
       'timeoutMs is one limit for the whole call, so the second engine gets what the first left of it. With under 5000 ms of it left the second engine is not started, suitesNotRun names its suites, and engines is 1. The verdict gives the milliseconds left and the 5000 an engine needs to start. The note says the windowed suites ran and the headless ones were not started. A call cut off keeps for previousRunCut the suites the windowed engine finished and the suites not yet run.',
       'An entry of path that is not there is left out and named under missing, and such a run is never called passed. A script that declares test_ functions and does not extend GdUnitTestSuite is refused when named, and named under notSuites in a directory run whole. A case asked for by name in a script that is no suite is answered as not run. With GDHARNESS_SUITE_FILES_ONLY set, a directory is refused with the suite files under it.',
-      'A case declared in a suite that passed and that gdUnit4 never ran comes back under testsNotRun. A row it skipped for data that does not fit the case comes back under rowsMismatched. A case it cannot run as declared (a parameter nothing fills, or a fuzzer after a setting) comes back under casesUnrunnable. A case, row or suite skipped with do_skip never ran and comes back under casesSkipped, with the skip_reason it was given, and cut: true when the output cut the reason off. Each has the reason gdUnit4 gave.',
-      'A case that failed and then passed on a retry, with the flaky check of gdUnit4 on, comes back under passedOnARetry as suite path > case name, as gdharness test names it, and a parameterised row as name:index (arguments). Such a run is never called passed. A suite asked for that never started or never finished fails the run too, named in the verdict.',
+      'A case declared in a suite that passed and that gdUnit4 never ran comes back under testsNotRun. A row it skipped for data that does not fit the case comes back under rowsMismatched. A case it cannot run as declared (a parameter nothing fills, or a fuzzer after a setting) comes back under casesUnrunnable. A case, row or suite skipped with do_skip never ran and comes back under casesSkipped, with the skip_reason it was given. Each has the reason gdUnit4 wrote in its report, as written. A suite skipped whole is listed case by case.',
+      'A case that failed and then passed on a retry, with the flaky check of gdUnit4 on, keeps the failure gdUnit4 wrote into its report, so the case and the run are failed. A suite asked for that never started or never finished fails the run too, named in the verdict.',
       'An ignore entry that named a case which ran all the same comes back under ignoreNotApplied, with the form that would have left the case out. Every case the list left out comes back under ignored as suite_name:test_name, and every row as suite_name:test_name:N. An entry naming no suite, case or row under path comes back under ignoreUnmatched.',
       'A run killed at the limit answers timedOut and silentForMs, how long it had printed nothing. It is called hung only when that was half the limit, or thirty seconds of a longer one. Otherwise it was still running and wants a longer timeoutMs or a narrower path. The limit is counted from the engine starting, and the class rebuild and any import before it are outside it, though tookMs counts them.',
       'With failFast the counts cover only what ran, and notRun counts the cases left. printed holds the lines matched, ignoring case, in the text and the backtrace, at most 200, the newest kept. printedOmitted counts the rest.',
@@ -1868,7 +1869,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'editor_launch',
     title: 'Open, restart or close the editor, or bind its debug adapter again',
     description:
-      'editor_status says which editor is connected. open and close save project.godot, which drops a key set on purpose to its default value. close and restart save the open scenes. A restart of an editor this server opened is a quit and then a launch. Ending this server between them, as a reconnect does, leaves no editor. close stops the process of an editor this server opened that has not connected yet. A game a visible editor plays opens a window.',
+      'open and close save project.godot, which drops a key set on purpose to its default value. close and restart save the open scenes. A restart of an editor this server opened is a quit and then a launch. Ending this server between them, as a reconnect does, leaves no editor. close stops the process of an editor this server opened that has not connected yet. A game a visible editor plays opens a window.',
     answer: [
       'close answers settingsDropped, what its save took out of project.godot. It is left out when the save took nothing. settingsNote says when the file could not be read to tell. An editor stopped before it connected is answered with beforeConnecting.',
       'close and restart name under savedScenes the open scenes that had unsaved changes and were saved on the way out. The list is empty when none had. A scene that would not save refuses the close or restart and leaves the editor running. Both answer tookMs, how long the editor took to go or to come back.',
@@ -2065,7 +2066,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         minimum: 1,
         ops: ['stop', 'wait', 'profile'],
         description:
-          'Its pid. A stop also takes a game of this project that no server keeps, as editor_status lists under runtimes.',
+          "This server's game, by pid. A stop also takes an unkept game of this project, as editor_status lists under runtimes.",
       },
     },
     requires: [],
@@ -2602,7 +2603,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'runtime_capture',
     title: 'Capture the screen',
     description:
-      "A picture of the running game: the whole screen, one region or node of it at full resolution, or one viewport. The screen is the game's window with its dialogs and popups laid over it. Needs the game running with a window. A capture before the first frame is drawn waits for it.",
+      "A picture of the game: the whole screen, one region or node of it at full resolution, or one viewport. The screen is the game's window with its dialogs and popups over it. Needs a running game with a window. A capture before its first frame waits for it.",
     answer: [
       "A region partly outside the window is cut to it and answered clipped. The answer names the region captured in window pixels. drawnAt is given when the project draws at its own size and stretches it to the window, so the picture has the game's pixels.",
       "nodePath captures what runtime_inspect rect answers for the node: a Control's rectangle, what a 3D node's geometry covers, or what a Sprite2D draws. zoom makes each pixel a square of pixels rather than blending it. An inline picture may be a JPEG, and the text says so. outputPath saves a lossless PNG, and the answer says where.",

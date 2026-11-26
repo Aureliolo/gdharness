@@ -1,4 +1,3 @@
-import type { MemoryEnd } from './engine-memory.js';
 import type { CallSlot } from './engine-slots.js';
 import type { GameLog } from './game-log.js';
 import type { EditorPlay, RestartedFrom } from './run-record.js';
@@ -31,9 +30,9 @@ export interface GodotProcess {
   /**
    * The project this run was started on, for a run read back off disk.
    *
-   * Two servers on one machine share a runtime directory and so share the note a run leaves
-   * behind. Naming the project in the answer is what lets a caller see that the run being
-   * reported is one of theirs, rather than having it silently reported as this project's.
+   * Every server on one machine shares a runtime directory, and a note names its run's project.
+   * Naming the project in the answer is what lets a caller see that the run being reported is one
+   * of theirs, rather than having it silently reported as this project's.
    */
   projectPath: string | null;
   /**
@@ -244,11 +243,6 @@ export interface GodotProcess {
    */
   endedHere?: string | null;
   /**
-   * Why another server of this project ended the run for its memory, which it noted beside the
-   * run's transcript before it did: see {@link memoryEndOf}.
-   */
-  endedBeside?: string;
-  /**
    * The last error the editor broke this game on, once it has been written into the log.
    *
    * Held so it is written down once. The adapter goes on reporting the same stop for as long as
@@ -262,6 +256,4 @@ export interface GodotProcess {
 export interface SpawnedGame extends GodotProcess {
   process: ChildProcess;
   throughEditor: false;
-  /** Set when the run was ended for holding more memory than its ceiling. */
-  memoryEnd?: MemoryEnd;
 }

@@ -14,7 +14,7 @@ import { join, relative } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
-import { holderOf, lockIsFree, ownStart, takenOverUnderSteal } from './engine-slots.js';
+import { holderOf, lockIsFree, ownStart, takenOverUnderSteal } from './file-lock.js';
 import { startTimesOf } from './process-children.js';
 import { Turns } from './turns.js';
 import { removeWholeAsync } from './whole-file.js';
@@ -39,7 +39,7 @@ export function writeLockOf(projectPath: string, file: string): string {
 /**
  * Runs [param write] once no other write to [param file] in [param projectPath] is under way, this
  * server's or another's, and holds the turn until it ends however it ends. A lock whose holder has
- * gone is taken over under its steal file, as an engine slot's is, so a lock another waiter has just
+ * gone is taken over under its steal file, so a lock another waiter has just
  * made in its place is never removed.
  *
  * Writes from this server to one file run in the order they asked, since a client sends a later

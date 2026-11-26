@@ -14,7 +14,7 @@ import {
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { cacheHome } from './cache-home.js';
-import { ownStart } from './engine-slots.js';
+import { ownStart } from './file-lock.js';
 import { realAsFarAsItExists } from './paths.js';
 import { isRecord } from './records.js';
 import { parseProjectGodot } from './resources.js';

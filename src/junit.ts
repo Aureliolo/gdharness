@@ -10,8 +10,6 @@
  * it off what the runner printed, because the exit code cannot say.
  */
 
-import { StringDecoder } from 'node:string_decoder';
-import { stripVTControlCharacters } from 'node:util';
 import { caseLineOf, suiteOpenedBy } from './game-log.js';
 import { owned } from './log-read.js';
 
@@ -641,44 +639,6 @@ export function parseJUnit(xml: string): TestReport {
   };
 }
 
-/**
- * [param report] with each case that [param printedPassing] says the console printed passing read as
- * passed. gdUnit4 decides a case's state from its last attempt, and its report keeps the failures of
- * the attempts before, so the report's failure is not the case's. [param report] itself when no case
- * is one.
- */
-export function withPrintedPassesSettled(
-  report: TestReport,
-  printedPassing: (path: string | null, name: string) => boolean,
-): TestReport {
-  const settles = (path: string | null, entry: TestCase): boolean =>
-    (entry.status === 'failed' || entry.status === 'error') && printedPassing(path, entry.name);
-  if (!report.suites.some((suite) => suite.cases.some((entry) => settles(suite.path, entry)))) {
-    return report;
-  }
-  const suites = report.suites.map((suite): TestSuite => {
-    const cases = suite.cases.map(
-      (entry): TestCase =>
-        settles(suite.path, entry)
-          ? { ...entry, status: 'passed', message: null, detail: null, reports: [] }
-          : entry,
-    );
-    return {
-      ...suite,
-      cases,
-      failures: cases.filter(failedAnAssertion).length,
-      errors: cases.filter((entry) => entry.status === 'error').length,
-    };
-  });
-  const all = suites.flatMap((suite) => suite.cases);
-  return {
-    ...report,
-    failures: all.filter(failedAnAssertion).length,
-    errors: all.filter((entry) => entry.status === 'error').length,
-    suites,
-  };
-}
-
 /** A case the report holds as skipped, with the reason gdUnit4 wrote under it. */
 interface SkippedInReport {
   /** The suite's script, or its name when the report names no folder. */
@@ -690,42 +650,6 @@ interface SkippedInReport {
 // The reason gdUnit4 writes under the skip's heading, `  Reason: 'not today'`, which ends the entry.
 // It runs to the entry's last quote, as it can hold line breaks and quotes of its own.
 const REPORTED_REASON = /^\s*Reason: '([\s\S]*)'\s*$/m;
-
-/**
- * The reasons gdUnit4 wrote under skipped cases, which the console cannot always end: a reason with
- * a lone apostrophe, or a line ending in a quote, reads as going on or as ending early.
- */
-export interface ReportedSkips {
-  /** A case's reasons by {@link skipKey}, in the order the report lists them. */
-  readonly cases: ReadonlyMap<string, readonly string[]>;
-  /** A suite's reasons, those of every one of its skipped cases, by the suite's script. */
-  readonly suites: ReadonlyMap<string, readonly string[]>;
-}
-
-/** The key of a case in {@link ReportedSkips}. */
-export function skipKey(suite: string, name: string): string {
-  return JSON.stringify([suite, name]);
-}
-
-/** The reasons [param reports] hold for the cases they list as skipped, where they wrote one. */
-export function reportedSkips(reports: readonly TestReport[]): ReportedSkips {
-  const cases = new Map<string, string[]>();
-  const suites = new Map<string, string[]>();
-  for (const report of reports) {
-    for (const suite of report.suites) {
-      const path = suite.path ?? suite.name;
-      for (const entry of suite.cases.filter((one) => one.status === 'skipped')) {
-        const reason = REPORTED_REASON.exec(entry.detail ?? '')?.[1];
-        if (reason !== undefined) {
-          const key = skipKey(path, entry.name);
-          cases.set(key, [...(cases.get(key) ?? []), reason]);
-          suites.set(path, [...(suites.get(path) ?? []), reason]);
-        }
-      }
-    }
-  }
-  return { cases, suites };
-}
 
 /** Every case [param report] holds as skipped. */
 export function skippedInReport(report: TestReport): SkippedInReport[] {
@@ -943,418 +867,6 @@ export class DiscoveryRead implements LineFold<DiscoveryListing | null> {
   }
 }
 
-const ESCAPE = String.fromCharCode(0x1b);
-
-const LOCATION = `'[^'\\n]*' in \\S+:\\d+`;
-const IGNORING_CASE = ' \\(ignoring case\\)';
-
-/**
- * A failing value the runner printed as a character diff, with the assertion it belongs to: the
- * value a string equality found, between " but was" and the location line that follows it.
- *
- * The value may not run over a location line, which ends every case's report, so the match stays
- * inside one. An array equality prints its value, then a table of differences, then its location,
- * so a value matched lazily up to the next quote before a location line ran through the table and
- * on to the end of the next case's string diff, and read the two as one.
- *
- * `is_equal_ignoring_case` writes " (ignoring case)" after the closing quote, so a match that
- * wanted the location straight after the quote never ended on one, and its merge stood.
- */
-const PRINTED_ACTUAL = new RegExp(
-  ` but was\\n '((?:(?!\\tat ${LOCATION})[\\s\\S])*?)'((?:${ESCAPE}\\[[0-9;]*m)*)(${IGNORING_CASE})?((?:${ESCAPE}\\[[0-9;]*m)*)\\tat (${LOCATION})`,
-  'g',
-);
-
-/**
- * A failing equality between two quoted values as the report writes it, a string's being a merged
- * diff. The error-message form is `assert_failure`'s `has_message` and its siblings.
- */
-const QUOTED_EQUALITY = new RegExp(
-  `^Expecting(?: error message)?:\\n '([\\s\\S]*)'\\n but was\\n '([\\s\\S]*)'(?:${IGNORING_CASE})?\\n\\tat `,
-);
-const DETAIL_LOCATION = new RegExp(`\\tat (${LOCATION})`, 'g');
-const COLOUR = new RegExp(`${ESCAPE}\\[([0-9;]*)m`, 'g');
-
-/** How gdUnit4 spells a character it marks, read back into the character. */
-const SPELLED: Readonly<Record<string, string>> = {
-  '<LF>': '\n',
-  '<CR>': '\r',
-  '<TAB>': '\t',
-  '<BS>': '\b',
-  '<FF>': '\f',
-  '<VT>': '\v',
-  '<BEL>': '\u0007',
-  '<ESC>': ESCAPE,
-  '<DEL>': '\u007f',
-};
-
-function unspelled(text: string): string {
-  return text.replace(/<(?:LF|CR|TAB|BS|FF|VT|BEL|ESC|DEL|0x[0-9A-F]{2})>/g, (spelling) =>
-    spelling.startsWith('<0x')
-      ? String.fromCharCode(Number.parseInt(spelling.slice(3, 5), 16))
-      : (SPELLED[spelling] ?? spelling),
-  );
-}
-
-/**
- * [param printed] read as gdUnit4's character diff: `merged` is what the report keeps once the
- * marks are gone, and `actual` is the value the assertion found.
- *
- * A character on a red background is one the value lacked and one on green is one it had in
- * addition, told apart by which channel is the larger. The rest were in both. A marked character
- * that does not print, such as a line feed, is spelled out as "<LF>".
- */
-function readDiff(printed: string): { merged: string; actual: string } {
-  let merged = '';
-  let actual = '';
-  let background: 'missing' | 'added' | null = null;
-  let last = 0;
-  const take = (text: string): void => {
-    merged += text;
-    if (background === null) {
-      actual += text;
-    } else if (background === 'added') {
-      actual += unspelled(text);
-    }
-  };
-  for (const match of printed.matchAll(COLOUR)) {
-    take(printed.slice(last, match.index));
-    last = match.index + match[0].length;
-    const codes = (match[1] ?? '').split(';');
-    if (codes[0] === '48' && codes[1] === '2') {
-      background = Number(codes[2]) > Number(codes[3]) ? 'missing' : 'added';
-    } else if (codes[0] === '0' || codes[0] === '') {
-      background = null;
-    }
-  }
-  take(printed.slice(last));
-  return { merged, actual };
-}
-
-/** The sentence a detail carries when both sides printed alike and nothing could say which was which. */
-export const BOTH_SIDES_ALIKE_NOTE =
-  '[gdharness: the expected and the actual printed alike because gdUnit4 drops the marks that tell them apart when it writes its report, and the runner printed no copy of this one, so neither side above is the value the assertion found.]';
-
-/** The sentence a string equality's detail carries when the console had no copy of its diff to read the value from. */
-export const VALUE_NOT_RECOVERED_NOTE =
-  '[gdharness: the value after "but was" may not be the one the assertion found. gdUnit4 writes a failing string into its report as a character diff against the expected one with the marks dropped, which merges the two, and the runner printed no copy of this one to read the value back from.]';
-
-/**
- * The sentence a detail carries when its value was read back and the two sides still print alike.
- * gdUnit4 passes the expected string through its BBCode renderer, so "[b]plain[/b]" against "plain"
- * printed "plain" on both sides, with the tags gone into terminal bold.
- */
-export const RENDERED_AWAY_NOTE =
-  '[gdharness: the two sides print alike, so what tells them apart is something gdUnit4 does not print. The usual cause is BBCode in the expected string, which gdUnit4 renders as formatting instead of showing. The value after "but was" is the one the assertion found.]';
-
-/**
- * [param failed] with each failing string equality's actual value put back, read off [param
- * printed], which is what the runner wrote to its console with the colours left in.
- *
- * gdUnit4 prints a failing string's value as a character diff against the expected one, marked
- * with background colours, and strips the marks when it writes the JUnit report: what is left is
- * both strings merged, so an empty value reads as the expected string in full, and "abXd" against
- * "abcd" reads "abcXd". The console keeps the marks. A detail the console has no copy of says its
- * value may be the merge, and one whose sides still read alike says why, rather than letting
- * either side stand as the value. A string gdUnit4 masked because it held BBCode is unmasked.
- *
- * [param printed] may come as the diffs {@link SuiteDiffs} read off a console a suite at a time,
- * since a whole console can pass what one string holds.
- */
-export function withActualsPrinted<Case extends { readonly detail: string | null }>(
-  failed: readonly Case[],
-  printed: string | readonly PrintedDiff[],
-): Case[] {
-  const diffs = typeof printed === 'string' ? diffsIn(printed) : printed;
-  // Each printed diff belongs to one failure, and both are in the order the run met them. The same
-  // assertion line failing twice merges alike when the values differ only where the marks were, so
-  // a diff offered to every failure it matched gave both the first one's value.
-  // Diffs wait under the assertion location they end on, so a report looks only at the diffs of the
-  // locations it names. Walking every diff for every report is quadratic in the failures.
-  const waiting = new Map<string, PrintedDiff[]>();
-  for (const diff of diffs) {
-    const queue = waiting.get(diff.at);
-    if (queue === undefined) {
-      waiting.set(diff.at, [diff]);
-    } else {
-      queue.push(diff);
-    }
-  }
-  return failed.map((entry) => {
-    if (entry.detail === null) {
-      return entry;
-    }
-    const recovery = recoverActuals(entry.detail, waiting);
-    const detail = annotatedEquality(recovery.detail, recovery.recovered);
-    return detail === entry.detail ? entry : { ...entry, detail };
-  });
-}
-
-/** One failing string's diff as the console printed it, with the value read back from it. */
-export interface PrintedDiff {
-  readonly suffix: string;
-  readonly at: string;
-  readonly merged: string;
-  readonly actual: string;
-}
-
-/** Every diff [param printed] holds, in the order printed. */
-function diffsIn(printed: string): PrintedDiff[] {
-  // A line break reaches a pipe as CRLF on Windows, and the report is written with every carriage
-  // return taken out, so the two are compared the way the report spells them.
-  return [...printed.replaceAll('\r\n', '\n').matchAll(PRINTED_ACTUAL)].map(diffOf);
-}
-
-/** The diff [param match] of {@link PRINTED_ACTUAL} found, in strings of its own. */
-function diffOf(match: RegExpExecArray): PrintedDiff {
-  const { merged, actual } = readDiff(match[1] ?? '');
-  return {
-    suffix: owned(match[3] ?? ''),
-    at: owned(match[5] ?? ''),
-    merged: owned(merged),
-    actual: owned(actual),
-  };
-}
-
-/** What opens a printed diff, which no match starts anywhere else. */
-const DIFF_OPENS = " but was\n '";
-
-/** The location line that ends a case's report, and with it any diff opened before it. */
-const LOCATED = new RegExp(`\\tat ${LOCATION}`, 'g');
-
-/** The text gdUnit4's line opening a suite holds, which the line is looked for by. */
-const SUITE_OPENS = 'Run Test Suite:';
-
-/** The longest unfinished line held to be looked at for a suite's start. A suite's line is far shorter. */
-const LINE_HELD_MOST = 64 * 1024;
-
-/** {@link DIFF_OPENS} as a pipe on Windows spells it, before its line break is read as the report's. */
-const DIFF_OPENS_CRLF = DIFF_OPENS.replaceAll('\n', '\r\n');
-
-/**
- * The diffs a console prints, read as {@link withActualsPrinted} reads them off the whole text, one
- * suite's text at a time. No diff starts anywhere but at its opening, so the text is held only from
- * the first opening, and let go again once each diff opened in it has its location line. What is
- * held is read once the next suite opens, unless a diff that may still run on past that line is open
- * in it, as one whose value holds a suite's line. Then it is held on to the next. At most one suite's
- * text is held, since a suite printing more than a log may hold ends the engine.
- */
-export class SuiteDiffs {
-  private readonly decoder = new StringDecoder('utf8');
-  private readonly found: PrintedDiff[] = [];
-  /** The text held, in the pieces it came in. */
-  private pieces: string[] = [];
-  /** How many characters were read and let go before the first held. */
-  private gone = 0;
-  /** How many characters have come. */
-  private taken = 0;
-  /** Where the unfinished last line begins, counted from the console's start. */
-  private lineFrom = 0;
-  /** The unfinished last line, or null for one too long to be a suite's. */
-  private line: string | null = '';
-  /** Whether the held text starts at a diff's opening, rather than being the tail that may begin one. */
-  private opened = false;
-  /** How much was held when it was last read and a diff stayed open. */
-  private triedAt = 0;
-
-  /** Reads [param chunk], the bytes printed next. */
-  take(chunk: Buffer): void {
-    const text = this.decoder.write(chunk);
-    if (text === '') {
-      return;
-    }
-    const base = this.taken;
-    this.pieces.push(text);
-    this.taken += text.length;
-    let from = 0;
-    for (let end = text.indexOf('\n'); end >= 0; end = text.indexOf('\n', end + 1)) {
-      const line = this.line === null ? null : this.line + text.slice(from, end);
-      if (line?.includes(SUITE_OPENS) === true && suiteOpenedBy(stripVTControlCharacters(line)) !== null) {
-        this.readTo(this.lineFrom);
-      }
-      from = end + 1;
-      this.lineFrom = base + from;
-      this.line = '';
-    }
-    const rest = text.slice(from);
-    this.line =
-      this.line === null || this.line.length + rest.length > LINE_HELD_MOST ? null : this.line + rest;
-    if (!this.opened) {
-      this.release();
-    } else if (this.held > 2 * this.triedAt) {
-      // Read again only once the held text has doubled, so a long open value is read a few times
-      // over rather than once a piece.
-      this.readTo(this.lineFrom);
-    }
-  }
-
-  /** Every diff the console printed, once it has ended. */
-  finish(): PrintedDiff[] {
-    this.pieces.push(this.decoder.end());
-    this.found.push(...diffsIn(this.pieces.join('')));
-    this.pieces = [];
-    return [...this.found];
-  }
-
-  /** How many characters of the console are held, at most one suite's text. */
-  get held(): number {
-    return this.taken - this.gone;
-  }
-
-  /** Reads the text held up to [param at], counted from the console's start, unless a diff may run on past it. */
-  private readTo(at: number): void {
-    if (!this.opened) {
-      this.release();
-    }
-    const cut = at - this.gone;
-    if (cut <= 0) {
-      return;
-    }
-    if (!this.opened) {
-      this.letGo(cut);
-      return;
-    }
-    const read = suiteDiffsIn(this.pieces.join('').slice(0, cut));
-    if (read === null) {
-      this.triedAt = this.held;
-      return;
-    }
-    this.found.push(...read);
-    this.letGo(cut);
-    this.opened = false;
-    this.release();
-  }
-
-  /**
-   * Lets go of the held text up to the first diff's opening in it, or of all but the tail that may
-   * begin one in the next piece.
-   */
-  private release(): void {
-    const held = this.pieces.join('');
-    const opens = [held.indexOf(DIFF_OPENS), held.indexOf(DIFF_OPENS_CRLF)].filter((at) => at >= 0);
-    if (opens.length === 0) {
-      this.letGo(Math.max(0, held.length - (DIFF_OPENS_CRLF.length - 1)));
-      return;
-    }
-    this.letGo(Math.min(...opens));
-    this.opened = true;
-    this.triedAt = this.held;
-  }
-
-  /** Lets go of the first [param length] characters held, keeping no copy of what is let go. */
-  private letGo(length: number): void {
-    let left = length;
-    const kept: string[] = [];
-    for (const piece of this.pieces) {
-      if (left >= piece.length) {
-        left -= piece.length;
-      } else {
-        kept.push(left === 0 ? piece : piece.slice(left));
-        left = 0;
-      }
-    }
-    this.pieces = kept;
-    this.gone += length;
-  }
-}
-
-/**
- * The diffs in [param text], the console up to the start of a line, or null when a diff may run on
- * past its end: an opening no location line follows, since a diff's value ends on the first one, or
- * an opening's first line, whose second may follow.
- */
-function suiteDiffsIn(text: string): PrintedDiff[] | null {
-  const spelled = text.replaceAll('\r\n', '\n');
-  if (spelled.endsWith(DIFF_OPENS.slice(0, DIFF_OPENS.indexOf('\n') + 1))) {
-    return null;
-  }
-  const diffs: PrintedDiff[] = [];
-  let after = 0;
-  for (const match of spelled.matchAll(PRINTED_ACTUAL)) {
-    diffs.push(diffOf(match));
-    after = match.index + match[0].length;
-  }
-  for (let open = spelled.indexOf(DIFF_OPENS, after); open >= 0; ) {
-    LOCATED.lastIndex = open + DIFF_OPENS.length;
-    const located = LOCATED.exec(spelled);
-    if (located === null) {
-      return null;
-    }
-    open = spelled.indexOf(DIFF_OPENS, located.index + 1);
-  }
-  return diffs;
-}
-
-/**
- * [param detail] with the first waiting diff of each assertion location it names put back as its
- * value. [param recovered] says whether any was.
- */
-function recoverActuals(
-  detail: string,
-  waiting: ReadonlyMap<string, PrintedDiff[]>,
-): { detail: string; recovered: boolean } {
-  let recoveredDetail = detail;
-  let recovered = false;
-  const named = new Set([...detail.matchAll(DETAIL_LOCATION)].map((match) => match[1] ?? ''));
-  for (const at of named) {
-    const queue = waiting.get(at);
-    const taken = queue === undefined ? null : takeMatchingDiff(queue, recoveredDetail);
-    if (taken !== null) {
-      recoveredDetail = taken;
-      recovered = true;
-    }
-  }
-  return { detail: recoveredDetail, recovered };
-}
-
-/**
- * [param detail] with the first diff of [param queue] whose merged value it holds put back as its
- * actual one, and that diff removed from the queue. Null when none matches.
- */
-function takeMatchingDiff(queue: PrintedDiff[], detail: string): string | null {
-  // One diff belongs to one report. Taking the first that matches and stopping keeps a report from
-  // also taking the next diff when its own value holds all of the expected string.
-  const index = queue.findIndex((diff) => detail.includes(wrongValueOf(diff)));
-  const diff = queue[index];
-  if (diff === undefined) {
-    return null;
-  }
-  queue.splice(index, 1);
-  return detail.replace(
-    wrongValueOf(diff),
-    () => ` but was\n '${diff.actual}'${diff.suffix}\n\tat ${diff.at}`,
-  );
-}
-
-/** How a report spells a failing string's value: the merge of both sides. */
-function wrongValueOf(diff: PrintedDiff): string {
-  return ` but was\n '${diff.merged.replaceAll('\r', '')}'${diff.suffix}\n\tat ${diff.at}`;
-}
-
-/**
- * [param detail] with the note that fits its string equality, when it holds one: whether the value
- * was [param recovered] and whether the two sides print alike decide which.
- */
-function annotatedEquality(detail: string, recovered: boolean): string {
-  const quoted = QUOTED_EQUALITY.exec(detail);
-  if (quoted === null) {
-    return detail;
-  }
-  const alike = quoted[1] === quoted[2];
-  let note: string | null;
-  if (recovered) {
-    note = alike ? RENDERED_AWAY_NOTE : null;
-  } else {
-    note = alike ? BOTH_SIDES_ALIKE_NOTE : VALUE_NOT_RECOVERED_NOTE;
-  }
-  const noted = note === null ? detail : `${detail}\n${note}`;
-  if (!masked(quoted[1] ?? '', quoted[2] ?? '')) {
-    return noted;
-  }
-  const end = quoted[0].length - '\n\tat '.length;
-  return noted.slice(0, end).replaceAll(MASKED_BRACKET, '[') + noted.slice(end);
-}
-
 /** A report standing for every identical one in its case, with how many there were when several. */
 type FoldedReport = CaseReport & { readonly times?: number };
 
@@ -1420,41 +932,27 @@ function foldedReports(reports: readonly CaseReport[]): FoldedReport[] {
   });
 }
 
-/**
- * Every case in [param report] that failed or hit an error, with the values [param printed] puts
- * back into each of its reports, read as {@link withActualsPrinted} reads it.
- *
- * Read report by report rather than case by case, because the printed diffs are matched in the
- * order the run met them, and a case failing two string equalities printed two.
- */
-export function failedCases(report: TestReport, printed: string | readonly PrintedDiff[]): FailedCase[] {
-  const cases = report.suites.flatMap((suite) =>
+/** Every case in [param report] that failed or hit an error, with its reports as gdUnit4 wrote them. */
+export function failedCases(report: TestReport): FailedCase[] {
+  return report.suites.flatMap((suite) =>
     suite.cases
       .filter((entry) => entry.status === 'failed' || entry.status === 'error')
-      .map((entry) => ({ entry, path: suite.path })),
+      .map((entry) => {
+        const folded = foldedReports(entry.reports);
+        const shown = folded.slice(0, MOST_REPORTS_SHOWN);
+        return {
+          suite: entry.suite,
+          name: entry.name,
+          status: entry.status,
+          time: entry.time,
+          path: suite.path,
+          message: entry.reports[0]?.message ?? null,
+          detail: shortened(entry.reports[0]?.detail ?? null),
+          ...(entry.reports.length > 1 ? { reports: shown, reportCount: entry.reports.length } : {}),
+          ...(folded.length > shown.length ? { reportsLeftOut: folded.length - shown.length } : {}),
+        };
+      }),
   );
-  const read = withActualsPrinted(
-    cases.flatMap(({ entry }) => entry.reports),
-    printed,
-  );
-  let next = 0;
-  return cases.map(({ entry, path }) => {
-    const reports = read.slice(next, next + entry.reports.length);
-    next += entry.reports.length;
-    const folded = foldedReports(reports);
-    const shown = folded.slice(0, MOST_REPORTS_SHOWN);
-    return {
-      suite: entry.suite,
-      name: entry.name,
-      status: entry.status,
-      time: entry.time,
-      path,
-      message: reports[0]?.message ?? null,
-      detail: shortened(reports[0]?.detail ?? null),
-      ...(reports.length > 1 ? { reports: shown, reportCount: reports.length } : {}),
-      ...(folded.length > shown.length ? { reportsLeftOut: folded.length - shown.length } : {}),
-    };
-  });
 }
 
 /**
@@ -1496,26 +994,6 @@ export function failedWithin(
   });
   return { failed: kept, briefed: failed.length - whole.size };
 }
-
-const MASKED_BRACKET = '[lb]';
-
-/**
- * Whether [param expected] and [param actual] are strings gdUnit4 masked before printing them.
- *
- * A string equality whose value reads as BBCode is printed with every "[" written "[lb]", on the
- * console and in the report, so a line of game text holding "[b]" came back as "[lb]b]". It masks
- * both sides together, and a value holding "[lb]" itself is BBCode and is masked too, so in a masked
- * pair every bracket is spelled that way. Nothing else is masked: an array prints its own brackets
- * bare, and a dictionary, which can hold a literal "[lb]" and nothing else bracketed, is known by
- * the layout gdUnit4 prints one in.
- */
-function masked(expected: string, actual: string): boolean {
-  const allSpelled = (value: string): boolean =>
-    !PRINTED_DICTIONARY.test(value) && value.split('[').length === value.split(MASKED_BRACKET).length;
-  return `${expected}${actual}`.includes(MASKED_BRACKET) && allSpelled(expected) && allSpelled(actual);
-}
-
-const PRINTED_DICTIONARY = /^\{\n\t[\s\S]*\n {2}\}$/;
 
 /** The orphans one case or a suite's hooks left, as the runner named them. */
 export interface OrphansLeft {

@@ -22,16 +22,7 @@ import {
   helperPid,
   spawnOnDesktop,
 } from './desktop.js';
-import { memoryRefusal } from './engine-launch.js';
-import {
-  type Ceiling,
-  ceilingFor,
-  type EngineGuard,
-  engineMemory,
-  type MemoryEnd,
-  memoryEndedSaid,
-} from './engine-memory.js';
-import { inASlot, nameSlotEngineOf, onTheSlot, raiseSlotMemory } from './engine-slots.js';
+import { inASlot, onTheSlot } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { errorMessage } from './errors.js';
 import { GameLog } from './game-log.js';
@@ -57,10 +48,6 @@ export interface EngineRun {
   readonly failure: string | null;
   /** How many starts before this one crashed before printing past the banner: see {@link crashedAtStart}. */
   readonly crashedStarts?: number;
-  /** Set when this server ended the engine for holding more than its memory ceiling. */
-  readonly memoryEnd?: MemoryEnd;
-  /** Set when the engine was not started, since the machine has no room for what it needs. */
-  readonly memoryRefused?: true;
 }
 
 export { CONSOLE_CLOSED, ENGINE_STARTS };
@@ -163,17 +150,6 @@ export async function runEngine(
   options: RunOptions = {},
 ): Promise<EngineRun> {
   const signal = callSignal();
-  let ceiling: Ceiling;
-  try {
-    ceiling = ceilingFor(options.project);
-  } catch (error) {
-    return { log: new GameLog(), exitCode: null, exitSignal: null, failure: errorMessage(error) };
-  }
-  const refused =
-    options.project === undefined ? null : await memoryRefusal(options.project, 'headless', ceiling);
-  if (refused !== null) {
-    return { log: new GameLog(), exitCode: null, exitSignal: null, failure: refused, memoryRefused: true };
-  }
   if (options.desktop !== undefined || process.platform === 'win32') {
     const compiled = await ensureHelperCompiled();
     if (compiled !== null) {
@@ -188,11 +164,7 @@ export async function runEngine(
   try {
     return await inASlot(
       (lock) =>
-        startedUntilItRuns(
-          () => runStarted(executable, args, lock, options, signal, ceiling),
-          signal,
-          crashedAtStart,
-        ),
+        startedUntilItRuns(() => runStarted(executable, args, lock, options, signal), signal, crashedAtStart),
       options.project,
       options.slotless,
     );
@@ -342,7 +314,6 @@ function runStarted(
   lock: string | null,
   options: RunOptions,
   signal: AbortSignal | undefined,
-  ceiling: Ceiling,
 ): Promise<EngineRun> {
   return new Promise((resolve) => {
     const log = new GameLog();
@@ -360,11 +331,6 @@ function runStarted(
     const whole = holdChildExit(child);
     // The engine itself, which on the hidden desktop the helper starts and writes down.
     const engineAt = (): number | undefined => (files === null ? child.pid : helperPid(files.pid));
-    // The lock names this process, and what the engine starts runs on its slot only when it names
-    // the engine too.
-    if (lock !== null && child.pid !== undefined && files === null) {
-      void nameSlotEngineOf(lock, process.pid, child.pid);
-    }
     child.stdout?.on('data', (chunk: Buffer) => {
       log.append('stdout', chunk);
     });
@@ -372,26 +338,8 @@ function runStarted(
       log.append('stderr', chunk);
     });
     const state: RunState = { pid: engineAt(), failure: null, closed: false };
-    let guard: EngineGuard | undefined;
-    let memoryEnd: MemoryEnd | undefined;
     const found = (engine: number): void => {
       watching(engine, true);
-      guard ??= engineMemory.guard(
-        engine,
-        ceiling,
-        (end) => {
-          if (state.failure === null) {
-            state.failure = memoryEndedSaid(end);
-            memoryEnd = end;
-          }
-          child.kill();
-        },
-        options.project === undefined ? undefined : { project: options.project, tool: 'headless' },
-        (bytes) => (lock === null ? Promise.resolve(null) : raiseSlotMemory(lock, bytes)),
-      );
-      if (lock !== null && files !== null) {
-        void nameSlotEngineOf(lock, process.pid, engine);
-      }
     };
     const noticeEngine = (): void => {
       if (state.pid !== undefined) {
@@ -423,7 +371,6 @@ function runStarted(
     });
     child.on('close', (code, closedBy) => {
       state.closed = true;
-      guard?.release();
       if (state.pid !== undefined) {
         watching(state.pid, false);
       }
@@ -440,7 +387,6 @@ function runStarted(
         exitCode,
         exitSignal: closedBy,
         failure: state.failure,
-        ...(memoryEnd === undefined ? {} : { memoryEnd }),
       });
     });
   });
@@ -463,17 +409,12 @@ export function exitCodeText(code: number | null): string {
 
 /**
  * How [param run] ended, for a sentence: `exit code 3`, `ended by SIGTERM`, or this server's reason.
- * An engine ended for its memory is said by that reason alone, since the signal it was ended with
- * is this server's doing.
  */
 export function howItEnded(
-  run: Pick<EngineRun, 'exitCode' | 'exitSignal' | 'failure' | 'crashedStarts' | 'memoryEnd'> & {
+  run: Pick<EngineRun, 'exitCode' | 'exitSignal' | 'failure' | 'crashedStarts'> & {
     readonly log?: GameLog;
   },
 ): string {
-  if (run.memoryEnd !== undefined) {
-    return memoryEndedSaid(run.memoryEnd);
-  }
   if (run.failure !== null) {
     return run.exitSignal === null ? run.failure : `ended by ${run.exitSignal}, because ${run.failure}`;
   }
