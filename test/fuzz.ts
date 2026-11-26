@@ -2858,6 +2858,7 @@ async function everyEndOfARequestIsSaid(): Promise<void> {
 async function aStalledProcessGetsTheSameReplies(): Promise<void> {
   const stall = 3 * SHORT_WAIT_MS;
   await aClosedPortIsSaid(false, stall);
+  await aClosedPortIsSaid(true, stall);
   for (const mode of ['answers', 'errors', 'wrongProtocol', 'closes', 'resets'] as const) {
     const game = await fakeGame(mode, process.pid);
     try {
@@ -2868,17 +2869,35 @@ async function aStalledProcessGetsTheSameReplies(): Promise<void> {
   }
 }
 
-/** A port nobody listens on is a game that has ended once its process is gone, and is dialled for the wait while it lives. */
+/**
+ * A port nobody listens on is a game that has ended once its process is gone, told at the first
+ * refusal, and is dialled for the wait while it lives. The clocks are fake and move only by hand, so
+ * neither the wait nor a redial can run before the refusal however slowly this process is scheduled.
+ */
 async function aClosedPortIsSaid(processLives: boolean, stallMs: number): Promise<void> {
   const game = await fakeGame('silent', processLives ? process.pid : DEAD_PID);
   await game.close();
-  const began = Date.now();
-  // A gone process is told by the refusal, so its wait is long enough that the timer cannot beat
-  // the connect however slowly this process is scheduled. A live one is dialled until its wait ends.
-  const asked = runtimeRequest(game.endpoint, 'ping', {}, processLives ? SHORT_WAIT_MS : SETTLED_WAIT_MS);
-  stallTheLoop(stallMs);
-  const reply = await asked;
-  if (reply.ok) {
+  const got: { reply?: RuntimeReplyOf } = {};
+  jest.useFakeTimers();
+  try {
+    const asked = runtimeRequest(game.endpoint, 'ping', {}, SHORT_WAIT_MS).then((reply) => {
+      got.reply = reply;
+    });
+    stallTheLoop(stallMs);
+    // The wait's own timer is the one pending until a refusal has been dialled again.
+    await realTick(() => got.reply !== undefined || jest.getTimerCount() > 1);
+    if (processLives) {
+      assert.equal(got.reply, undefined, 'a live process is dialled again rather than told as ended');
+      jest.advanceTimersByTime(SHORT_WAIT_MS);
+    } else {
+      assert.ok(got.reply !== undefined, 'a gone process is told at its first refusal, not dialled again');
+    }
+    await asked;
+  } finally {
+    jest.useRealTimers();
+  }
+  const reply = got.reply;
+  if (reply === undefined || reply.ok) {
     assert.fail('a port nobody listens on answered');
   }
   assert.equal(reply.reason, 'refused');
@@ -2886,10 +2905,6 @@ async function aClosedPortIsSaid(processLives: boolean, stallMs: number): Promis
     reply.message,
     processLives ? /is running but nothing answered on its port: it refused/ : /has ended: its port refused/,
   );
-  if (processLives) {
-    const took = Date.now() - began;
-    assert.ok(took >= SHORT_WAIT_MS - 20, `${String(took)}ms`);
-  }
 }
 
 /** Holds this process still for [param ms], as a loaded machine does between a request and the game's reply. */
@@ -2964,8 +2979,6 @@ async function lateAnswerIsKept(game: FakeGame, how: 'keep' | 'function', end: E
   }
   assert.equal(reply.reason, 'busy');
   assert.equal(reply.stillWithTheGame === true, how === 'function');
-  // The wait runs out on the client's own timer, which can fire before the game has read the request.
-  await eventually(() => game.held.length > 0);
   const held = game.held[0];
   assert.ok(held !== undefined, 'the game has the request');
   const id = held.id;
