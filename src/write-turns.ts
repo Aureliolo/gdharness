@@ -14,7 +14,7 @@ import { join, relative } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
-import { holderOf, lockIsFree, ownStart, takenOverUnderSteal } from './engine-slots.js';
+import { holderOf, lockIsFree, ownStart, takenOverUnderSteal } from './file-lock.js';
 import { startTimesOf } from './process-children.js';
 import { Turns } from './turns.js';
 import { removeWholeAsync } from './whole-file.js';

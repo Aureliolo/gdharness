@@ -55,10 +55,9 @@ interface OutsideSpec {
     readonly debugged?: boolean;
     /**
      * The engine slot the server took for the run, which the keeper takes over once the game has
-     * started and gives back when the run ends, since the run outlives the server. [member from] is
-     * the pid the lock names until then, and [member by] what the keeper's names it held for.
+     * started and gives back when the run ends, since the run outlives the server.
      */
-    readonly slot?: { readonly lock: string; readonly from: number; readonly by: string };
+    readonly slot?: { readonly lock: string };
   };
   /** A Windows desktop to start it on, where its windows neither show nor take the focus. */
   readonly desktop?: string;
@@ -223,13 +222,9 @@ function optionalRunFieldsOf(value: Readonly<Record<string, unknown>>): Optional
 }
 
 /** [param value] as the engine slot a run part hands over, or null when it is not that. */
-function slotOf(
-  value: unknown,
-): { readonly lock: string; readonly from: number; readonly by: string } | null {
-  const { lock, from, by }: Record<string, unknown> = isRecord(value) ? value : {};
-  return typeof lock === 'string' && typeof from === 'number' && typeof by === 'string'
-    ? { lock, from, by }
-    : null;
+function slotOf(value: unknown): { readonly lock: string } | null {
+  const { lock }: Record<string, unknown> = isRecord(value) ? value : {};
+  return typeof lock === 'string' ? { lock } : null;
 }
 
 /** [param value] as a spec, or null when any part of it is not the shape [method sendSpec] writes. */

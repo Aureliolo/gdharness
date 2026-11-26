@@ -31,8 +31,7 @@ import {
   WINDOWS_EXCEPTION,
   watchedEngine,
 } from './engine-launch.js';
-import { memoryAvailable } from './engine-memory.js';
-import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
+import { EngineSlots, machineSlots } from './engine-slots.js';
 import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE } from './game-log.js';
 import { wholeFlag } from './launch.js';
@@ -266,23 +265,15 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
   mkdirSync(shareDirectory, { recursive: true });
   const chosen = machineSlots({ directory: options.slotsDirectory, count: options.slotCount });
   const slotCount = chosen.count;
-  const slots = new EngineSlots(
-    chosen.directory,
-    slotCount,
-    { pid: process.pid, started: await ownStart(), by: `gdharness spread of ${options.projectPath}` },
-    (line) => {
-      console.log(`[spread] ${line}`);
-    },
-    options.projectPath,
-    { tool: 'spread_lane' },
-  );
+  const slots = new EngineSlots(chosen.directory, slotCount, (line) => {
+    console.log(`[spread] ${line}`);
+  });
   const launch: EngineLaunch = {
     godotPath,
     projectPath: options.projectPath,
     deadlineSeconds: options.deadlineSeconds,
     running: new Set(),
     cores: options.cores,
-    peakKept: 'spread_lane',
   };
   const interrupted = (): void => {
     for (const end of launch.running) {
@@ -377,9 +368,8 @@ async function workerCountFor(options: SpreadOptions, slotCount: number): Promis
     console.log(`${options.scene} over ${plural(options.workers, 'worker')}.`);
     return options.workers;
   }
-  const memory = await memoryAvailable();
   const processors = options.cores ?? availableParallelism();
-  const room = roomFor(slotCount, processors, memory.bytes, memory.said);
+  const room = roomFor(slotCount, processors);
   console.log(
     `${options.scene} over ${plural(room.engines, 'worker')}${room.held === undefined ? '' : `, since ${room.held}`}.`,
   );
