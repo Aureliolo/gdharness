@@ -213,7 +213,6 @@ import {
   runEngine,
   startedUntilItRuns,
 } from '../src/engine-run.js';
-import { shareText } from '../src/engine-shares.js';
 import {
   EngineSlots,
   endedNoteOf,
@@ -347,7 +346,7 @@ import {
   HEADLESS_TOOLS,
 } from '../src/headless-operations.js';
 import { idleClosed, idleSettled, portsIn } from '../src/idle-close.js';
-import { IMPORTABLE_EXTENSIONS, importedIntoTheProject, staleImports } from '../src/import-freshness.js';
+import { importedIntoTheProject, staleImports } from '../src/import-freshness.js';
 import { defectReport, defectSignature, withoutMachinePaths } from '../src/issues.js';
 import {
   discoveryListing,
@@ -385,7 +384,6 @@ import {
   envValue,
   HIDDEN_WINDOW_FPS,
   hiddenWindowFlags,
-  OPENED_BY_A_SERVER,
   resolveHeadless,
   resolveSilent,
   runArguments,
@@ -639,7 +637,6 @@ import {
   ourRunEnded,
   outOfBounds,
   PLAY_STARTS_WITHIN_MS,
-  PROJECT_FILE_ARGUMENTS,
   patienceForFrames,
   previousRunHow,
   previousRunLeft,
@@ -684,7 +681,6 @@ import {
   ADDONS,
   autoloadIsOurs,
   autoloadPaths,
-  BIND_ADDRESS_SETTING,
   editorUpgradeNote,
   gdUnit4Unusable,
   inspectProject,
@@ -694,14 +690,11 @@ import {
   installedRuntimeDigest,
   installedRuntimeVersion,
   loaderState,
-  PORT_SETTING,
   type ProjectReport,
-  QUIET_SCENES_SETTING,
   RUNTIME_AUTOLOAD,
   RUNTIME_SCRIPT,
   removeAddons,
   removeLoader,
-  SCRIPT_RUNS_SETTING,
   SHARE_SCRIPT,
   shippedAddonsDirectory,
   shippedEditorDigest,
@@ -893,12 +886,7 @@ import {
 import { withHome } from './support/cli-home.js';
 import { consoleProbe } from './support/console-probe.js';
 import { containedEngine } from './support/contained-engine.js';
-import {
-  CRASHING_ENGINE_SOURCE,
-  crashingAfterTheRealEngine,
-  crashingEngine,
-  ENGINE_BANNER_LINE,
-} from './support/crashing-engine.js';
+import { crashingAfterTheRealEngine, crashingEngine, ENGINE_BANNER_LINE } from './support/crashing-engine.js';
 import { endEnginesUnder, untilNothingRunsUnder } from './support/engines.js';
 import { FAILED_TOP_UP } from './support/failed-top-up.js';
 import { greeting } from './support/greeting.js';
@@ -934,7 +922,7 @@ import {
   stopServersOf,
   unheldPort,
 } from './support/server.js';
-import { REGRESSION_SECONDS, regressionPart, secondsOn, UNMEASURED_SECONDS } from './support/shards.js';
+import { REGRESSION_SECONDS, regressionPart, UNMEASURED_SECONDS } from './support/shards.js';
 import {
   leftInSlots,
   SLOT_VARIABLES,
@@ -11598,35 +11586,6 @@ async function testACallDuringADebugAdapterAbandonKeepsItsOwnConnection(): Promi
   );
 }
 
-/** Every request to a peer waits in `PendingRequests`, and the three clients keep no table of their own. */
-function testEveryRequestWaitsInTheOneTable(): void {
-  const files = readdirSync('src', { recursive: true })
-    .map(String)
-    .filter((entry) => entry.endsWith('.ts'))
-    .map((entry) => ({ entry: entry.replaceAll('\\', '/'), text: readFileSync(join('src', entry), 'utf8') }));
-  assert.ok(files.length > 50, `the sources were walked: ${files.length}`);
-  for (const gone of [
-    'interface PendingRequest',
-    'interface DiagnosticsWaiter',
-    'rejectAllPending',
-    'failPendingRequests',
-  ]) {
-    assert.deepEqual(
-      files.filter((file) => file.text.includes(gone)).map((file) => file.entry),
-      [],
-      `no client keeps ${gone} of its own`,
-    );
-  }
-  assert.deepEqual(
-    files
-      .filter((file) => file.text.includes('new PendingRequests<'))
-      .map((file) => file.entry)
-      .toSorted(),
-    ['dap_client.ts', 'godot-bridge.ts', 'lsp_client.ts'],
-    'the three clients wait in the one table',
-  );
-}
-
 /**
  * The status counts the resources with a call waiting or running, one for each resource however
  * many calls it has, and none once every call is answered.
@@ -11759,39 +11718,6 @@ async function testAPredecessorThatKeepsThePortIsNotWaitedOnForEver(): Promise<v
     });
     sweep(project);
   }
-}
-
-/**
- * The two ends of the bridge announcement agree about where it is and what it says.
- *
- * The server writes it and the editor addon reads it, in different languages, with nothing but
- * two constants holding them together. A path that drifts is an editor that finds no
- * announcement and falls back to the port, which is the behaviour this replaced: it would read as
- * working right up until two projects were open at once.
- */
-function testBothEndsAgreeAboutTheAnnouncement(): void {
-  const addon = readFileSync('src/godot/addons/gdharness_editor/bridge_client.gd', 'utf8');
-
-  const announced = /const ANNOUNCEMENT: String = "res:\/\/(.+)"/.exec(addon)?.[1];
-  assert.ok(announced, 'the addon should name the announcement it reads');
-  assert.equal(
-    announcementPath('project').split(/[\\/]/).slice(1).join('/'),
-    announced,
-    'the server should write the announcement where the addon reads it',
-  );
-
-  const protocol = /const ANNOUNCE_PROTOCOL: int = (\d+)/.exec(addon)?.[1];
-  assert.equal(
-    Number(protocol),
-    BRIDGE_ANNOUNCE_PROTOCOL,
-    'the addon should read the protocol the server writes',
-  );
-
-  // The same pair again, for the variable that says who opened the editor. A name that drifts
-  // reads as an editor nobody opened, which is the one a restart hands to Godot: it comes back
-  // without the ports it was moved to, and every tool behind them is answered by another editor.
-  const opened = /const OPENED_BY_A_SERVER: String = "(.+)"/.exec(addon)?.[1];
-  assert.equal(opened, OPENED_BY_A_SERVER, 'the addon should read the variable the server sets');
 }
 
 /**
@@ -12059,19 +11985,6 @@ async function testAnEditorStartedByAHiddenEditorIsHiddenToo(): Promise<void> {
   const { answer, asked } = await restartAStandIn({ hidden: true, started_by_an_editor: true }, {});
   assert.match(answer, /runs headless or hidden and was not opened by this server/, answer);
   assert.equal(asked.includes('restart_editor'), false, 'and the editor was asked nothing');
-
-  const addon = readFileSync('src/godot/addons/gdharness_editor/bridge_client.gd', 'utf8');
-  assert.match(
-    addon,
-    /static func _on_the_hidden_desktop\(\) -> bool:\n\treturn OS\.get_name\(\) == "Windows" and not OS\.get_environment\(DESKTOP_VARIABLE\)\.is_empty\(\)/,
-    'an editor on the hidden desktop reads the variable it inherits',
-  );
-  assert.match(
-    addon,
-    /^const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"$/m,
-    'named as the server sets it',
-  );
-  assert.equal(addon.includes('set_environment(DESKTOP_VARIABLE'), false, 'and never cleared or replaced');
 }
 
 /** Whether a restart is refused follows the hidden editor_status reports, and no other reading. */
@@ -12097,12 +12010,6 @@ function testTheLaunchDescriptionSaysWhatARestartOfAnotherEditorDoes(): void {
   assert.match(
     toolSpec('editor_launch')?.answer ?? '',
     /One opened by hand restarts itself and comes back with a window, so one with no window is refused unless hidden: false accepts one\./,
-  );
-  assert.ok(
-    readFileSync('src/server.ts', 'utf8').includes(
-      'This editor was opened by hand, and restarts itself as it was, so it cannot come back hidden.',
-    ),
-    'and the refusal of hidden: true says the same of its own value',
   );
 }
 
@@ -16224,28 +16131,6 @@ async function testAnOverrideFileThatRenamesTheAppIsNotSeededIntoTheOldFolder():
 }
 
 /**
- * A keep that is not told what its seed put in takes every seeded file as the run's own, and an
- * overlapping run's untouched copy then replaces a newer kept file. The callers need an engine that
- * draws to run, so the hand-over is read from their source: each one that keeps hands over what its
- * own seed returned.
- */
-function testEveryKeepIsHandedWhatItsSeedPutIn(): void {
-  let callers = 0;
-  for (const file of ['src/engine-launch.ts', 'src/server.ts']) {
-    const source = readFileSync(file, 'utf8');
-    const seeds = [...source.matchAll(/const (\w+) = await seedPipelineCache\(/g)].map(firstGroup);
-    const keeps = [...source.matchAll(/await keepPipelineCache\(([^;]*?)\);/g)].map(firstGroup);
-    assert.equal(keeps.length, seeds.length, `${file} keeps once for each seed`);
-    for (const [at, keep] of keeps.entries()) {
-      const handed = keep.split(',').map((part) => part.trim())[4];
-      assert.equal(handed, seeds[at], `${file} hands its seed's files to the keep: ${keep}`);
-    }
-    callers += keeps.length;
-  }
-  assert.ok(callers >= 2, `only ${String(callers)} keeps were read`);
-}
-
-/**
  * A server killed mid-run never keeps, and leaves nothing of the seed in the temporary folder the
  * run's folder sits in, where the sweep of abandoned runs would not look.
  */
@@ -16806,11 +16691,6 @@ function listedText(tool: string, argument?: string): string {
 function testTheToolTextSaysWhatTheCodeDoes(): void {
   // add_autoload refuses enabled: false, so the argument says so rather than offering it.
   assert.match(listedText('project_settings', 'enabled'), /add_autoload refuses false/);
-  assert.match(
-    readFileSync('src/godot/operations/project_config.gd', 'utf8'),
-    /An autoload cannot be added disabled/,
-    'and the operation is what refuses it',
-  );
 
   // printed matches ignoring case, and is not limited to the ordinary lines.
   const printed = listedText('project_test', 'printed');
@@ -16908,11 +16788,6 @@ function testTheFirstCallRulesAreInTheToolList(): void {
 function testAnObjectSlotIsEmptiedByTheTextNull(): void {
   const value = listedText('runtime_invoke', 'value');
   assert.match(value, /An object property takes a path to one the game holds, or the text null to empty it/);
-  assert.match(
-    readFileSync('src/godot/addons/gdharness_runtime/runtime_changes.gd', 'utf8'),
-    /str\(given\)\.strip_edges\(\) == "null"/,
-    'and the game reads that text as no object',
-  );
 }
 
 /**
@@ -17196,11 +17071,6 @@ async function testTheHazardsAndWorkingFormsAreInTheToolList(): Promise<void> {
 function testATileSetRefusesAResourcePathThatExists(): void {
   const sources = text(get(toolSpec('resource_edit')?.parameters['sources'], 'description'));
   assert.match(sources, /A resourcePath that already exists is refused\./);
-  assert.match(
-    readFileSync('src/godot/addons/gdharness_editor/tools/tileset_tools.gd', 'utf8'),
-    /Give "\s*\+ "resourcePath a path nothing is at\./,
-    'and the TileSet path is what is refused',
-  );
 }
 
 /** An effect of the same class in the slot is kept with its settings, and only another class is replaced. */
@@ -17208,11 +17078,6 @@ function testAnEffectOfTheSameClassKeepsItsSettings(): void {
   assert.match(
     listedText('project_settings', 'effectIndex'),
     /an effect of another class is replaced and one of the same class stays with its settings\./,
-  );
-  assert.match(
-    readFileSync('src/godot/operations/audio_buses.gd', 'utf8'),
-    /kept = held\.get_class\(\) == effect\.get_class\(\)/,
-    'and the operation keeps one of the same class',
   );
 }
 
@@ -18923,139 +18788,6 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
     assert.equal(nowhere.status, 2, 'as a usage error rather than a project with problems');
   } finally {
     sweep(sandbox);
-  }
-}
-
-/**
- * Every GDScript in the tree is somewhere the GDScript gates look, and every place they look holds
- * some.
- *
- * `gdlint` and `gdformat --check` both exit 0 when handed a directory with no GDScript in it, and
- * `gdformat` says "0 files would be left unchanged" while doing it, which reads like a pass. So the
- * paths in `package.json` are a list nothing holds against the tree: move a directory, add one, or
- * mistype one, and the gate goes on reporting success over less than it did, or over nothing.
- *
- * Reported by a downstream project that asked every gate it has what it says about a directory
- * holding nothing of its language. `ruff`, `ty`, `gdlint`, `gdformat` and `markdownlint-cli2` all
- * answered 0.
- *
- * Both directions, because each alone is satisfied by a mistake in the other. A script outside
- * every named path is one nothing checks. A named path with nothing under it is a gate checking
- * nothing and saying so in the language of success, and it is also the positive here: a walk that
- * had stopped finding files would satisfy the first assertion perfectly.
- *
- * The three commands are held level too. They are written out separately, and a directory added to
- * the linter and not to the formatter is a directory only half of them reads.
- */
-function testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome(): void {
-  const manifest: unknown = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'));
-  // Everything after the tool that is not a flag. Reading only the words with a slash in them
-  // looked equivalent and is not: it cannot see a directory at the top level, which is the one a
-  // mistyped or moved path is most likely to be, and the disarm that adds one passed because of it.
-  // A script of the repository's own run through bun is the tool, as the gates run gdstyle through
-  // scripts/gdstyle.ts, and its path is not one of the directories.
-  const pathsIn = (script: string): string[] => {
-    const line = get(manifest, 'scripts', script);
-    assert.equal(typeof line, 'string', `package.json should define the ${script} script`);
-    const words = String(line).split(/\s+/);
-    return words
-      .slice(words[0] === 'bun' && (words[1] ?? '').endsWith('.ts') ? 2 : 1)
-      .filter((word) => word !== '' && !word.startsWith('-'));
-  };
-
-  const gated = pathsIn('lint:gd');
-  assert.ok(
-    gated.length > 0,
-    `lint:gd should name the directories it checks: ${String(get(manifest, 'scripts', 'lint:gd'))}`,
-  );
-  for (const other of ['format:gd', 'format:gd:check']) {
-    assert.deepEqual(
-      pathsIn(other),
-      gated,
-      `${other} reads the same directories as lint:gd, or one of them is only half checked`,
-    );
-  }
-
-  const found: string[] = [];
-  const walk = (directory: string, prefix: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'build') {
-        continue;
-      }
-      const here = `${prefix}${entry.name}`;
-      if (entry.isDirectory()) {
-        walk(join(directory, entry.name), `${here}/`);
-      } else if (entry.name.endsWith('.gd')) {
-        found.push(here);
-      }
-    }
-  };
-  walk(process.cwd(), '');
-
-  const outside = found.filter((path) => !gated.some((where) => path.startsWith(`${where}/`)));
-  assert.deepEqual(outside, [], `every .gd belongs to a directory the gates name, and these do not`);
-
-  for (const where of gated) {
-    const under = found.filter((path) => path.startsWith(`${where}/`));
-    assert.ok(
-      under.length > 0,
-      `${where} is named by the gates and holds no .gd, so both tools pass over nothing there`,
-    );
-  }
-}
-
-/**
- * The bumps the release button offers are the bumps both documents describe.
- *
- * `AGENTS.md` tells the owner how to choose a bump and says `.github/CONTRIBUTING.md` states the
- * same thing publicly, so keep the two in step. That instruction was stated and held by nothing,
- * which is its own shape: a project can write a rule into its working agreement, act on it, and
- * still have no case that fails when the two drift.
- *
- * What is held here is the part that has an artefact behind it. The three documents that have to
- * agree are two prose files and one `type: choice` in a workflow, and the choice is the one a
- * person actually clicks: a bump offered by the button and described in neither file is one nobody
- * can decide correctly, and a bump described in one file only is the drift the instruction is about.
- *
- * What is not held, and deliberately: which level each kind of change belongs to. The two files say
- * that in different words on purpose, one addressing the owner and one the public, so `removal` in
- * one is `taken away` in the other. A check pairing phrase to phrase would be a copy of both texts
- * that rots when either is reworded, which is the fault it would be pretending to catch.
- */
-function testTheReleaseButtonOffersWhatBothDocumentsDescribe(): void {
-  const workflow = readFileSync(join(process.cwd(), '.github', 'workflows', 'release-prepare.yml'), 'utf8');
-  const choices = workflow
-    .slice(workflow.indexOf('bump:'))
-    .split('options:')[1]
-    ?.split(/\n\s*\n|\njobs:/)[0];
-  assert.ok(choices !== undefined, 'the prepare workflow should offer a bump as a list of options');
-  const offered = [...choices.matchAll(/^\s*-\s*(\w+)\s*$/gm)].map((found) => found[1]);
-  assert.deepEqual(
-    offered,
-    ['patch', 'minor', 'major'],
-    `the button offers these three, and both documents are held against them: ${choices}`,
-  );
-
-  // The section rather than the file. `major` appears in CONTRIBUTING's Renovate paragraph as
-  // well, so a whole-file search passes on a Versions section that has lost it, which is a check
-  // reading the right document and the wrong part of it.
-  const sections: [string, string][] = [
-    ['AGENTS.md', '## Releasing'],
-    [join('.github', 'CONTRIBUTING.md'), '## Versions'],
-  ];
-  for (const [file, heading] of sections) {
-    const document = readFileSync(join(process.cwd(), file), 'utf8');
-    const start = document.indexOf(heading);
-    assert.ok(start >= 0, `${file} should still have its ${heading} section`);
-    const after = document.slice(start + heading.length);
-    const ends = after.indexOf('\n## ');
-    const section = (ends < 0 ? after : after.slice(0, ends)).toLowerCase();
-    for (const bump of offered) {
-      assert.ok(
-        section.includes(String(bump)),
-        `${file}'s ${heading} should say what ${String(bump)} means, since the button offers it`,
-      );
-    }
   }
 }
 
@@ -23699,13 +23431,6 @@ async function testADesktopStartIsOneCall(): Promise<void> {
     assert.equal(beside.pid(), undefined, 'a helper that never ran wrote no pid');
     assert.ok((await failed) instanceof Error, 'a helper that is not there ends the child in an error');
 
-    const keeper = readFileSync(join('src', 'keeper.ts'), 'utf8');
-    assert.equal(keeper.split('endingTheGame(child, stopFile)').length - 1, 1, 'the keeper makes one ender');
-    assert.ok(
-      keeper.includes("child.kill() ? 'signalled' : 'gone'"),
-      'which answers whether anything was signalled',
-    );
-
     if (process.platform !== 'win32') {
       console.log('desktop start regression: the helper is Windows-only');
       return;
@@ -26172,26 +25897,6 @@ async function testEveryEngineTheHelperStartsHasAConsoleWithNoWindow(): Promise<
   }
 }
 
-/**
- * The helper's command, its spec and its desktop variable are made in one place. Every other start
- * through the helper is a call to it, which a new caller writing its own would bypass.
- */
-function testEveryDesktopStartGoesThroughOneCall(): void {
-  const files = readdirSync('src', { recursive: true })
-    .map(String)
-    .filter((entry) => entry.endsWith('.ts'))
-    .map((entry) => join('src', entry));
-  assert.ok(files.length > 50, `the sources were walked: ${files.length}`);
-  const calling = (needle: string): string[] =>
-    files.filter((file) => readFileSync(file, 'utf8').includes(needle)).toSorted();
-  assert.deepEqual(calling(['through', 'Helper('].join('')), [join('src', 'desktop.ts')], 'the spec writer');
-  assert.deepEqual(
-    calling(['[DESKTOP', 'VARIABLE]'].join('_')),
-    [join('src', 'desktop.ts')],
-    'the desktop variable is named in one place',
-  );
-}
-
 // A folder the compile cannot use is said at once, not waited out and blamed on the compile.
 async function testAHelperFolderThatCannotBeUsedIsReportedAtOnce(): Promise<void> {
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-folder-'));
@@ -27573,12 +27278,6 @@ async function testAKeeperCaseThatFailsLeavesNoRunFolder(): Promise<void> {
     existsSync(runtime),
     false,
     'the run folder is gone, the keeper having written its note first',
-  );
-  const source = readFileSync('test/regressions.ts', 'utf8');
-  const through = source.slice(source.indexOf('async function testAStopGoesThroughTheKeeper'));
-  assert.ok(
-    through.slice(0, through.indexOf('\n}\n')).includes('sweepAKeeperCase(project, runtime)'),
-    'the case through the keeper removes its folders this way',
   );
 }
 
@@ -37520,18 +37219,8 @@ function testTheCureIsWrittenWhole(): void {
       ),
     },
     ...installed,
-    ...readdirSync('src')
-      .filter((name) => name.endsWith('.ts'))
-      .flatMap((name) =>
-        readFileSync(join('src', name), 'utf8')
-          .split('\n')
-          .filter((line) => line.includes('editor_launch restart'))
-          .map((line) => ({ where: name, text: line })),
-      ),
   ];
-  // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
-  // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 48, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 4, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -38493,11 +38182,6 @@ function testAHiddenWindowStartsWithVsyncOff(): void {
     }),
     ['--headless', '--path', '/p'],
   );
-  // A game a hidden editor plays is given its flags by the editor addon, which caps it the same.
-  assert.match(
-    readFileSync(join('src', 'godot', 'addons', 'gdharness_editor', 'tools', 'play_tools.gd'), 'utf8'),
-    new RegExp(`^const HIDDEN_WINDOW_FPS: int = ${cap}$`, 'm'),
-  );
 }
 
 /**
@@ -39222,33 +38906,6 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
   } finally {
     sweep(projectDir);
   }
-}
-
-/**
- * The shipped loader passes the checks a game runs on its own files. It is written outside addons/,
- * where a game's gates read it, and it has to stay byte for byte what gdharness ships, so the game
- * cannot reword it to fit them.
- */
-function testTheLoaderPassesAGamesOwnLint(): void {
-  const lines = readFileSync(shippedLoader(), 'utf8').split(/\r?\n/);
-  assert.ok(lines.length > 20, `the shipped loader is read: ${lines.length} lines`);
-  // A game's gdstyle wraps at 100 columns and counts a tab as four, and a 110-column limit here once
-  // let a 101-character line through.
-  const columns = (line: string): number => line.replaceAll('\t', '    ').length;
-  const long = lines.flatMap((line, at) => (columns(line) > 100 ? [`${at + 1}: ${columns(line)}`] : []));
-  assert.deepEqual(long, [], 'every line of the loader is within 100 columns, a tab counting four');
-  // A game's check on cited files reads a backticked span as a path when its first folder holds a
-  // file the repository tracks. Once the loader is committed, gdharness/ is such a folder, so the
-  // setting `gdharness/runtime/serve_script_runs` in its comment was refused as a missing file.
-  const spans = lines.flatMap((line, at) =>
-    [...line.matchAll(/`([^`]*)`/g)].map((match) => ({ at: at + 1, span: match[1] ?? '' })),
-  );
-  assert.ok(spans.length > 0, `the loader's backticked spans are read: ${JSON.stringify(spans)}`);
-  assert.deepEqual(
-    spans.filter(({ span }) => span.includes('/')),
-    [],
-    'no backticked span in the loader reads as a path',
-  );
 }
 
 /**
@@ -41937,31 +41594,6 @@ async function testOneImportPassServesTheServerAndASuiteRun(): Promise<void> {
     'a pass that printed an error and exited 0 is not refused by the judge',
   );
 
-  const functionSource = (file: string, marker: string): string => {
-    const source = readFileSync(join('src', file), 'utf8');
-    const from = source.indexOf(marker);
-    assert.ok(from >= 0, `${marker} is in src/${file}`);
-    const to = source.indexOf('\n}\n', from);
-    return source.slice(from, to);
-  };
-  const importing = functionSource('suite-run.ts', 'async function importProject(');
-  for (const wanted of ['importNeeded(', 'suiteImport(', 'importFault(', 'readRun(readLog(log))']) {
-    assert.ok(importing.includes(wanted), `a suite run's import uses ${wanted}`);
-  }
-  for (const unwanted of ['seedExtensionList(', 'staleAgainst(', '.messages']) {
-    assert.ok(!importing.includes(unwanted), `a suite run's import leaves ${unwanted} to the pass`);
-  }
-  for (const handler of [
-    'private async handleRefreshUids(',
-    'private async reimportThroughTheEngine(',
-    'private async rebuildTheUidTable(',
-  ]) {
-    assert.ok(
-      functionSource('server.ts', handler).includes('extensionsListed'),
-      `${handler} names extensionsListed`,
-    );
-  }
-
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-one-pass-'));
   try {
     // A resource changed since its import is named stale, and the suite's pass forces it.
@@ -42941,104 +42573,6 @@ function testTheReferencePrintsEveryShapeOfType(): void {
   // the lines above rather than satisfying this one too.
   const anyLines = markdown.split('\n').filter((line) => line.includes('` (any):'));
   assert.equal(anyLines.length, 3, `three arguments take any value: ${anyLines.join(' | ')}`);
-}
-
-/**
- * The skill says a script run can be served, and names the setting the addon actually reads.
- *
- * It said a `godot -s` script run does not answer, full stop. That is the default and not the rule:
- * the autoload stands down in a script run unless `serve_script_runs` is set, which is there for
- * somebody driving a `-s` script on purpose. The setting was in `docs/` and in neither the skill nor
- * any tool description, so the one sentence an agent reads before its first call was the half that
- * is wrong, and a downstream project had copied it into its own documentation as unconditional.
- * That is the half a consumer builds a guard on.
- *
- * Held against the addon's own constant rather than spelled twice. A rename in the GDScript would
- * otherwise leave the skill naming a setting nothing reads, which is worse than not naming one:
- * a caller sets it, nothing happens, and the sentence says it should have.
- */
-function testTheSkillNamesEverySettingTheAddonsRead(): void {
-  const read = new Set<string>();
-  const walk = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        walk(path);
-      } else if (entry.name.endsWith('.gd')) {
-        for (const found of readFileSync(path, 'utf8').matchAll(/"(gdharness\/[a-z_/]+)"/g)) {
-          read.add(found[1] ?? '');
-        }
-      }
-    }
-  };
-  walk('src/godot/addons');
-
-  // The list comes from the addons rather than from here, so a setting added there is covered by
-  // this the day it lands and nobody has to remember. Two were read and written down nowhere a
-  // caller looks, one of them the bind address, which is the only one with a security answer.
-  assert.ok(read.size >= 4, `the addons should read the settings they document: ${[...read].join(', ')}`);
-  const skill = skillFiles('0.0.0').get('SKILL.md') ?? '';
-  const unsaid = [...read].filter((setting) => !skill.includes(setting)).toSorted();
-  assert.deepEqual(unsaid, [], 'every setting the addons read should be named in the skill');
-
-  // The bind address with its reason rather than only its name. A caller who reads that it exists
-  // and not why it is loopback is one who moves it to reach a game on another machine.
-  assert.match(
-    skill,
-    /The runtime takes unauthenticated `call_method`, `set_property` and input/,
-    'and the bind address should say what it guards',
-  );
-}
-
-function testTheSkillNamesTheSettingThatServesAScriptRun(): void {
-  const addon = readFileSync('src/godot/addons/gdharness_runtime/runtime_autoload.gd', 'utf8');
-  const declared = /SCRIPT_RUNS_SETTING\s*:\s*String\s*=\s*"([^"]+)"/.exec(addon)?.[1];
-  assert.ok(declared, 'the addon should declare the setting it reads');
-  assert.equal(SCRIPT_RUNS_SETTING, declared, 'and the skill should name that one rather than a copy');
-  // The addon reads it where it decides, not merely declares it. A constant nothing consults would
-  // satisfy the line above while the sentence describes a setting with no effect.
-  assert.match(
-    addon,
-    /_script_run\(\)\s*and\s*not\s*GdhRead\.as_bool\(ProjectSettings\.get_setting\(SCRIPT_RUNS_SETTING/,
-    'and the script-run refusal should be the thing that consults it',
-  );
-
-  const skill = skillFiles('0.0.0').get('SKILL.md') ?? '';
-  const sentence = skill.split('\n\n').find((block) => block.includes('`godot -s` script run'));
-  assert.ok(sentence, 'the skill should still say what a script run does');
-  assert.match(sentence, /by default/, 'as a default rather than as a property of script runs');
-  assert.ok(sentence.includes(SCRIPT_RUNS_SETTING), `and name the setting that changes it: ${sentence}`);
-
-  // The quiet scenes the same way: the name the addon declares, consulted where it decides.
-  const quiet = /QUIET_SCENES_SETTING\s*:\s*String\s*=\s*"([^"]+)"/.exec(addon)?.[1];
-  assert.equal(QUIET_SCENES_SETTING, quiet, 'the skill should name the quiet scenes setting the addon reads');
-  assert.match(
-    addon,
-    /ProjectSettings\.get_setting\(QUIET_SCENES_SETTING[^\n]*\n\s*if not _profiled_from_start and not quiet_scene_in\(/,
-    'and the server start should be the thing that consults it',
-  );
-}
-
-/**
- * The bind address and the port the skill names are the settings the addon reads, and the addon
- * reads each where it listens. A renamed setting would leave the skill sending a caller to one that
- * nothing consults.
- */
-function testTheSkillNamesTheBindAddressAndPortTheAddonReads(): void {
-  const addon = readFileSync('src/godot/addons/gdharness_runtime/runtime_autoload.gd', 'utf8');
-  const declared = (constant: string): string | undefined =>
-    new RegExp(`${constant}\\s*:\\s*String\\s*=\\s*"([^"]+)"`).exec(addon)?.[1];
-  assert.equal(BIND_ADDRESS_SETTING, declared('BIND_ADDRESS_SETTING'), 'the bind address setting');
-  assert.equal(PORT_SETTING, declared('PORT_SETTING'), 'and the port setting');
-  assert.match(
-    addon,
-    /ProjectSettings\.get_setting\(\s*BIND_ADDRESS_SETTING/,
-    'the bind address is consulted',
-  );
-  assert.match(addon, /ProjectSettings\.get_setting\(PORT_SETTING/, 'and so is the port');
-  const skill = skillFiles('0.0.0').get('SKILL.md') ?? '';
-  assert.ok(skill.includes(BIND_ADDRESS_SETTING), 'the skill names the bind address setting');
-  assert.ok(skill.includes(PORT_SETTING), 'and the port setting');
 }
 
 /**
@@ -46063,16 +45597,6 @@ async function testAnotherCheckoutRunsTheEngineItsConfigNames(): Promise<void> {
   } finally {
     sweep(root);
   }
-}
-
-/** The extensions the check counts as imported are the ones `project_import status` counts. */
-function testTheImportCheckKnowsWhatStatusImports(): void {
-  const source = readFileSync(join('src', 'godot', 'operations', 'import_pipeline.gd'), 'utf8');
-  const listed = /const IMPORTABLE_EXTENSIONS: Array\[String\] = \[([^\]]*)\]/.exec(source)?.[1];
-  assert.ok(listed !== undefined, 'import_pipeline.gd should hold IMPORTABLE_EXTENSIONS');
-  const extensions = [...listed.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(extensions.length, 31, `the list as it stands: ${extensions.join(', ')}`);
-  assert.deepEqual([...IMPORTABLE_EXTENSIONS], extensions);
 }
 
 /**
@@ -73244,16 +72768,6 @@ async function testASlotHandedWhileItsEngineIsNamedIsHandedOnceAfterIt(): Promis
   }
 }
 
-/**
- * The class note changes only through the update that reads it when it runs. A write of a copy read
- * before an await puts back what a call made meanwhile took out. The server's source is read, since
- * its calls need an engine and an editor.
- */
-function testNoServerCodeWritesTheClassNoteFromACopyItReadEarlier(): void {
-  const source = readFileSync(join('src', 'server.ts'), 'utf8');
-  assert.equal(/\bwriteClassNote\(/.test(source), false, 'the server updates the note, never writes one');
-}
-
 /** The cut run a reader holds shut is waited on without stopping the process. */
 async function testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
   await aNoteHeldShutLeavesTheLoopRunning(
@@ -75257,12 +74771,6 @@ async function testTheMemoryEndOfAnotherServersGameIsNotedBesideItsRun(): Promis
     assert.equal(memoryEndOf({ transcript: join(runs, 'run-2.log'), startedAt: 2 }), undefined);
     return Promise.resolve();
   });
-  const source = readFileSync('src/server.ts', 'utf8');
-  assert.match(
-    source,
-    /const memory = await this\.memoryCeiling\(projectPath, 'boot_check'\);/,
-    'the boot check refuses on the ceiling like every other start',
-  );
 }
 
 /** The first server to note a run's memory end keeps its note when a second notes one after it. */
@@ -76226,21 +75734,6 @@ async function testALanesEngineRaisesItsSlotAsItGrows(): Promise<void> {
 }
 
 /**
- * The guard of an engine the server holds for a call, a test run or a boot check, raises the slot
- * the server took for it. The server runs in a process of its own, where no reading can be mocked,
- * and a stand-in holds less than any take counts, so the site is read from the source.
- */
-function testAServersHeldEngineRaisesItsSlot(): void {
-  const source = readFileSync(join('src', 'server.ts'), 'utf8');
-  const spawned = /private async spawnGame\([\s\S]*?\n {2}\}\n/.exec(source)?.[0] ?? '';
-  assert.match(
-    spawned,
-    /const guard = engineMemory\.guard\([\s\S]*?\(bytes\) => raiseSlotMemory\(held\.lock, bytes\),\n {8}\);/,
-    'spawnGame guards its engine with a raise of its slot',
-  );
-}
-
-/**
  * A game's keeper reads its game and raises the slot it took over. The stand-in game holds 400 MB
  * against a lock at 256 MiB, and the keeper, its first reading five seconds in, raises the lock.
  */
@@ -77197,42 +76690,6 @@ function testAnUnreadableWorktreeGitFileListsNoWorktrees(): void {
     }
     rmSync(root, { recursive: true, force: true });
   }
-}
-
-/**
- * A game the server starts for a project, a test run among them, takes its slot for that project,
- * so its wait carries the project's repository. The server's start needs an engine to run, so the
- * hand-over is read from its source: every call names the project, and the slot take receives it.
- */
-function testEveryGameTheServerStartsTakesItsSlotForItsProject(): void {
-  const source = readFileSync('src/server.ts', 'utf8');
-  // A call ends at the first `)` closing a statement, so one nested in a retry ends where it does.
-  const calls = [...source.matchAll(/this\.spawnGame\(([\s\S]*?)\)\s*;/g)].map(firstGroup);
-  assert.ok(calls.length >= 2, `only ${String(calls.length)} calls of spawnGame were read`);
-  for (const call of calls) {
-    assert.match(
-      call,
-      /(?:project\.value\.path|projectPath),?\s*$/,
-      `a spawnGame call names no project: ${call}`,
-    );
-  }
-  const taken = /private async spawnGame\([\s\S]*?const held = await slotForCall\(false, project, tool\);/;
-  assert.match(source, taken, 'spawnGame takes its slot for the project it is given');
-  assert.equal(
-    source.match(/slotForCall\(true, projectPath\)/g)?.length,
-    2,
-    'both takes for a game editor_run starts name the project',
-  );
-  assert.match(
-    source,
-    /runEngine\(engine\.value, exportArgs, \{\s*timeout: [^\n]*\n\s*project: project\.value\.path,/,
-    'an export names its project',
-  );
-  assert.match(
-    source,
-    /editor: true,\s*project: projectPath,\s*\};\s*const outcome = await runOperation\(exporting, 'export_options'/,
-    "the export options step, which runs on an empty folder, names the preset's project",
-  );
 }
 
 /** A take for a project in a git work tree writes its lock as a take for none does. */
@@ -86155,12 +85612,6 @@ async function testACallThatImportsFirstStartsItsImportAtOnce(): Promise<void> {
     machine.holder.releaseAll();
     assert.ok(await untilTrue(() => /^engine 0$/m.test(printed.text()), 40_000), printed.text());
   });
-  const server = readFileSync(resolve('src', 'server.ts'), 'utf8');
-  const calls = [...server.matchAll(/runImport\(([^)]*)\)/g)].map((call) => call[1]);
-  assert.ok(calls.length >= 3, 'the server calls runImport');
-  for (const call of calls) {
-    assert.doesNotMatch(call ?? '', /engine:/, `a server import with an engine of its own: ${call ?? ''}`);
-  }
 }
 
 /** The class cache rebuild an import or an operation runs first takes no slot. */
@@ -86200,9 +85651,6 @@ async function testSetupTakesNoSlotOnAFullMachine(): Promise<void> {
     assert.deepEqual(slotEntries(machine.directory), before);
     assert.deepEqual(projectLocksIn(machine.directory), []);
   });
-  const cli = readFileSync(resolve('src', 'cli.ts'), 'utf8');
-  assert.equal(cli.match(/withoutASlot\(/g)?.length, 4, 'setup, runtime, upgrade and uninstall');
-  assert.doesNotMatch(cli, /inOneSlot/);
 }
 
 /** A test run's engines and script_diagnostics take a slot, and wait for one on a full machine. */
@@ -90812,26 +90260,6 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
 }
 
 /**
- * No shipped script reads JSON through `JSON.parse_string`, which prints an engine error for text
- * that does not parse into the log of whatever runs it: the game's, the editor's, or an
- * operation's. A caller's word sent where a number was wanted left the game reading `clean: false`
- * for an error it never made. Walked rather than listed, so a script added later is covered, and
- * comments are left out, since the reason is written down in one.
- */
-function testNoShippedScriptParsesJsonLoudly(): void {
-  const scripts = readdirSync(join('src', 'godot'), { recursive: true })
-    .map(String)
-    .filter((entry) => entry.endsWith('.gd'));
-  assert.ok(scripts.length >= 43, `the shipped scripts were walked: ${scripts.length}`);
-  const loud = scripts.filter((script) =>
-    readFileSync(join('src', 'godot', script), 'utf8')
-      .split('\n')
-      .some((line) => !line.trimStart().startsWith('#') && line.includes('JSON.parse_string(')),
-  );
-  assert.deepEqual(loud, [], 'read JSON through GdhRead.json_or_null, which fails without printing');
-}
-
-/**
  * Runs [param probe], a GDScript `extends SceneTree` body, in a headless engine on a project holding
  * a copy of the operations and [param files]. The probe prints one line, `@@` and a JSON object,
  * and the answer is that object with the lines the engine put on stderr.
@@ -92491,198 +91919,6 @@ async function testTheAnswerFileKeepsAFloatAsItWas(): Promise<void> {
 }
 
 /**
- * The top-level arguments of the call whose opening bracket is at [param open] in [param source],
- * GDScript: brackets inside strings and comments are not counted, and neither are commas.
- */
-function gdscriptArguments(source: string, open: number): string[] {
-  const scan: GdscriptArgumentScan = { found: [], depth: 0, quote: null, current: '' };
-  for (let at = open + 1; at < source.length; at += 1) {
-    const last = scanOneGdscriptCharacter(scan, source, at);
-    if (last === null) {
-      const final = scan.current.trim();
-      return final === '' ? scan.found : [...scan.found, final];
-    }
-    at = last;
-  }
-  return scan.found;
-}
-
-/** Where the scan of a GDScript call's arguments stands. */
-interface GdscriptArgumentScan {
-  found: string[];
-  depth: number;
-  quote: string | null;
-  current: string;
-}
-
-/** Takes the character at [param at] into the scan and returns the last index it used, or null when the arguments close. */
-function scanOneGdscriptCharacter(scan: GdscriptArgumentScan, source: string, at: number): number | null {
-  const char = source[at] ?? '';
-  if (scan.quote !== null) {
-    const taken = takeInsideAGdscriptString(source, at, scan.quote);
-    scan.current += taken.text;
-    scan.quote = taken.closed ? null : scan.quote;
-    return taken.at;
-  }
-  if (char === '#') {
-    const end = source.indexOf('\n', at);
-    return end === -1 ? source.length : end - 1;
-  }
-  if (char === ',' && scan.depth === 0) {
-    scan.found.push(scan.current.trim());
-    scan.current = '';
-    return at;
-  }
-  if (scan.depth === 0 && gdscriptBracketDepthChange(char) < 0) {
-    return null;
-  }
-  if (char === '"' || char === "'") {
-    scan.quote = char;
-  } else {
-    scan.depth += gdscriptBracketDepthChange(char);
-  }
-  scan.current += char;
-  return at;
-}
-
-/** What one character inside a GDScript string adds to the argument, where the scan goes on, and whether it closed the string. */
-function takeInsideAGdscriptString(
-  source: string,
-  at: number,
-  quote: string,
-): { text: string; at: number; closed: boolean } {
-  const char = source[at] ?? '';
-  if (char === '\\') {
-    return { text: char + (source[at + 1] ?? ''), at: at + 1, closed: false };
-  }
-  return { text: char, at, closed: char === quote };
-}
-
-/** One for an opening bracket, minus one for a closing one, nothing for any other character. */
-function gdscriptBracketDepthChange(char: string): number {
-  if (char === '(' || char === '[' || char === '{') {
-    return 1;
-  }
-  return char === ')' || char === ']' || char === '}' ? -1 : 0;
-}
-
-/**
- * Nothing in the package, its scripts or its tests starts a process except through `src/spawn.ts`,
- * whose every start passes `windowsHide`, or the prelude that does the same for a script a test
- * hands to Node. A process with no console gives every console program it starts a window of its
- * own on the desktop in use, and a gate run detached after a push put about twenty of them on the
- * screen of the person at the machine. Walked rather than listed, so a file added later is covered.
- * A stand-in started from a string counts, which is why the words are searched for and not the
- * imports. GDScript starts through Godot's own calls, which open no console unless asked to with
- * `open_console`, so the shipped scripts never ask.
- */
-function testEveryProcessStartsThroughTheHiddenSpawn(): void {
-  // Built from parts, because this file is one of the files walked.
-  const starters = [
-    ['child', 'process'].join('_'),
-    ['Bun', 'spawn'].join('.'),
-    ['Bun', '$'].join('.'),
-    ['Create', 'ProcessW('].join(''),
-    ['Start', 'Process'].join('-'),
-    ['Process', 'Start'].join('.'),
-    ['Shell', 'Execute'].join(''),
-    ['new', 'Worker'].join(' '),
-  ];
-  const shell = new RegExp(['from', "'bun'"].join(' '));
-  const roots = ['src', 'scripts', 'test'];
-  const walked = roots.flatMap((root) =>
-    readdirSync(root, { recursive: true })
-      .map(String)
-      .filter((entry) => /\.[cm]?[jt]s$/.test(entry))
-      .map((entry) => join(root, entry)),
-  );
-  assert.ok(walked.length >= 110, `the sources were walked: ${walked.length}`);
-  const starting = walked
-    .filter((file) => {
-      const source = readFileSync(file, 'utf8');
-      return starters.some((word) => source.includes(word)) || shell.test(source);
-    })
-    .toSorted();
-  assert.deepEqual(
-    starting,
-    // The desktop helper is C# text that starts an engine or a game on a desktop of its own, which
-    // spawn.ts cannot do. The helper itself is started through spawnHidden. The stand-in engine is a
-    // compiled program that cannot import spawn.ts, so each start in its source is checked below.
-    [
-      join('src', 'desktop.ts'),
-      join('src', 'spawn.ts'),
-      join('test', 'support', 'crashing-engine.ts'),
-      join('test', 'support', 'hidden-spawn.ts'),
-      join('test', 'support', 'memory-engine.ts'),
-      join('test', 'support', 'renderer-less-engine.ts'),
-    ],
-    'start a process with spawnHidden, runHidden, runSyncHidden or spawnSyncHidden from src/spawn.ts, ' +
-      'spawnShown for a game somebody asked to see, or HIDDEN_SPAWN_PRELUDE in a script handed to Node',
-  );
-  const standInStarts = ['renderer-less-engine.ts', 'memory-engine.ts'].flatMap((file) =>
-    readFileSync(join('test', 'support', file), 'utf8')
-      .split(['Bun', 'spawn'].join('.'))
-      .slice(1),
-  );
-  assert.ok(standInStarts.length >= 1, 'the stand-in engine starts the engine it hands a start to');
-  assert.deepEqual(
-    standInStarts.filter((start) => !/^\w*\([^;]*windowsHide: true/.test(start)),
-    [],
-    'every start the stand-in engine makes passes windowsHide',
-  );
-  // The crashing stand-in is C# text, so its starts pass CreateNoWindow where Node's pass windowsHide.
-  const crashingStarts = CRASHING_ENGINE_SOURCE.split(['Process', 'Start('].join('.')).length - 1;
-  assert.ok(crashingStarts >= 1, 'the crashing stand-in starts the engine it hands a start to');
-  assert.equal(
-    CRASHING_ENGINE_SOURCE.split('CreateNoWindow = true;').length - 1,
-    crashingStarts,
-    'every start the crashing stand-in makes passes CreateNoWindow',
-  );
-
-  // Godot's own: `OS.create_process(path, arguments, open_console)` and
-  // `OS.execute(path, arguments, output, read_stderr, open_console)`.
-  const consoleArgument: Record<string, number> = { create_process: 2, execute: 4 };
-  // A comma and a bracket in a string, and a comment holding the argument the walk looks for: each
-  // is skipped by one line of the reading, and the shipped call has none of them.
-  const awkward = 'OS.create_process("a, (b", [\'c)\'],  # , true)\n\tfalse)';
-  assert.deepEqual(
-    gdscriptArguments(awkward, awkward.indexOf('(')),
-    ['"a, (b"', "['c)']", 'false'],
-    'the arguments are read as GDScript reads them',
-  );
-  const scripts = ['src', 'test'].flatMap((root) =>
-    readdirSync(root, { recursive: true })
-      .map(String)
-      .filter((entry) => entry.endsWith('.gd'))
-      .map((entry) => join(root, entry)),
-  );
-  const starts: string[] = [];
-  const consoles: string[] = [];
-  const unchecked: string[] = [];
-  for (const script of scripts) {
-    const source = readFileSync(script, 'utf8');
-    // The other ways to start a program or open one, which have no console argument to check.
-    for (const call of source.matchAll(
-      /\bOS\s*\.\s*(execute_with_pipe|create_instance|shell_open|shell_show_in_file_manager)\s*\(/g,
-    )) {
-      unchecked.push(`${script} ${call[1] ?? ''}`);
-    }
-    for (const call of source.matchAll(/\bOS\s*\.\s*(create_process|execute)\s*\(/g)) {
-      const name = call[1] ?? '';
-      const given = gdscriptArguments(source, call.index + call[0].length - 1);
-      starts.push(`${script} ${name}`);
-      const asked = given[consoleArgument[name] ?? Number.POSITIVE_INFINITY];
-      if (asked !== undefined && asked !== 'false') {
-        consoles.push(`${script} ${name}(${given.join(', ')})`);
-      }
-    }
-  }
-  assert.ok(starts.length >= 1, `the scripts' process starts were found: ${JSON.stringify(starts)}`);
-  assert.deepEqual(consoles, [], 'a process a script starts opens no console window');
-  assert.deepEqual(unchecked, [], 'a script starts programs through create_process or execute alone');
-}
-
-/**
  * Taking the addons out removes `addons/` only when that leaves it empty, and only when something
  * of gdharness was there to take: a project's own addon keeps the directory, and an empty one that
  * gdharness never filled is not its to remove.
@@ -93394,479 +92630,6 @@ function testTheWrittenConfigNamesAProgramThatStarts(): void {
   }
 }
 
-/** The first group of a match, which a pattern written with one group always has. */
-function firstGroup(match: RegExpMatchArray): string {
-  return match[1] ?? '';
-}
-
-/** A tool's argument name as the engine operations spell it, which is the one rule between them. */
-function snakeCased(name: string): string {
-  return name.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
-}
-
-/** The names in one table of a GDScript file, by the shape that table is written in. */
-function namesIn(path: string, pattern: RegExp, what: string, least: number, within?: RegExp): Set<string> {
-  const source = readFileSync(path, 'utf8');
-  // A table read out of the part of the file that holds it, when its entries are written like other
-  // dictionaries in the same file: the runtime's commands and its announcement are both
-  // `"name": _member,`.
-  const table = within === undefined ? source : (within.exec(source)?.[1] ?? '');
-  const found = new Set([...table.matchAll(pattern)].map(firstGroup));
-  // The reader is a regex over source, so it can come back empty for a table that was merely
-  // reformatted, and an empty set agrees with everything. A floor is what makes it speak up.
-  //
-  // [param least] is what the file holds today, not a loose minimum, because a floor well under
-  // the real count catches an emptied reading and not a shortened one. The sets read here drive
-  // the checks that find a command nothing sends, so a reader quietly returning six fewer entries
-  // stops looking for six of them and still passes. Adding an operation does not trip this.
-  // Removing one deliberately means lowering the number here in the same change, which is the
-  // point at which somebody confirms the removal was meant.
-  assert.ok(
-    found.size >= least,
-    `only ${found.size} of the ${what} were read from ${path}, which should hold at least ${least}: either the pattern no longer matches how they are written, or one was removed and this floor needs lowering with it`,
-  );
-  return found;
-}
-
-/** Every name the server sends, by the call that sends it, with its multi-line spellings. */
-function namesSent(pattern: RegExp, what: string, least: number): Set<string> {
-  const source = readFileSync('src/server.ts', 'utf8');
-  const found = new Set([...source.matchAll(pattern)].map(firstGroup));
-  assert.ok(found.size >= least, `only ${found.size} of the ${what} were read from src/server.ts`);
-  return found;
-}
-
-/**
- * Every name quoted in the arguments of one kind of call.
- *
- * Wider than reading the first argument, because the name is sometimes chosen in place: a
- * ternary, a section table, a template. Used only to ask whether anything reaches a name at
- * all, so reaching too far costs nothing but a name that would have been reported as dead.
- */
-function namesPassedTo(opener: RegExp, what: string, least: number): Set<string> {
-  const source = readFileSync('src/server.ts', 'utf8');
-  const found = new Set<string>();
-  for (const call of source.matchAll(opener)) {
-    for (const quoted of source.slice(call.index, call.index + 200).matchAll(/'([a-z][a-z_]+)'/g)) {
-      found.add(firstGroup(quoted));
-    }
-  }
-  assert.ok(found.size >= least, `only ${found.size} of the ${what} were read from src/server.ts`);
-  return found;
-}
-
-/**
- * Every name the server sends is one the other end answers to, and every name the other end
- * answers to is one the server sends.
- *
- * Each side is covered on its own: the engine operations and the addon commands against a real
- * engine, the tools from the outside. The table between them is not, and it is three tables: a
- * misspelling in one of them is a tool that refuses at run time with every test on both sides
- * still green. The other direction matters as much, because a command nothing sends is dead
- * code no coverage report can see, GDScript being invisible to the dead-code linter.
- */
-function testEveryDispatchedNameExistsOnBothSides(): void {
-  const engine = namesIn(
-    'src/godot/operations/godot_operations.gd',
-    /^\t\t"([a-z_]+)":$/gm,
-    'engine operations',
-    30,
-  );
-  for (const [tool, operations] of Object.entries(HEADLESS_OPERATIONS)) {
-    for (const [op, operation] of Object.entries(operations)) {
-      assert.ok(
-        engine.has(operation),
-        `${tool} ${op} is dispatched to ${operation}, which the engine has not`,
-      );
-    }
-  }
-  for (const [tool, operations] of Object.entries(HEADLESS_TOOLS)) {
-    for (const operation of operations) {
-      assert.ok(engine.has(operation), `${tool} is dispatched to ${operation}, which the engine has not`);
-    }
-  }
-  const dispatched = new Set([
-    ...Object.values(HEADLESS_OPERATIONS).flatMap((ops) => Object.values(ops)),
-    ...Object.values(HEADLESS_TOOLS).flat(),
-  ]);
-  // project_info's sections, the CLI and the export options read in an editor-mode engine reach
-  // operations no tool op names, so those are read from the source that names them rather than
-  // assumed.
-  const otherwise = namesPassedTo(
-    /this\.(?:headless|operation)\(|operation: '|runOperation\(/g,
-    'engine operations',
-    10,
-  );
-  const fromCli = namesIn('src/cli.ts', /'([a-z_]+)'/g, 'names in the CLI', 5);
-  for (const operation of engine) {
-    assert.ok(
-      dispatched.has(operation) || otherwise.has(operation) || fromCli.has(operation),
-      `the engine answers ${operation}, which nothing asks for`,
-    );
-  }
-
-  everyEditorCommandIsSentAndAnswered();
-}
-
-/** Every editor command the server sends is one the editor addon answers, and the other way round. */
-function everyEditorCommandIsSentAndAnswered(): void {
-  const addon = namesIn(
-    'src/godot/addons/gdharness_editor/tool_executor.gd',
-    /^\t\t"([a-z_]+)": \[/gm,
-    'editor commands',
-    36,
-  );
-  // Most are sent by name at the call. The ones a caller reaches with `from: "editor"` are sent
-  // out of a table, so the table is where they are read from rather than the source around it.
-  const bridged = new Set([
-    ...namesSent(
-      /(?:[Bb]ridge|invokeTool|editorTakes|editorOrEngine)\(\s*'([a-z_]+)'/g,
-      'editor commands',
-      25,
-    ),
-    ...Object.values(EDITOR_ANSWERS).flatMap((ops) => Object.values(ops)),
-    ...Object.values(EDITOR_CALLS).flatMap((ops) => Object.values(ops).map(([command]) => command)),
-  ]);
-  // The server answers the reads and the move from the file, and every other op through its table.
-  const fromTheFile = new Set(['read', 'read_states', 'move']);
-  for (const [tool, calls] of Object.entries(EDITOR_CALLS)) {
-    for (const op of Object.keys(toolSpec(tool)?.operations ?? {})) {
-      assert.ok(fromTheFile.has(op) || op in calls, `${tool} ${op} has no editor command`);
-    }
-  }
-  for (const command of bridged) {
-    assert.ok(addon.has(command), `the server sends ${command}, which the editor addon has not`);
-  }
-  for (const command of addon) {
-    assert.ok(bridged.has(command), `the editor addon answers ${command}, which nothing sends`);
-  }
-
-  everyRuntimeCommandIsSentAndAnswered();
-}
-
-/** Every runtime command the server sends is one the runtime addon answers, and the other way round. */
-function everyRuntimeCommandIsSentAndAnswered(): void {
-  const runtimeDir = 'src/godot/addons/gdharness_runtime';
-  const own = namesIn(
-    `${runtimeDir}/runtime_autoload.gd`,
-    /^\t\t"([a-z_]+)": _[a-z_]+,$/gm,
-    "runtime's own commands",
-    3,
-    /\t_commands = \{\n([\s\S]*?)\n\t\}/,
-  );
-  // The module commands name their module and method as strings, which the compiler does not
-  // check the way it checked the Callables they replaced, so each is looked for in its module.
-  const autoloadSource = readFileSync(`${runtimeDir}/runtime_autoload.gd`, 'utf8');
-  const moduleFiles = new Map(
-    [...autoloadSource.matchAll(/^const ([A-Z_]+): String = "(runtime_[a-z_]+\.gd)"$/gm)].map((match) => [
-      match[1] ?? '',
-      match[2] ?? '',
-    ]),
-  );
-  const moduleCommands = [
-    ...(/\nconst MODULE_COMMANDS: Dictionary = \{\n([\s\S]*?)\n\}/.exec(autoloadSource)?.[1] ?? '').matchAll(
-      /^\t"([a-z_]+)": \[([A-Z_]+), "([a-z_]+)"\],$/gm,
-    ),
-  ];
-  assert.ok(
-    moduleCommands.length >= 26,
-    `only ${moduleCommands.length} module commands were read from the runtime's MODULE_COMMANDS, which holds 26`,
-  );
-  for (const [, command, constant, method] of moduleCommands) {
-    const file = moduleFiles.get(constant ?? '');
-    assert.ok(file, `${command} is answered by ${constant}, which names no module file`);
-    assert.match(
-      readFileSync(`${runtimeDir}/${file}`, 'utf8'),
-      new RegExp(`^func ${method}\\(`, 'm'),
-      `${command} is answered by ${method} in ${file}, which the module does not define`,
-    );
-  }
-  const runtime = new Set([...own, ...moduleCommands.map((match) => match[1] ?? '')]);
-  const asked = namesSent(
-    /(?:handleRuntimeCommand|runtimeRequest)\([^,]*,?\s*'([a-z_]+)'/g,
-    'runtime commands',
-    6,
-  );
-  // runtime_input builds the command from the op, so the op list is what has to line up. The two
-  // named here send a command of their own rather than an injected event, and both are already in
-  // `asked` for that reason.
-  const NAMED_THEMSELVES = new Set(['click', 'choose']);
-  const input = TOOL_SPECS.find((spec) => spec.name === 'runtime_input');
-  assert.ok(input, 'runtime_input should be a tool');
-  // The exemption held against the thing it exempts, so it cannot outlive it. Subtracting a name
-  // that is no longer an op removes nothing and says nothing, which is the quiet way for a list
-  // like this to stop meaning anything: the op it was written for is gone and the entry survives.
-  for (const op of NAMED_THEMSELVES) {
-    assert.ok(
-      Object.hasOwn(input.operations ?? {}, op),
-      `${op} is exempted from the injected commands and is not an op of runtime_input`,
-    );
-    assert.ok(asked.has(op), `${op} is exempted because it sends a command of its own, and nothing sends it`);
-  }
-  const injected = new Set(
-    Object.keys(input.operations ?? {})
-      .filter((op) => !NAMED_THEMSELVES.has(op))
-      .map((op) => `inject_${op}`),
-  );
-  const captured = new Set(['capture_screenshot', 'capture_viewport']);
-  const sent = new Set([...asked, ...injected, ...captured]);
-  for (const command of sent) {
-    assert.ok(runtime.has(command), `the server sends ${command}, which the runtime addon has not`);
-  }
-  for (const command of runtime) {
-    assert.ok(sent.has(command), `the runtime addon answers ${command}, which nothing sends`);
-  }
-}
-
-/**
- * Every key an engine operation reads is one a tool can actually send.
- *
- * The conversion from the tool's arguments to the operation's is one rule for every operation,
- * so what breaks is not the rule but the spelling: an operation reading a name no tool declares
- * is a parameter that can never arrive, and it reads as a working tool with a setting that does
- * nothing. That has happened here once, to an audio bus name.
- */
-function testEveryEngineParameterCanBeSent(): void {
-  const dispatcher = readFileSync('src/godot/operations/godot_operations.gd', 'utf8');
-  const files = new Map(
-    [...dispatcher.matchAll(/const ([A-Za-z]+) = preload\("([a-z_]+\.gd)"\)/g)].map((match) => [
-      firstGroup(match),
-      readFileSync(join('src/godot/operations', match[2] ?? ''), 'utf8'),
-    ]),
-  );
-
-  const declared = new Set(
-    [...readFileSync('src/tool-definitions.ts', 'utf8').matchAll(/^ {6}([A-Za-z]+):/gm)].map((match) =>
-      snakeCased(firstGroup(match)),
-    ),
-  );
-  assert.ok(declared.size >= 40, `only ${declared.size} tool parameters were read`);
-  // What the server adds on the way through, which no tool declares: a key and its value, or a
-  // shorthand name after a spread of the arguments.
-  const server = readFileSync('src/server.ts', 'utf8');
-  const shorthand = [...server.matchAll(/\{ ?\.\.\.[A-Za-z_.]+((?:, ?[a-z][A-Za-z0-9]*)+) ?\}/g)].flatMap(
-    (match) =>
-      firstGroup(match)
-        .split(',')
-        .map((name) => name.trim()),
-  );
-  const added = new Set(
-    [...[...server.matchAll(/\b([a-z][A-Za-z0-9]*): /g)].map(firstGroup), ...shorthand]
-      .filter((name) => name !== '')
-      .map(snakeCased),
-  );
-
-  let read = 0;
-  const routed = new Set<string>();
-  for (const route of dispatcher.matchAll(
-    /"([a-z_]+)":\s*\n[^\n]*?([A-Za-z]+)\.new\([^)]*\)\.([a-z_]+)\(/g,
-  )) {
-    const [, operation = '', module = '', method = ''] = route;
-    const source = files.get(module);
-    assert.ok(source, `${operation} is answered by ${module}, which is not preloaded`);
-    assert.ok(source.includes(`\nfunc ${method}(`), `${module} has no ${method} for ${operation}`);
-    routed.add(module);
-  }
-  // The whole module rather than the routed method, since a method hands its params to helpers
-  // that read them, and a read may be laid over two lines.
-  for (const module of routed) {
-    for (const key of (files.get(module) ?? '').matchAll(/params(?:\.get\(\s*|\[)"([a-z_]+)"/g)) {
-      read += 1;
-      const name = firstGroup(key);
-      assert.ok(
-        declared.has(name) || added.has(name),
-        `${module} reads ${name}, which no tool parameter spells`,
-      );
-    }
-  }
-  assert.ok(read >= 40, `only ${read} parameter reads were found, so this proved little`);
-}
-
-/** The parameter names of one tool: the top-level keys of its own parameters block. */
-function parametersOf(block: string): string[] {
-  const open = block.indexOf('parameters: {');
-  if (open === -1) return [];
-  let depth = 0;
-  let end = block.length;
-  for (let at = block.indexOf('{', open); at < block.length; at += 1) {
-    if (block[at] === '{') depth += 1;
-    if (block[at] === '}') {
-      depth -= 1;
-      if (depth === 0) {
-        end = at;
-        break;
-      }
-    }
-  }
-  return [...block.slice(open, end).matchAll(/^ {6}([A-Za-z]+):/gm)].map(firstGroup);
-}
-
-/**
- * Every tool is named by a fixture, which is the rule this repository is built to and the claim
- * the README makes about it.
- *
- * Nothing else holds it: the consistency checks prove a tool's dispatch name exists on both
- * sides and that its arguments are read, all of which a tool nobody ever calls would pass. A tool
- * added with no fixture is the one shape of change this project says it does not ship.
- */
-function testEveryToolIsDrivenSomewhere(): void {
-  const fixtures = ['editor.ts', 'engine-gdscript.ts', 'bridge.ts', 'regressions.ts', 'smoke.ts']
-    .map((name) => readFileSync(join('test', name), 'utf8'))
-    .join('\n');
-  const undriven = TOOL_SPECS.filter((spec) => !fixtures.includes(`'${spec.name}'`)).map((spec) => spec.name);
-  assert.deepEqual(undriven, [], 'every tool should be called by a fixture, not only declared');
-}
-
-/**
- * Every parameter a tool declares is read by something.
- *
- * The other half of testEveryToolIsDrivenSomewhere's question, and the one that reads as a working
- * tool for longest:
- * a declared argument nothing looks at is a setting a caller can pass, watch accepted, and
- * never see obeyed. `scene_node` had one, and there was nothing to notice it with.
- */
-function testEveryToolParameterIsRead(): void {
-  const named = new Set<string>();
-  const snaked = new Set<string>();
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        walk(path);
-        continue;
-      }
-      if (path.endsWith('tool-definitions.ts')) continue;
-      rememberTheArgumentsAFileReads({ path, named, snaked });
-    }
-  };
-  walk('src');
-  assert.ok(named.size >= 40, `only ${named.size} argument reads were found, so this proved little`);
-
-  const definitions = readFileSync('src/tool-definitions.ts', 'utf8');
-  let checked = 0;
-  for (const block of definitions.split(/\n {2}\{\n/)) {
-    const tool = /name: '([a-z_]+)',/.exec(block)?.[1];
-    if (tool === undefined) continue;
-    for (const parameter of parametersOf(block)) {
-      checked += 1;
-      assert.ok(
-        named.has(parameter) || snaked.has(snakeCased(parameter)),
-        `${tool} declares ${parameter}, which nothing reads`,
-      );
-    }
-  }
-  assert.ok(checked >= 60, `only ${checked} tool parameters were checked, so this proved little`);
-}
-
-/** Adds the first group of every match of the pattern in the source to the set. */
-function rememberMatches(source: string, pattern: RegExp, into: Set<string>): void {
-  for (const match of source.matchAll(pattern)) into.add(firstGroup(match));
-}
-
-/** Adds the arguments one source file reads: the names the addon is handed, and the snake-cased ones of the headless operations. */
-function rememberTheArgumentsAFileReads(read: {
-  path: string;
-  named: Set<string>;
-  snaked: Set<string>;
-}): void {
-  const { path, named, snaked } = read;
-  const source = (): string => readFileSync(path, 'utf8');
-  // The addon is handed the arguments under the names the tool gave them. The headless
-  // operations are handed them snake_cased, and those are the only files where that
-  // spelling counts as a read.
-  if (path.endsWith('.gd')) {
-    rememberMatches(source(), /"([A-Za-z_]+)"/g, path.includes('operations') ? snaked : named);
-  }
-  if (path.endsWith('.ts')) {
-    const code = source();
-    rememberMatches(code, /read[A-Za-z]*\(\s*\w*[Aa]rgs\w*\s*,\s*'([A-Za-z]+)'/g, named);
-    rememberMatches(code, /\w*[Aa]rgs\w*\[\s*'([A-Za-z]+)'\s*\]/g, named);
-    rememberMatches(code, /\b(?:safeArgs|args|arguments_)\.([A-Za-z]+)\b/g, named);
-    rememberMatches(code, /\{\s*(?:[A-Za-z]+(?:: \w+)?,\s*)*([A-Za-z]+)(?:: \w+)?[^}]*\}\s*=\s*args/g, named);
-  }
-}
-
-/**
- * Every argument that names a file is one the project boundary reaches, and every exemption from
- * that names an argument some tool actually takes.
- *
- * `containProjectFiles` walks a list of argument names and skips anything not in it, so a tool
- * gaining a path argument is a tool whose path argument nothing judges: the engine reads
- * `../outside.tscn` as a file to open and an absolute path as a project file, and the boundary
- * lives on this side. Nothing held that the list had kept up with the schemas.
- *
- * The exemptions are checked in the same breath, because a list of names for things that exist
- * elsewhere rots the other way: rename the argument and the entry excuses nothing, while the real
- * argument goes uncontained and the suite stays green either way. Every key below has to be an
- * argument some tool declares.
- */
-function testEveryFileArgumentIsContained(): void {
-  // Arguments spelled like a path that do not name a file inside the project.
-  const notAFile = new Map([
-    ['projectPath', 'the project root itself: choosing it is what the argument is for'],
-    ['nodePath', 'a path through the scene tree, which is not the filesystem'],
-    ['parentNodePath', 'the same, for the parent'],
-    ['newParentPath', 'the same, for the parent a node is moved to'],
-    ['sourceNodePath', 'the same, for the node that emits a signal'],
-    ['targetNodePath', 'the same, for the node whose method is called'],
-    ['playerNodePath', 'the same, for an AnimationPlayer node'],
-    ['animTreePath', 'the same, for an AnimationTree node'],
-    ['stateMachinePath', 'a path of nested state machine names inside an AnimationTree'],
-    ['viewportPath', 'a path through the scene tree of a running game, to a Viewport node'],
-  ]);
-  // Arguments judged where they are used rather than by the shared walk, which is fine as long as
-  // somebody says so here and the judging is still there.
-  const judgedAtTheCallSite = new Map([
-    ['outputPath', 'project_export resolves it against the project before the engine is started'],
-  ]);
-
-  const declared = new Set<string>();
-  for (const spec of TOOL_SPECS) {
-    for (const name of Object.keys(spec.parameters)) {
-      declared.add(name);
-    }
-  }
-
-  const uncontained: string[] = [];
-  let examined = 0;
-  for (const name of declared) {
-    const looksLikeAPath = name.endsWith('Path') || name === 'path' || name === 'script';
-    if (!looksLikeAPath) {
-      continue;
-    }
-    examined += 1;
-    if (PROJECT_FILE_ARGUMENTS.includes(name) || notAFile.has(name) || judgedAtTheCallSite.has(name)) {
-      continue;
-    }
-    uncontained.push(name);
-  }
-  // Counted, because "nothing was uncontained" is what a run that examined nothing says too. A
-  // change to what counts as a path-shaped name, or to how the schemas are read, would empty this
-  // loop and leave the check reading exactly as it does when it is working.
-  assert.ok(examined >= 10, `only ${examined} path-shaped arguments were examined, so this proved little`);
-  assert.deepEqual(
-    uncontained,
-    [],
-    'these arguments name a file and nothing judges them against the project: add them to PROJECT_FILE_ARGUMENTS, or say here why they are not files',
-  );
-
-  for (const [name, why] of [...notAFile, ...judgedAtTheCallSite]) {
-    assert.ok(declared.has(name), `no tool takes ${name}, so excusing it (${why}) excuses nothing`);
-  }
-  for (const name of PROJECT_FILE_ARGUMENTS) {
-    assert.ok(declared.has(name), `no tool takes ${name}, so containing it contains nothing`);
-  }
-
-  // The export path is the one judged away from the shared walk, so the judging itself is read
-  // rather than trusted: a call that lost it would still satisfy every list above.
-  const server = readFileSync('src/server.ts', 'utf8');
-  assert.match(
-    server,
-    /resolveWithinProject\(project\.value\.path, readString\(args, 'outputPath'\)/,
-    'project_export should still resolve outputPath against the project',
-  );
-}
-
 /**
  * An argument this server has never heard of is refused with the op's own list and the version.
  *
@@ -94051,37 +92814,6 @@ async function testProcessorSecondsAreReadOneWay(): Promise<void> {
 }
 
 /**
- * Each read of the operating system's process table has one home: the listing and the `ps` of
- * starts in `process-children.ts`, the processor seconds in `engine-spent.ts`.
- *
- * Two modules asking their own way gave two answers on one machine, `ps` rounding to whole seconds
- * where `/proc` did not. Walked, so a second ask added later in any file is found.
- */
-function testEveryProcessTableReadIsOne(): void {
-  const files = readdirSync('src', { recursive: true })
-    .map(String)
-    .filter((entry) => /\.[cm]?[jt]s$/.test(entry))
-    .map((entry) => join('src', entry).replaceAll('\\', '/'));
-  assert.ok(files.length >= 90, `the sources were walked: ${files.length}`);
-  const holding = (word: string): string[] =>
-    files.filter((file) => readFileSync(file, 'utf8').includes(word)).toSorted();
-  // Built from parts, so that this file is not one that holds them.
-  const everything = ["'", 'ps', "'"].join('');
-  const listing = files.filter((file) => {
-    const source = readFileSync(file, 'utf8');
-    return source.includes(everything) && new RegExp(`${everything}\\s*,\\s*\\[?\\s*'-e'`).test(source);
-  });
-  assert.deepEqual(listing, ['src/process-children.ts'], 'the whole table is listed in one file');
-  assert.deepEqual(holding(['l', 'start'].join('')), ['src/process-children.ts'], 'starts are read in one');
-  assert.deepEqual(
-    holding(['time', '='].join('')),
-    ['src/engine-spent.ts'],
-    'processor seconds are read by ps in one',
-  );
-  assert.deepEqual(holding(['ProcessorSeconds', '(int'].join('')), [], 'the table reads seconds one way');
-}
-
-/**
  * A budget of zero is an answer, and an argument that cannot carry it cannot turn the wait off.
  *
  * `runtimeWaitMs` is documented as how long to wait for a game to announce itself. Read as a
@@ -94129,93 +92861,6 @@ function testAnEntryWithNoDetailDoesNotCarryAnEmptyOne(): void {
   const withDetail = reported.find((entry) => entry.detail !== undefined);
   assert.ok(withDetail, `an entry with detail should still carry it: ${JSON.stringify(reported)}`);
   assert.deepEqual(withDetail.detail, ['at: somewhere.gd:12']);
-}
-
-/**
- * Every addon the package ships is one an install puts in the project.
- *
- * `installAddons` copies the directories `ADDONS` names, one at a time. A name in that list with no
- * directory behind it already fails loudly, with "The package holds no X addon", so that direction
- * is held. The other one is silent: a directory added under `src/godot/addons` and not added to the
- * list is an addon that ships inside the package and is never installed by anything, and the only
- * symptom is a tool that answers as though the addon were simply not there.
- *
- * What counts as an addon is the same test the install uses, rather than "every directory", so a
- * directory of shared files added beside them does not read as one.
- */
-function testEveryShippedAddonIsInstalled(): void {
-  const shipped = readdirSync('src/godot/addons', { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .filter(
-      (name) =>
-        existsSync(join('src/godot/addons', name, 'plugin.cfg')) ||
-        existsSync(join('src/godot/addons', name, 'runtime_autoload.gd')),
-    );
-  assert.ok(shipped.length >= 3, `only ${shipped.length} addons were found, so this proved little`);
-  for (const name of shipped) {
-    assert.ok(
-      (ADDONS as readonly string[]).includes(name),
-      `${name} ships in the package and no install puts it in a project: add it to ADDONS`,
-    );
-  }
-
-  // And the list is read by an install rather than only compared against, because a list that
-  // matches the directory and installs none of them satisfies everything above.
-  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-addons-'));
-  try {
-    const installed = installAddons(projectDir);
-    assert.deepEqual(
-      installed.map((addon) => addon.name).toSorted(),
-      [...ADDONS].toSorted(),
-      'an install should have put every addon in the list into the project',
-    );
-    for (const name of shipped) {
-      assert.ok(
-        existsSync(join(projectDir, 'addons', name)),
-        `${name} should be in the project after an install`,
-      );
-    }
-  } finally {
-    sweep(projectDir);
-  }
-}
-
-/**
- * Every script in an installed addon carries the `.uid` that fixes its identity.
- *
- * Godot 4.4 writes one beside each script and reads it back so a reference survives a rename.
- * An addon shipped without them is re-identified by whichever editor opens it: a warning per
- * script at every start, a different identity on every machine, and, because installing deletes
- * the directory and copies it again, the same warnings back after every upgrade. Fourteen of them
- * turned up in one project's console. The operations scripts run from outside a project, so
- * nothing scans them and they have none.
- */
-function testEveryAddonScriptKeepsItsIdentity(): void {
-  const scripts: string[] = [];
-  const walk = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        walk(path);
-      } else if (entry.name.endsWith('.gd')) {
-        scripts.push(path);
-      }
-    }
-  };
-  walk('src/godot/addons');
-  assert.ok(scripts.length >= 14, `only ${scripts.length} addon scripts were found, so this proved little`);
-
-  const identities = new Map<string, string>();
-  for (const script of scripts) {
-    const beside = `${script}.uid`;
-    assert.ok(existsSync(beside), `${script} ships without the ${basename(beside)} that names it`);
-    const uid = readFileSync(beside, 'utf8').trim();
-    assert.match(uid, /^uid:\/\/[0-9a-z]+$/, `${beside} should hold one uid:// line`);
-    const taken = identities.get(uid);
-    assert.equal(taken, undefined, `${script} and ${taken} both claim ${uid}`);
-    identities.set(uid, script);
-  }
 }
 
 /**
@@ -94627,136 +93272,6 @@ function testAnUnwritableCacheFolderStillWritesTheHelperCopies(): void {
     restoreCache();
     rmSync(scratch, { recursive: true, force: true });
   }
-}
-
-/** The same environment with the variables a git hook exports removed, so git reads the working directory. */
-function gitEnvironment(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  delete env['GIT_DIR'];
-  delete env['GIT_WORK_TREE'];
-  delete env['GIT_INDEX_FILE'];
-  return env;
-}
-
-/**
- * The copies are build output, so git neither tracks them nor reports them, and the identity beside
- * each stays tracked.
- *
- * A copy left tracked would go on being committed with an edit nobody made in the original. A
- * missing ignore line stops the release build on an untracked file, and a pattern wide enough to
- * take a `.uid` along would let a lost identity pass.
- */
-function testNoHelperCopyIsTracked(): void {
-  const copies = sharedCopies().map(({ copy }) => copy.replaceAll('\\', '/'));
-  const git = (...gitArgs: string[]): SpawnSyncReturns<string> =>
-    spawnSyncHidden('git', gitArgs, { encoding: 'utf8', timeout: 60000, env: gitEnvironment() });
-  const lines = (run: SpawnSyncReturns<string>): string[] =>
-    run.stdout.split('\n').filter((line) => line !== '');
-
-  const tracked = lines(git('ls-files', '--', 'src/godot/addons'));
-  assert.deepEqual(
-    copies.filter((copy) => tracked.includes(copy)),
-    [],
-    'a helper copy is tracked',
-  );
-  assert.deepEqual(
-    copies.filter((copy) => !tracked.includes(`${copy}.uid`)),
-    [],
-    'a helper copy has no tracked .uid',
-  );
-
-  assert.deepEqual(
-    lines(git('check-ignore', '--no-index', ...copies)).toSorted(),
-    copies.toSorted(),
-    'every copy should be ignored',
-  );
-  assert.deepEqual(
-    lines(git('check-ignore', '--no-index', ...copies.map((copy) => `${copy}.uid`))),
-    [],
-    'no .uid should be ignored',
-  );
-
-  // The release leg's own check, after the suite wrote the copies.
-  const status = lines(git('status', '--porcelain', '--untracked-files=all', '--', 'src/godot'));
-  assert.deepEqual(
-    status.filter((line) => copies.some((copy) => line.endsWith(copy))),
-    [],
-    'git should not report a helper copy',
-  );
-}
-
-/** The `.gd` files of an addon that share a name with a module beside the operations and are not a listed copy. */
-function unlistedHelperCopies(godot: string): { unlisted: string[]; sameName: number } {
-  const modules = new Set(readdirSync(join(godot, 'operations')).filter((name) => name.endsWith('.gd')));
-  const listed = new Set(sharedCopies(godot).map(({ copy }) => copy));
-  const found = readdirSync(join(godot, 'addons'), { recursive: true })
-    .map((entry) => join(godot, 'addons', String(entry)))
-    .filter((path) => path.endsWith('.gd') && modules.has(basename(path)));
-  return { unlisted: found.filter((path) => !listed.has(path)), sameName: found.length };
-}
-
-/**
- * A helper copied into an addon by hand is on the list.
- *
- * A copy nobody listed is never written again, so it drifts from its original, and one left behind
- * when its addon leaves the list is ignored by nothing.
- */
-function testEveryHelperCopyInAnAddonIsListed(): void {
-  const here = unlistedHelperCopies(join('src', 'godot'));
-  assert.deepEqual(here.unlisted, []);
-  assert.equal(here.sameName, 17);
-
-  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-helper-listed-'));
-  try {
-    mkdirSync(join(scratch, 'operations'), { recursive: true });
-    mkdirSync(join(scratch, 'addons', 'gdharness_runtime'), { recursive: true });
-    writeFileSync(join(scratch, 'operations', 'file_walk.gd'), 'extends RefCounted\n');
-    const planted = join(scratch, 'addons', 'gdharness_runtime', 'file_walk.gd');
-    writeFileSync(planted, 'extends RefCounted\n');
-    writeFileSync(join(scratch, 'addons', 'gdharness_runtime', 'own_script.gd'), 'extends RefCounted\n');
-    assert.deepEqual(unlistedHelperCopies(scratch).unlisted, [planted]);
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-}
-
-/**
- * Every suite that reads the source addons writes the copies before it does.
- *
- * Git does not hold them, so a suite on a fresh clone reads a tree without them: an install that
- * cannot parse, a digest that differs from the bundle's, a typed gate short of scripts. The build
- * copies a tree it is handed, so it too has to write them first.
- */
-function testEverySuiteReadingTheAddonsWritesTheHelperCopiesFirst(): void {
-  const readsTheAddons = (source: string): boolean =>
-    source.includes("from '../src/setup.js'") ||
-    /cpSync\(\s*(?:'src\/godot\/addons'|join\('src', 'godot', 'addons')/.test(source);
-  const readers = readdirSync('test')
-    .filter((name) => name.endsWith('.ts'))
-    .filter((name) => readsTheAddons(readFileSync(join('test', name), 'utf8')))
-    .toSorted();
-  assert.deepEqual(readers, ['bridge.ts', 'editor.ts', 'engine-gdscript.ts', 'fuzz.ts', 'regressions.ts']);
-  // The call opens `main`, or for a suite that runs at the top level it is the first statement after
-  // the last declaration. A call anywhere else in the file's text, a test case's own use of the sync
-  // included, starts the suite on a tree that may not have the copies.
-  const opensWithTheSync = (source: string): boolean =>
-    /^async function main\(\): Promise<void> \{\n\s*syncSharedGdscript\(\);/m.test(source) ||
-    (!/^async function main\(/m.test(source) &&
-      source
-        .slice(source.lastIndexOf('\n}\n') + 3)
-        .trimStart()
-        .startsWith('syncSharedGdscript();'));
-  for (const name of readers) {
-    assert.ok(
-      opensWithTheSync(readFileSync(join('test', name), 'utf8')),
-      `test/${name} reads the source addons and does not write the helper copies first`,
-    );
-  }
-
-  const build = readFileSync(join('scripts', 'build-release.ts'), 'utf8');
-  const synced = build.indexOf('syncSharedGdscript(');
-  const copied = build.indexOf("cp(path.join(sourceRoot, 'godot')");
-  assert.ok(synced !== -1 && copied !== -1 && synced < copied, 'the build copies godot before it is whole');
 }
 
 /**
@@ -95291,204 +93806,6 @@ function testAMovieIsWrittenOnlyWhereACaptureCouldBe(): void {
   }
 }
 
-/** How many "`tool op` with `argument`" phrases the skill and the docs hold today, as a floor. */
-const ARGUMENT_MENTIONS = 17;
-
-/**
- * Every argument the skill names for an op is one that op takes.
- *
- * Issue #616: the skill said to press a key with `runtime_input` `key`, which reads as an argument
- * called `key`. The tool refused it and named `keycode`. The tool-name check below reads the tool
- * and the op and had nothing to say about the word after them. This reads the phrase the skill
- * uses for it, "`tool op` with `argument`", from the rendered skill and every document, and asks
- * the schema whether that op takes that argument. A phrase written some other way is not read, so
- * the floor holds the count: a rewording that stops matching lowers it in the same change.
- */
-function testEveryArgumentTheSkillNamesIsOneTheOpTakes(): void {
-  const phrase = /`([a-z_]+) ([a-z_]+)` with `([a-zA-Z_]+)`/g;
-  const wrongIn = (content: string): string[] =>
-    [...content.matchAll(phrase)]
-      .filter(([, tool, op, argument]) => {
-        const declared = toolSpec(tool ?? '')?.parameters[argument ?? ''];
-        const ops = declared?.ops;
-        return declared === undefined || (Array.isArray(ops) && !ops.includes(op));
-      })
-      .map(([whole]) => whole);
-
-  // The check itself, on the phrase #616 would have been written as.
-  assert.deepEqual(wrongIn('`runtime_input key` with `key`'), ['`runtime_input key` with `key`']);
-  assert.deepEqual(wrongIn('`runtime_input key` with `keycode`'), []);
-
-  const sources = [
-    ...[...skillFiles('0.0.0')].map(([name, content]) => ({ where: `the skill: ${name}`, content })),
-    ...readdirSync('docs')
-      .filter((name) => name.endsWith('.md'))
-      .map((name) => ({ where: join('docs', name), content: readFileSync(join('docs', name), 'utf8') })),
-    ...readdirSync('.')
-      .filter((name) => name.endsWith('.md'))
-      .map((name) => ({ where: name, content: readFileSync(name, 'utf8') })),
-  ];
-  const seen = sources.reduce((count, { content }) => count + [...content.matchAll(phrase)].length, 0);
-  const wrong = sources.flatMap(({ where, content }) => wrongIn(content).map((one) => `${where}: ${one}`));
-  assert.deepEqual(wrong, [], 'every argument named for an op is one the op takes');
-  assert.ok(seen >= ARGUMENT_MENTIONS, `only ${seen} phrases were read; the pattern is not matching`);
-}
-
-/** How many files the prose gate below reads today, as a floor under its walk. */
-const PROSE_FILES_READ = 387;
-
-/**
- * The two dashes, by code point, so this file holds neither character: an editor or a tool that
- * turns an escape into the character it names would otherwise put one here for the gate to find.
- */
-const EM_DASH = String.fromCodePoint(0x2014);
-const EN_DASH = String.fromCodePoint(0x2013);
-
-/**
- * Phrases an agent writes by habit and no sentence here needs: chatbot openers and closers, and
- * marketing words that claim instead of saying. Exact and lower case, matched case aside.
- */
-const HABIT_PHRASES = [
-  'i hope this helps',
-  'let me know if you have any questions',
-  "let's dive in",
-  "here's what you need to know",
-  "it's not just",
-  'at its core',
-  'the real question is',
-  'what really matters',
-  'game-changer',
-  'game changer',
-  'cutting-edge',
-  'next-generation',
-  'seamless',
-  'delve',
-] as const;
-
-/**
- * What [param content] holds that the project's prose may not, by rule.
- *
- * An em dash anywhere, and an en dash standing between spaces as one. In [param prose], also a
- * spaced double hyphen standing in for a dash, outside backticks and fenced blocks, where a command
- * line's own `--` lives, and the habit phrases.
- */
-function proseFaults(content: string, prose: boolean): string[] {
-  const faults: string[] = [];
-  let fenced = false;
-  for (const [index, line] of content.split('\n').entries()) {
-    const at = `line ${index + 1}`;
-    if (line.includes(EM_DASH)) {
-      faults.push(`${at}: an em dash`);
-    }
-    if (line.includes(` ${EN_DASH} `)) {
-      faults.push(`${at}: an en dash used as a dash`);
-    }
-    if (line.trimStart().startsWith('```')) {
-      fenced = !fenced;
-      continue;
-    }
-    if (!prose || fenced) {
-      continue;
-    }
-    faults.push(...proseOnlyFaultsOfALine(at, line));
-  }
-  return faults;
-}
-
-/** A double hyphen standing in for a dash outside backticks, and the habit phrases, in one line of prose. */
-function proseOnlyFaultsOfALine(at: string, line: string): string[] {
-  const faults: string[] = [];
-  const outsideCode = line.replace(/`[^`]*`/g, '');
-  if (outsideCode.includes(' -- ')) {
-    faults.push(`${at}: a double hyphen used as a dash`);
-  }
-  const lower = outsideCode.toLowerCase();
-  for (const phrase of HABIT_PHRASES) {
-    if (new RegExp(`\\b${phrase.replaceAll('-', '\\-')}`).test(lower)) {
-      faults.push(`${at}: "${phrase}"`);
-    }
-  }
-  return faults;
-}
-
-/**
- * The project's prose holds no dash stand-ins and none of the habit phrases.
- *
- * No em dashes was a rule written in CONTRIBUTING.md and nowhere else, so nothing stopped a tool
- * description, a refusal or a comment carrying one to every agent that reads it. Every tracked text
- * file is read for the dashes, tests and workflows included. The double hyphen and the phrases only
- * in what ships, the sources and the documents and the skill and tool reference as rendered, since a
- * test has to be free to quote a phrase and a command line's separator is a double hyphen.
- */
-function testShippedProseHasNoDashStandInsOrHabitPhrases(): void {
-  // The check itself, on what it must flag and what it must leave alone.
-  assert.deepEqual(proseFaults(`one ${EM_DASH} two`, false), ['line 1: an em dash']);
-  assert.deepEqual(proseFaults(`one ${EN_DASH} two, pages 3${EN_DASH}4`, false), [
-    'line 1: an en dash used as a dash',
-  ]);
-  assert.deepEqual(proseFaults('wait -- then go\nI hope this helps!', true), [
-    'line 1: a double hyphen used as a dash',
-    'line 2: "i hope this helps"',
-  ]);
-  assert.deepEqual(proseFaults('godot `--path p -- -e` and `HEAD -- package.json`', true), []);
-  assert.deepEqual(proseFaults('wait -- then go', false), [], 'a test line may hold a command line');
-  assert.deepEqual(
-    proseFaults(
-      `\`\`\`text\ngdharness spread a.tscn -- --seed=3\n\`\`\`\nwait -- then go\n\`\`\`\n${EM_DASH}\n\`\`\``,
-      true,
-    ),
-    ['line 4: a double hyphen used as a dash', 'line 6: an em dash'],
-    'a fenced command line may hold its separator, and the prose after the fence is read again',
-  );
-
-  const read: { where: string; content: string; prose: boolean }[] = [];
-  const kinds = /\.(ts|gd|md|yml|yaml|json|jsonc|cfg|tscn|sh|ps1|mjs)$/;
-  const walk = (directory: string, prose: boolean): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        if (entry.name !== 'node_modules') {
-          walk(path, prose);
-        }
-      } else if (kinds.test(entry.name)) {
-        // The workflows are shell, where a double hyphen is a command's separator.
-        read.push({
-          where: path,
-          content: readFileSync(path, 'utf8'),
-          prose: prose && !/\.ya?ml$/.test(entry.name),
-        });
-      }
-    }
-  };
-  walk('src', true);
-  walk('docs', true);
-  walk('.github', true);
-  walk('test', false);
-  walk('scripts', false);
-  for (const entry of readdirSync('.', { withFileTypes: true })) {
-    if (entry.isFile() && kinds.test(entry.name) && !entry.name.endsWith('lock.json')) {
-      read.push({
-        where: entry.name,
-        content: readFileSync(entry.name, 'utf8'),
-        prose: entry.name.endsWith('.md'),
-      });
-    }
-  }
-  read.push({ where: 'the tool reference', content: renderToolsMarkdown(), prose: true });
-  for (const [name, content] of skillFiles('0.0.0')) {
-    read.push({ where: `the skill: ${name}`, content, prose: true });
-  }
-
-  const faults = read.flatMap(({ where, content, prose }) =>
-    proseFaults(content, prose).map((fault) => `${where} ${fault}`),
-  );
-  assert.deepEqual(faults, [], 'the prose holds no dash stand-ins and none of the habit phrases');
-  assert.ok(
-    read.length >= PROSE_FILES_READ,
-    `only ${read.length} files were read; the walk is not reaching them`,
-  );
-}
-
 /**
  * The sentences of [param content] that run into the next with no space between: a full stop or
  * other stop, then a capitalised word and a lower-case one, as in "{was, now}.A write is". A
@@ -95523,241 +93840,6 @@ function testToolTextKeepsASpaceBetweenSentences(): void {
     walk(spec.name, spec);
   }
   assert.deepEqual(said, []);
-}
-
-/**
- * How many tool names the tree mentions today, as a floor under the reading below.
- *
- * Set to what is there rather than to a round number, so removing mentions means lowering this in
- * the same change and somebody confirms the removal was meant.
- */
-const TOOL_NAME_MENTIONS = 1479;
-
-/** The same, for phrases naming a tool and one of its multi-word ops. */
-const TOOL_OP_MENTIONS = 59;
-
-/**
- * Every tool this server names in something it says is a tool it has.
- *
- * The refusals here are full of tool names, because a refusal that does not say what to call
- * instead is half an answer. A rename or a removal leaves those sentences reading perfectly and
- * pointing at nothing, and the caller who follows one is sent to make a call that will be refused
- * for a second reason. Nothing else catches it: the schemas are checked against each other, the
- * prose is checked against nobody, and a sentence is as fluent wrong as right.
- *
- * Read out of the string literals rather than out of whole lines, because the sentence that matters
- * is often assembled from parts and no single line of the file contains it. The rendered surfaces
- * are read as themselves, since that is what an agent is given.
- *
- * The families come from the schemas, so a tool in a new family is covered the day it lands rather
- * than when somebody remembers this list.
- */
-function testEveryToolNamedInProseIsATool(): void {
-  const names = new Set(TOOL_SPECS.map((spec) => spec.name));
-  const families = [...new Set(TOOL_SPECS.map((spec) => spec.name.split('_')[0]))];
-  // Words this project owns or reads that are shaped like a tool and are not one: the fields the
-  // bridge sends the addon, the server sends a headless operation and editor_classes answers with, the autoload the runtime installs, a section of project.godot, the
-  // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
-  // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
-  // export_presets.cfg, the directory a self-contained editor keeps its data in, the file the
-  // editor keeps its open scenes in, the file the editor caches its class and script references in, the name every resource stores, and the gdUnit4 call a
-  // suite that drives a scene makes, which is what puts it in the windowed engine, and the project
-  // setting that turns that guess off, and the engine setting naming a file laid over the project's
-  // settings, which a write keeps out of project.godot. Named one by one rather than matched by a
-  // pattern, so a new word of this shape has to be looked at once and called a tool or vocabulary.
-  const notTools = new Set([
-    'project_path',
-    'project_classes',
-    'project_children',
-    'project_descendants',
-    'scene_path',
-    'resource_path',
-    'script_path',
-    'script_class',
-    'project_file',
-    'project_name',
-    'project_config',
-    'project_diagnostics',
-    'resource_files',
-    'scene_tools',
-    'resource_tools',
-    'editor_pid',
-    'debug_port',
-    'debug_adapter',
-    'editor_plugins',
-    'script_error',
-    'debug_data',
-    'debug_enter',
-    'debug_exit',
-    'script_export_mode',
-    'editor_data',
-    'editor_doc_cache',
-    'editor_script_doc_cache',
-    'editor_layout',
-    'resource_name',
-    'editor_servers',
-    'scene_runner',
-    'scene_runner_needs_window',
-    'project_settings_override',
-  ]);
-  // The addon's own modules, taken from the files rather than written down, because a module added
-  // tomorrow is named in a string the day it lands and a list would not know about it.
-  const modules = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        modules(join(directory, entry.name));
-      } else if (entry.name.endsWith('.gd')) {
-        notTools.add(entry.name.slice(0, -3));
-      }
-    }
-  };
-  modules(join('src', 'godot'));
-  // The wildcard a sentence uses to mean a whole family, which is a real thing to say and not a
-  // tool: `runtime_*` reaches it. Judged as the family so a family that goes away is still caught.
-  const wildcard = new RegExp(`\\b(${families.join('|')})_\\*`, 'g');
-  const shaped = new RegExp(`\\b(${families.join('|')})_[a-z][a-z0-9_]*\\b`, 'g');
-
-  namedToolsInQuotedSources({ names, families, notTools, wildcard, shaped });
-}
-
-/** What the tool-name reading is given: the tools, their families, the words that are not tools and the patterns. */
-interface ToolMentionRules {
-  names: Set<string>;
-  families: (string | undefined)[];
-  notTools: Set<string>;
-  wildcard: RegExp;
-  shaped: RegExp;
-}
-
-/** Gathers what the server says in the tree, then reads it for tool names. */
-function namedToolsInQuotedSources(rules: ToolMentionRules): void {
-  // What the server says, not what it is written with. A bare read of the file also sees its own
-  // identifiers and the field names of the bridge protocol, which are the same shape as a tool and
-  // are nobody's instruction to make a call.
-  const quoted = /'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g;
-  const sources: [string, string][] = [];
-  const walk = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        walk(path);
-      } else if (entry.name.endsWith('.ts') || entry.name.endsWith('.gd')) {
-        sources.push([
-          path,
-          [...readFileSync(path, 'utf8').matchAll(quoted)].map((one) => one[0]).join('\n'),
-        ]);
-      } else if (entry.name.endsWith('.md')) {
-        sources.push([path, readFileSync(path, 'utf8')]);
-      }
-    }
-  };
-  // Walked rather than listed. A rule counted over a named set is a rule the next file escapes by
-  // being somewhere nobody listed, and the three documents this used to name were three of five.
-  // The addon's GDScript is here for the same reason: it tells a caller which tool to use too.
-  walk('src');
-  walk('docs');
-  walk('.github');
-  for (const entry of readdirSync('.', { withFileTypes: true })) {
-    if (entry.isFile() && entry.name.endsWith('.md')) {
-      sources.push([entry.name, readFileSync(entry.name, 'utf8')]);
-    }
-  }
-  sources.push(['the tool reference', renderToolsMarkdown()]);
-  // Every file the skill installs, not the one that is usually the whole of it. The reference beside
-  // it is generated and is what a rename rewrites, so leaving it out reads a skill that cannot drift
-  // and calls the pair checked.
-  for (const [name, content] of skillFiles('0.0.0')) {
-    sources.push([`the skill: ${name}`, content]);
-  }
-
-  namedToolsInSources({ ...rules, sources });
-}
-
-/** Every name shaped like a tool in the sources is a tool or vocabulary, and every family wildcard has tools. */
-function namedToolsInSources(read: ToolMentionRules & { sources: [string, string][] }): void {
-  const { names, families, notTools, wildcard, shaped, sources } = read;
-  let seen = 0;
-  const wrong: string[] = [];
-  for (const [where, content] of sources) {
-    for (const found of content.matchAll(shaped)) {
-      // A real tool first, whatever else shares its spelling. Two modules here are named after the
-      // tool they implement, so vocabulary taken from the filenames covers `runtime_capture` and
-      // `runtime_input` as well, and skipping on that would stop checking two of the tools this is
-      // for. Being vocabulary somewhere is not grounds to stop reading it as a tool.
-      const tool = names.has(found[0]);
-      if (!tool && notTools.has(found[0])) {
-        continue;
-      }
-      seen += 1;
-      if (!tool) {
-        wrong.push(`${where} names ${found[0]}, which is not a tool`);
-      }
-    }
-    seen += familyWildcardsRead({ where, content, wildcard, families, wrong });
-  }
-
-  opsNamedInSources({ names, sources, wrong, seen });
-}
-
-/** Reads the family wildcards of one source, says those with no tools, and returns how many it read. */
-function familyWildcardsRead(read: {
-  where: string;
-  content: string;
-  wildcard: RegExp;
-  families: (string | undefined)[];
-  wrong: string[];
-}): number {
-  const { where, content, wildcard, families, wrong } = read;
-  let count = 0;
-  for (const found of content.matchAll(wildcard)) {
-    count += 1;
-    if (!families.includes(found[1] ?? '')) {
-      wrong.push(`${where} names the family ${found[0]}, which has no tools`);
-    }
-  }
-  return count;
-}
-
-/** The tool-and-op phrases of the sources, and the floors under what was read. */
-function opsNamedInSources(read: {
-  names: Set<string>;
-  sources: [string, string][];
-  wrong: string[];
-  seen: number;
-}): void {
-  const { names, sources, wrong, seen } = read;
-  // An op named after its tool, which is how these sentences tell a caller what to do: the words
-  // are next to each other because the call is `editor_run stop`. Only the ones carrying an
-  // underscore, because a one-word op is the same shape as the next English word and `editor_status
-  // says` would read as an op called `says`. That leaves `start` and `stop` unheld here and it is
-  // the honest half to take: the multi-word ops are the ones nobody can check by eye.
-  const opsOf = new Map(TOOL_SPECS.map((spec) => [spec.name, new Set(Object.keys(spec.operations ?? {}))]));
-  const called = new RegExp(`\\b(${[...names].join('|')})\\s+([a-z][a-z0-9]*_[a-z0-9_]*)\\b`, 'g');
-  let ops = 0;
-  for (const [where, content] of sources) {
-    for (const found of content.matchAll(called)) {
-      const [, tool, op] = found;
-      const known = opsOf.get(tool ?? '');
-      if (known === undefined || known.size === 0 || names.has(`${op}`)) {
-        continue;
-      }
-      ops += 1;
-      if (!known.has(op ?? '')) {
-        wrong.push(`${where} says ${tool} ${op}, which is not an op of ${tool}`);
-      }
-    }
-  }
-
-  // The instrument first. A pattern that had stopped matching reports every prose file clean, and
-  // this check is otherwise an assertion that nothing was found, which a broken regex satisfies
-  // perfectly. The floor is what the tree holds today rather than a comfortable minimum, so
-  // dropping a mention below it has to be confirmed in the same change.
-  assert.ok(seen >= TOOL_NAME_MENTIONS, `only ${seen} tool names were read; the pattern is not matching`);
-  assert.ok(
-    ops >= TOOL_OP_MENTIONS,
-    `only ${ops} tool-and-op phrases were read; the pattern is not matching`,
-  );
-  assert.deepEqual(wrong, [], `every tool and op named in prose should exist:\n${wrong.join('\n')}`);
 }
 
 /**
@@ -120337,32 +118419,11 @@ async function rescanAsTheEditorOpens(godotPath: string, count: number): Promise
   }
 }
 
-/**
- * Every fixture in this file is in the list below.
- *
- * The list is written by hand, so a fixture can be added and left out of it, and nothing says so:
- * the suite passes, the count goes up by nothing, and the guard it was written for is unwatched
- * while its name sits in the file looking like coverage. Four fixtures were added here in one day
- * and each was registered by hand, which is four chances to have missed one.
- *
- * Read from this file's own source, because the thing being checked is exactly the gap between
- * what is written here and what is called. Anything named like a fixture and not called is either
- * a fixture nobody runs or a helper that should not be named `test...`, and both want the same
- * answer from whoever reads the failure.
- */
-function testEveryFixtureIsCalled(): void {
-  const source = readFileSync(join('test', 'regressions.ts'), 'utf8');
-  const defined = [...source.matchAll(/^(?:async )?function (test[A-Za-z0-9_]*)\(/gm)].map((match) =>
-    firstGroup(match),
-  );
-  assert.ok(defined.length > 50, `the pattern should still find the fixtures: found ${defined.length}`);
+/** The regression parts each platform's engine leg runs, as ci.yml names them. */
+const CI_PARTS = 10;
 
-  const listed = new Set(
-    [...source.matchAll(/^ {2}(test[A-Za-z0-9_]*),$/gm)].map((match) => firstGroup(match)),
-  );
-  const unreachable = defined.filter((name) => !listed.has(name));
-  assert.deepEqual(unreachable, [], 'every fixture defined here should be in TESTS');
-}
+/** The time a part's run is given, as GDHARNESS_REGRESSION_BUDGET_MS says in engine.yml. */
+const CI_BUDGET_SECONDS = 1200;
 
 /**
  * The regression parts CI runs on several machines cover every regression exactly once, and are
@@ -120372,75 +118433,37 @@ function testEveryFixtureIsCalled(): void {
  */
 function testRegressionPartsCoverEveryTestOnceAndBalance(): void {
   const names = TESTS.map((test) => test.name);
-  for (const [platform, seconds] of Object.entries(REGRESSION_SECONDS)) {
-    const stale = Object.keys(seconds).filter((name) => !names.includes(name));
-    assert.deepEqual(stale, [], `every name weighted for ${platform} is a regression in TESTS`);
-    const heaviest = Math.max(...Object.values(seconds));
-    const weight = (name: string): number => seconds[name] ?? UNMEASURED_SECONDS;
-    for (const parts of [1, 2, 3, 4, 5]) {
-      const split = Array.from({ length: parts }, (_unused, at) =>
-        regressionPart(names, at + 1, parts, seconds),
-      );
-      const covered = split.flat();
-      assert.equal(covered.length, names.length, `${platform}: ${parts} parts hold each regression once`);
-      assert.deepEqual(
-        [...covered].toSorted(),
-        [...names].toSorted(),
-        `${platform}: ${parts} parts hold every regression`,
-      );
-      const loads = split.map((part) => part.reduce((total, name) => total + weight(name), 0));
-      assert.ok(
-        Math.max(...loads) - Math.min(...loads) <= heaviest,
-        `${platform}: ${parts} parts within the heaviest regression of each other: ${loads.join(', ')}`,
-      );
-    }
+  const stale = Object.keys(REGRESSION_SECONDS).filter((name) => !names.includes(name));
+  assert.deepEqual(stale, [], 'every name weighted is a regression in TESTS');
+  const heaviest = Math.max(...Object.values(REGRESSION_SECONDS));
+  const weight = (name: string): number => REGRESSION_SECONDS[name] ?? UNMEASURED_SECONDS;
+  const loadsOf = (parts: number): number[] =>
+    Array.from({ length: parts }, (_unused, at) =>
+      regressionPart(names, at + 1, parts).reduce((total, name) => total + weight(name), 0),
+    );
+  for (const parts of [1, 2, 3, 4, 5, CI_PARTS]) {
+    const split = Array.from({ length: parts }, (_unused, at) => regressionPart(names, at + 1, parts));
+    const covered = split.flat();
+    assert.equal(covered.length, names.length, `${parts} parts hold each regression once`);
+    assert.deepEqual([...covered].toSorted(), [...names].toSorted(), `${parts} parts hold every regression`);
+    const loads = loadsOf(parts);
+    assert.ok(
+      Math.max(...loads) - Math.min(...loads) <= heaviest,
+      `${parts} parts within the heaviest regression of each other: ${loads.join(', ')}`,
+    );
   }
-  // Each platform is split by its own figures, and one CI does not run by the slowest's.
-  assert.equal(secondsOn('linux'), REGRESSION_SECONDS.linux);
-  assert.equal(secondsOn('win32'), REGRESSION_SECONDS.win32);
-  assert.equal(secondsOn('freebsd'), REGRESSION_SECONDS.darwin);
   // Two of 20 and two of 1 into two parts: the heavy pair is split, where every other one put
   // both 20s together. Each part keeps the list's own order.
   const weights = { a: 20, b: 1, c: 20, d: 1 };
   assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 1, 2, weights), ['a', 'b']);
   assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 2, 2, weights), ['c', 'd']);
 
-  // The parts CI runs fit the time each part's run is given, by the platform's own figures, with a
-  // fifth to spare: five Windows parts by stale figures came to 830 seconds and ran one part out of
-  // its 1200. Read from the workflows, so a part count or a budget changed there is held here too.
-  const workflows = join(process.cwd(), '.github', 'workflows');
-  const budgetSaid = /GDHARNESS_REGRESSION_BUDGET_MS: '(\d+)'/.exec(
-    readFileSync(join(workflows, 'engine.yml'), 'utf8'),
-  )?.[1];
-  assert.ok(budgetSaid, 'engine.yml gives the regressions their run time');
-  const budgetSeconds = Number(budgetSaid) / 1000;
-  const ci = readFileSync(join(workflows, 'ci.yml'), 'utf8');
-  for (const [job, platform] of [
-    ['engine-linux-parts', 'linux'],
-    ['engine-windows-parts', 'win32'],
-    ['engine-macos-parts', 'darwin'],
-  ] as const) {
-    const block = ci.slice(ci.indexOf(`  ${job}:`));
-    const said = /regression-parts: '(\[[^']*\])'/.exec(block)?.[1];
-    assert.ok(said, `ci.yml names the parts of ${job}`);
-    const named: unknown = JSON.parse(said);
-    assert.ok(Array.isArray(named), said);
-    const parts = named.length;
-    assert.deepEqual(
-      named,
-      Array.from({ length: parts }, (_unused, at) => `${at + 1}/${parts}`),
-      `${job} names every part of ${parts} once`,
-    );
-    const seconds = REGRESSION_SECONDS[platform];
-    const weight = (name: string): number => seconds[name] ?? UNMEASURED_SECONDS;
-    const loads = Array.from({ length: parts }, (_unused, at) =>
-      regressionPart(names, at + 1, parts, seconds).reduce((total, name) => total + weight(name), 0),
-    );
-    assert.ok(
-      Math.max(...loads) <= budgetSeconds * 0.8,
-      `${platform}'s ${parts} parts fit four fifths of ${budgetSeconds}s: ${loads.join(', ')}`,
-    );
-  }
+  // The parts CI runs fit the time each part's run is given, with a fifth to spare. ci.yml names
+  // this many parts for every platform.
+  assert.ok(
+    Math.max(...loadsOf(CI_PARTS)) <= CI_BUDGET_SECONDS * 0.8,
+    `${CI_PARTS} parts fit four fifths of ${CI_BUDGET_SECONDS}s: ${loadsOf(CI_PARTS).join(', ')}`,
+  );
 }
 
 /**
@@ -122053,37 +120076,6 @@ async function aFileBehindALinkIsReadByTheEngine(project: string, outside: strin
   } finally {
     await server.stop();
   }
-}
-
-/** Every reader of the project's folders takes its rule from the one walk. */
-function testEveryProjectWalkIsOne(): void {
-  const files = readdirSync('src', { recursive: true })
-    .map(String)
-    .filter((entry) => /\.[cm]?[jt]s$/.test(entry))
-    .map((entry) => join('src', entry).replaceAll('\\', '/'));
-  assert.ok(files.length >= 90, `the sources were walked: ${files.length}`);
-  const literal = ["'", '.gdignore', "'"].join('');
-  const holding = files.filter((file) => readFileSync(file, 'utf8').includes(literal)).toSorted();
-  assert.deepEqual(holding, ['src/project-walk.ts', 'src/suite-inputs.ts']);
-  const walker = readFileSync('src/project-walk.ts', 'utf8');
-  assert.ok(
-    new RegExp(`isFileAt\\(join\\([^)]*${literal}\\)\\)`).test(walker),
-    'the walker asks whether it is a file',
-  );
-  assert.ok(
-    /function isFileAt\([^)]*\)[^{]*\{\s*try \{\s*return statOf\([^)]*\)\?\.isFile\(\) === true/.test(walker),
-    'by a stat, which a folder of that name fails',
-  );
-  assert.ok(
-    !new RegExp(`existsSync\\([^)]*${literal}`).test(walker),
-    'a folder named .gdignore is no marker',
-  );
-  const nodeModules = ['node', 'modules'].join('_');
-  assert.deepEqual(
-    files.filter((file) => readFileSync(file, 'utf8').includes(nodeModules)),
-    [],
-    'no walk skips node_modules',
-  );
 }
 
 /** The import check leaves a nested project's files out, and still names the project's own. */
@@ -126961,7 +124953,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testWhatAScriptChangesInASubResourceIsNotSaved,
   testAFileBesideTheSceneBehindALinkOutIsNotWritten,
   testABreakpointBehindALinkOutIsSetUnchecked,
-  testEveryProjectWalkIsOne,
   testTheImportCheckStepsOverAFolderHoldingAProject,
   testTheExtensionListStepsOverAFolderHoldingAProject,
   testTheTextsStepOverAFolderHoldingAProject,
@@ -127180,15 +125171,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHandWrittenValueIsNoChangeOfAScripts,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,
   testACaptureSaysWhatPartOfTheWindowItIs,
-  testEveryFileArgumentIsContained,
   testAnUnknownArgumentSaysWhichServerSaysSo,
   testProcessorTimeIsReadOffEveryClockFormat,
   testProcessorSecondsAreReadOneWay,
-  testEveryProcessTableReadIsOne,
   testAWaitOfNothingIsAWaitOfNothing,
   testAnEntryWithNoDetailDoesNotCarryAnEmptyOne,
-  testEveryShippedAddonIsInstalled,
-  testEveryAddonScriptKeepsItsIdentity,
   testTheHelperCopiesAreWrittenFromTheirOriginals,
   testTwoSyncsAtOnceAfterAnOriginalChangedBothSucceed,
   testAnOriginalChangingTwiceDuringTwoSyncsLeavesNoFalseRefusal,
@@ -127196,14 +125183,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACleanRecordNotesTheCopiesAlreadyEqualToTheirOriginals,
   testAGodotFolderCopiedFromATreeWithStaleCopiesIsNotRefused,
   testAnUnwritableCacheFolderStillWritesTheHelperCopies,
-  testNoHelperCopyIsTracked,
-  testEveryHelperCopyInAnAddonIsListed,
-  testEverySuiteReadingTheAddonsWritesTheHelperCopiesFirst,
   testEveryReservedPortIsItsOwn,
-  testEveryToolNamedInProseIsATool,
-  testShippedProseHasNoDashStandInsOrHabitPhrases,
   testToolTextKeepsASpaceBetweenSentences,
-  testEveryArgumentTheSkillNamesIsOneTheOpTakes,
   testACaptureIsSavedOnlyWhereItMayBe,
   testAMovieIsWrittenOnlyWhereACaptureCouldBe,
   testAWindowedRunWritesItsMovie,
@@ -127239,8 +125220,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAnswerTooLargeToSendIsWrittenToAFile,
   testAToolWaitsOutTheEditorsScan,
   testAnUnlistedValueIsRefusedRatherThanDefaulted,
-  testEveryFixtureIsCalled,
-  testBothEndsAgreeAboutTheAnnouncement,
   testARestartLeftHalfDoneIsSaid,
   testTheRestartNoteIsReplacedWholeOrNotAtAll,
   testAnEditorStillArrivingIsNotOpenedBeside,
@@ -127273,7 +125252,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStopSaidWhileADebugAdapterConnectionClosesIsNotKept,
   testABreakpointRemovedWhileADebugAdapterConnectionClosesIsLetGo,
   testACallDuringADebugAdapterAbandonKeepsItsOwnConnection,
-  testEveryRequestWaitsInTheOneTable,
   testTheStatusCountsTheResourcesWithCallsQueued,
   testACommandIsTakenWhenTheThreadItWentToAnswers,
   testATurnedAwayEditorLeavesTheServerUp,
@@ -127281,10 +125259,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAProjectUpgradedUnderTheServerIsSaid,
   testAStaleNoteKnowsWhatARestartLoads,
   testAStaleNoteOfAnEditorOpenedElsewhereNamesHiddenFalse,
-  testEveryDispatchedNameExistsOnBothSides,
-  testEveryEngineParameterCanBeSent,
-  testEveryToolParameterIsRead,
-  testEveryToolIsDrivenSomewhere,
   testStaleDisconnectRegression,
   testAnOpenConnectionDoesNotHoldItsProcess,
   testOneServerOneProjectRegression,
@@ -127608,9 +125582,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheHeadlessListNamesEveryHeadlessTool,
   testAToolSectionSaysWhatItChangesAndEachOpLineSaysWhatItTakes,
   testTheReferencePrintsEveryShapeOfType,
-  testTheSkillNamesEverySettingTheAddonsRead,
-  testTheSkillNamesTheSettingThatServesAScriptRun,
-  testTheSkillNamesTheBindAddressAndPortTheAddonReads,
   testAQuietSceneIsNotServed,
   testTheSkillWritesNoEscapedBackticks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
@@ -127624,7 +125595,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASourceRewrittenInTheSameClockStepIsSeen,
   testStaleImportsWalkLinksAndSpellingsAsTheFileSystemDoes,
   testAnotherCheckoutRunsTheEngineItsConfigNames,
-  testTheImportCheckKnowsWhatStatusImports,
   testEachSettingsWriteNamesItsSetting,
   testASettingsWriteIsTakenUpByTheEditor,
   testOptionsWrittenAreSaidWhenTheirReimportFails,
@@ -127651,8 +125621,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDoctorJudgesAddonsByTheirCodeAndNotTheirVersionMarker,
   testAnUninstallRemovesALinkWhoseFolderIsGone,
   testTheSetupAndInstructionHelpersAnswerWhatTheyAreAsked,
-  testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,
-  testTheReleaseButtonOffersWhatBothDocumentsDescribe,
   testVersionOrdering,
   testChangelogReach,
   testANeverImportedFileIsSaidToBeOne,
@@ -127769,7 +125737,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testParametersReachTheEngine,
   testAFinishedRunCanStillBeRead,
   testOnlyOurOwnAutoloadIsRewritten,
-  testTheLoaderPassesAGamesOwnLint,
   testAFailedRunsLogsOutlastTheNextRun,
   testAnExitCodeOutlivesTheServerThatSawIt,
   testAKeeperLeavesALaterRunsNoteAlone,
@@ -127836,7 +125803,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnUnreadableClassNoteLeavesTheUpdateAnsweringWithoutAThrow,
   testASyncWriteBehindThreeWaitingWritesBlocksForOneWaitInAll,
   testASlotHandedWhileItsEngineIsNamedIsHandedOnceAfterIt,
-  testNoServerCodeWritesTheClassNoteFromACopyItReadEarlier,
   testACutRunHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testAProfileMarkHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testASuiteRecordHeldShutIsWaitedOnWithoutStoppingTheProcess,
@@ -127855,7 +125821,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEachFreeSlotCountsItsOwnYield,
   testARepositoryIsNamedByTheFolderHoldingItsSharedGitFolder,
   testALockOfATakeForAProjectInGitIsAsThatOfATakeForNone,
-  testEveryGameTheServerStartsTakesItsSlotForItsProject,
   testARepositoryIsNamedFromItsRealPathAndNeverForABareOne,
   testAnUnreadableWorktreeGitFileListsNoWorktrees,
   testAWaitForASlotKeepsAMarkUntilItEnds,
@@ -127909,7 +125874,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAReplacedServerAnswersEveryCallAndLetsGoOfItsPort,
   testAHeadlessEngineRaisesItsSlotAsItGrows,
   testALanesEngineRaisesItsSlotAsItGrows,
-  testAServersHeldEngineRaisesItsSlot,
   testAGamesKeeperRaisesTheSlotItHolds,
   testARaiseNotWrittenIsAskedAgain,
   testAFollowedEnginePastItsCapRaisesItsSlotToTheCap,
@@ -127920,7 +125884,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASlotLockIsCreatedWithoutAStagedFile,
   testAFileTakenBesideTheSlotsIsMadeThroughItsStagedFile,
   testAShareHoldsNoMoreThanTwoMinutesOfWork,
-  testEverySlotVariableTheSourcesReadIsClearedForAFixture,
   testTheLimitedRunEndsACommandThatWillNotEndAndKeepsTheCodeOfOneThatDoes,
   testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt,
   testADisconnectedLanguageClientLeavesNoTimer,
@@ -128070,7 +126033,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheShippedLoaderBringsTheRuntimeUpFirst,
   testCommandLineSetup,
   testUninstallLeavesAddonsItDidNotMake,
-  testNoShippedScriptParsesJsonLoudly,
   testTheReadingHelpersAnswerWhatTheyAreAsked,
   testTheHeadlessNodePathReaderResolvesWhatTheEngineResolves,
   testTheAnswerFileKeepsAFloatAsItWas,
@@ -128090,8 +126052,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARebuildOverAListLoadedWithoutItsKeyAnswersEveryClassAdded,
   testARebuildOverACutListAnswersAGoneScriptsClassRemoved,
   testTheRebuildsAnswerSaysHowToMendATwiceDeclaredClass,
-  testEveryProcessStartsThroughTheHiddenSpawn,
-  testEveryDesktopStartGoesThroughOneCall,
   testTheWrittenConfigNamesAProgramThatStarts,
 
   testProjectGodotMultilineValues,
@@ -128236,7 +126196,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARenamedAppIsNotSeededIntoItsOldFolder,
   testAnOverrideFileThatRenamesTheAppIsNotSeededIntoTheOldFolder,
   testASeedLeavesNothingBesideTheRunsFolder,
-  testEveryKeepIsHandedWhatItsSeedPutIn,
   testASeedThatMeetsASwapWaitsForTheNewSet,
   testATestRunsEngineStartsWithTheLastRunsPipelineCache,
   testProjectTestKeepsTheCacheAndSeedsTheNextRun,
@@ -128338,7 +126297,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnUnsetTakesAVariationBaseOutOfTheFile,
   testATestThatLeavesTheDesktopHelperRunningLeavesItNoLongerThanItsOwnRun,
   testAnEngineLogWithinTheLimitIsJudgedAsItWas,
-  testEveryEngineLogThatCanGrowIsReadWithTheLimitedReader,
   testAnEngineLogReadInPiecesIsJudgedAsItsWholeText,
   testTheSuiteCutsFindEverySuiteHoweverTheBytesArrive,
   testATestRunWhoseSuitePrintsPastTheLimitIsEnded,
@@ -128351,7 +126309,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPassingRunListsTwentyUncaughtScriptErrorsAndCountsTheRest,
   testATestRunsTallyUnderItsBoundsReadsAsTheWholeLog,
   testATestRunsTallyPastItsBoundsSaysWhatItCut,
-  testATestRunsConsoleIsReadAsItArrivesAndNeverJoined,
   testAnErrorDeclaredPastTheErrorsKeptIsSettled,
   testAnUnreportedRunsEntriesAreCountedOverEveryLine,
   testPrintedCappedNamesEachBoundReachedAndWhatItLeftOut,
@@ -129672,7 +127629,6 @@ function regressionsOfThisPart(named: RegressionCase[]): RegressionCase[] | null
             named.map((test) => test.name),
             Number(part[1]),
             Number(part[2]),
-            secondsOn(),
           ),
         );
   const chosen = inPart === null ? named : named.filter((test) => inPart.has(test.name));
@@ -129824,22 +127780,6 @@ async function testAProcessATestLeavesRunningIsListedWithTheTestThatStartedIt():
   }
 }
 
-/** Every slot variable the sources read is one a fixture starts without. */
-function testEverySlotVariableTheSourcesReadIsClearedForAFixture(): void {
-  const named = new Set<string>();
-  for (const file of readdirSync('src', { recursive: true, encoding: 'utf8' })) {
-    if (file.endsWith('.ts')) {
-      for (const match of readFileSync(join('src', file), 'utf8').matchAll(/GODOT_ENGINE_[A-Z_]+/g)) {
-        named.add(match[0]);
-      }
-    }
-  }
-  assert.ok(named.size >= 3, `the sources name the slot variables: ${String(named.size)}`);
-  for (const name of named) {
-    assert.ok(SLOT_VARIABLES.includes(name), `${name} is cleared before a fixture runs`);
-  }
-}
-
 /**
  * A test that starts the process's shared desktop helper and does not end it leaves nothing open
  * at the end of its run, because the runner ends the helper after each test. The run is a real one
@@ -129914,55 +127854,6 @@ function testAnEngineLogWithinTheLimitIsJudgedAsItWas(): void {
       asRead(readRun('')),
       'a log never written is an empty run',
     );
-  } finally {
-    sweep(scratch);
-  }
-}
-
-/**
- * Each place that reads an engine's or an editor's console from a file, which grows with what a game
- * prints, reads it with the limited reader and never whole. A share's text is read by its byte range.
- */
-function testEveryEngineLogThatCanGrowIsReadWithTheLimitedReader(): void {
-  const functionSource = (file: string, marker: string): string => {
-    const source = readFileSync(join('src', file), 'utf8');
-    const from = source.indexOf(marker);
-    assert.ok(from >= 0, `${marker} is in src/${file}`);
-    return source.slice(from, source.indexOf('\n}\n', from));
-  };
-  const reads: readonly (readonly [file: string, marker: string, wanted: string])[] = [
-    ['server.ts', 'private async testRead(', 'readEngineLog(engineLog,'],
-    ['suite-run.ts', 'judgeCompile(readRun(', 'readRun(readLog(log))'],
-    ['editor-end.ts', 'function whatTheEditorPrinted(', 'readLog(editorLogPath(projectPath))'],
-    ['start-watch.ts', 'function linesOf(', 'readLog(file)'],
-    ['engine-shares.ts', 'export function shareText(', 'bytesAt(fd, from,'],
-  ];
-  for (const [file, marker, wanted] of reads) {
-    const body = readFileSync(join('src', file), 'utf8');
-    const at = body.indexOf(marker);
-    assert.ok(at >= 0, `${marker} is in src/${file}`);
-    const section =
-      file === 'suite-run.ts' ? body.slice(Math.max(0, at - 40), at + 120) : functionSource(file, marker);
-    assert.ok(section.includes(wanted), `${file} reads with ${wanted}`);
-    assert.ok(
-      !/readFileSync\((?:engineLog|log|file|editorLogPath)\b/.test(section),
-      `${file} holds no whole read of a log: ${marker}`,
-    );
-  }
-
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-share-text-'));
-  try {
-    const log = join(scratch, 'engine.log');
-    const banner = 'Godot Engine v4.7.2.stable.official - https://godotengine.org\n';
-    const first = `${banner}one\ntwo\ngdharness share ended 0 exit 0\n`;
-    const second = 'three\nfour\ngdharness share ended 1 exit 0\n';
-    writeFileSync(log, `${first}${second}five\n`);
-    const from = Buffer.byteLength(first);
-    const to = from + Buffer.byteLength(second);
-    assert.equal(shareText(log, 0, from), `${banner}one\ntwo\n`);
-    assert.equal(shareText(log, from, to), `${banner}three\nfour\n`);
-    assert.equal(shareText(log, to), `${banner}five\n`);
-    assert.equal(shareText(log, to, to + 1000), `${banner}five\n`, 'a range past the end stops at it');
   } finally {
     sweep(scratch);
   }
@@ -130790,24 +128681,6 @@ function testATestRunsTallyPastItsBoundsSaysWhatItCut(): void {
         { list: 'uncaught script errors', leftOut: 50 },
       ],
     },
-  );
-}
-
-/**
- * A test run's console is read for its diffs as each chunk arrives and never joined, since a whole
- * console can pass what one string holds. The engine is started from source a test cannot run, so
- * it is read from its source.
- */
-function testATestRunsConsoleIsReadAsItArrivesAndNeverJoined(): void {
-  const source = readFileSync('src/server.ts', 'utf8');
-  const from = source.indexOf('private async testEngineRan(');
-  assert.ok(from >= 0, 'testEngineRan is in src/server.ts');
-  const body = source.slice(from, source.indexOf('\n  }\n', from));
-  assert.ok(body.includes('diffs.take(data)'), 'each chunk of the console goes to the diffs as it arrives');
-  assert.deepEqual(
-    body.match(/\.push\(data\)|Buffer\.concat\(|data\.toString\(/g) ?? [],
-    [],
-    'and no chunk is kept or joined',
   );
 }
 

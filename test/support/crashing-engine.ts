@@ -112,9 +112,6 @@ public static class CrashingEngine {
 }
 `;
 
-/** The source the check of hidden starts reads. */
-export const CRASHING_ENGINE_SOURCE = SOURCE;
-
 /**
  * The POSIX stand-in for a start that crashes after the real engine ran. Exit statuses there are one
  * byte, so GDH_CRASH_STATUS is a number below 256.

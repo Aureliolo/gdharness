@@ -96,6 +96,8 @@ the headless engine operations. Both are GDScript. `test/` holds the suites, wit
 - CI runs the suites, since the repository is public. Before calling a change done, push and read
   every suite CI runs: `test:ci`, `test:integration`, `test:metadata` and `test:packaging`, fifteen
   files in all, plus the engine and editor legs.
+- A pull request runs the engine legs on Linux and Windows only. macOS runs on the release pull
+  request and on `main` after a merge, so a macOS-only fault shows up there.
 - `build-and-test` leaves the regressions and `test:integration` to the engine legs, which run them
   with Godot, unless the legs are skipped.
 - Locally, start an engine only to debug a failing test, or to show a new test fails with its fix
