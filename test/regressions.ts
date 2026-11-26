@@ -54639,22 +54639,31 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
  * question is asked beside the looks, and the last answer is what each look reads.
  *
  * Before the play the editor here answers `playing_status` after 700 ms. After it, the editor
- * holds the question until the start has returned, with a cap of three seconds, and the game
- * announces 100 ms after the play. The start has to find it with that question still open, which
- * is before the start gives up on the answer after a second.
+ * holds the question until the start has returned, with a cap of three seconds. The game announces
+ * 100 ms after the wait first asks that question, so the start has to find it with the question
+ * still open, which is before the start gives up on the answer after a second. Written after the
+ * play alone, the announcement was found before any question when the start's notes were slow,
+ * and a run that never asked passed without testing anything.
  *
  * The editor's answer is an event and not a clock reading, because the announcement and the
  * answer are both written by timers of this process. A stall of this process on a loaded runner
  * delays both together, so the answer then came right behind the announcement and a wait that was
- * never held read as one the editor held.
+ * never held read as one the editor held. The two lengths that are bounded are each read between
+ * two moments a stall at the write moves together: from the write to the server's line saying the
+ * wait ended, and the server's whole wait less the part of it this process spent after the ask.
  */
 async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
   const answersBeforeThePlayAfterMs = 700;
-  const announcesAfterMs = 100;
+  const announcesAfterTheAskMs = 100;
   const holdsAfterThePlayForMs = 3_000;
-  // Measured from the play rather than from the call: the start asks the editor what it is playing
-  // before it plays anything, and that question is held for the same 700 ms.
+  // Fifty-millisecond looks find an announcement within a look or two. A look every 900 ms, or a
+  // first look 800 ms late, does not.
+  const findsWithinMs = 400;
+  const asksWithinMs = 400;
   let playedAt = 0;
+  let askedAfterThePlayAt = 0;
+  let writtenAt = 0;
+  let endSaidAt = 0;
   let startReturned = false;
   let answeredAfterThePlay = false;
   let release: () => void = () => undefined;
@@ -54662,6 +54671,7 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
     release = settle;
   });
   let cap: ReturnType<typeof setTimeout> | undefined;
+  let announcing: ReturnType<typeof setTimeout> | undefined;
   const game = aPlayedStandIn();
   await withAPlayingEditor(
     ({ adapter, project, runtimeDir }) =>
@@ -54669,55 +54679,80 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
         if (tool === 'play_scene') {
           playedAt = Date.now();
           cap = setTimeout(release, holdsAfterThePlayForMs);
-          // The announcement lands a moment after the play, from a process that is alive: a dead
-          // one is swept by the reader and the start would have nothing to find.
-          setTimeout(() => {
-            writeFileSync(
-              join(runtimeDir, `runtime-${game.pid}.json`),
-              JSON.stringify({
-                protocol: RUNTIME_PROTOCOL,
-                pid: game.pid,
-                port: 51_994,
-                address: '127.0.0.1',
-                project: { name: 'Played', path: project },
-                editor_pid: FAKE_EDITOR_PID,
-                addon_version: SERVER_VERSION,
-                addon_digest: shippedRuntimeDigest(),
-              }),
-              'utf8',
-            );
-          }, announcesAfterMs);
           return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
         }
         if (tool === 'playing_status') {
           if (playedAt === 0) {
             await delay(answersBeforeThePlayAfterMs);
-          } else {
-            await released;
-            answeredAfterThePlay = !startReturned;
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
           }
+          // Asked by the wait, so not once the server has said the wait ended.
+          if (askedAfterThePlayAt === 0 && endSaidAt === 0) {
+            askedAfterThePlayAt = Date.now();
+            // From a process that is alive: a dead one is swept by the reader and the start would
+            // have nothing to find.
+            announcing = setTimeout(() => {
+              writeFileSync(
+                join(runtimeDir, `runtime-${game.pid}.json`),
+                JSON.stringify({
+                  protocol: RUNTIME_PROTOCOL,
+                  pid: game.pid,
+                  port: 51_994,
+                  address: '127.0.0.1',
+                  project: { name: 'Played', path: project },
+                  editor_pid: FAKE_EDITOR_PID,
+                  addon_version: SERVER_VERSION,
+                  addon_digest: shippedRuntimeDigest(),
+                }),
+                'utf8',
+              );
+              writtenAt = Date.now();
+            }, announcesAfterTheAskMs);
+          }
+          await released;
+          answeredAfterThePlay = !startReturned;
           return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
         }
         return { ok: true };
       },
     async ({ start, server }) => {
-      const found = await start(10_000);
+      let said = '';
+      const hearTheEnd = (chunk: Buffer): void => {
+        said += chunk.toString();
+        if (endSaidAt === 0 && said.includes('announce wait ended')) {
+          endSaidAt = Date.now();
+        }
+      };
+      server.child.stderr?.on('data', hearTheEnd);
+      const found = await start(10_000).finally(() => {
+        server.child.stderr?.off('data', hearTheEnd);
+      });
       startReturned = true;
-      const sincePlayMs = Date.now() - playedAt;
       release();
+      // The lines from the play on, since a question before it is answered against the same
+      // second of patience and one answered late there says nothing about the wait.
+      const lines = server.stderr.split('\n').map((line) => line.trim());
+      const played = lines.findIndex((line) => line.includes('Tool play_scene'));
       // Printed on every run, with the server's own account of the wait, so a slow one on a loaded
       // runner can be read against the passing ones and against where the time went.
-      const account = server.stderr
-        .split('\n')
+      const account = lines
+        .slice(Math.max(played, 0))
         .filter((line) =>
           /announce wait ended|After the play|playing_status did not|playing_status answered after|Tool (playing_status|play_scene)/.test(
             line,
           ),
-        )
-        .map((line) => line.trim());
-      console.log(`slow editor: found ${String(sincePlayMs)}ms after the play; ${account.join(' | ')}`);
+        );
+      const told = account.join(' | ');
+      const after = (moment: number): string => (moment === 0 ? 'never' : `${String(moment - playedAt)}ms`);
+      const moments = `asked ${after(askedAfterThePlayAt)}, written ${after(writtenAt)}, end said ${after(endSaidAt)} after the play`;
+      console.log(`slow editor: ${moments}; ${told}`);
       assert.equal(get(found.answer, 'through'), 'editor', JSON.stringify(found.answer));
       assert.ok(playedAt > 0, 'the editor should have been asked to play');
+      assert.ok(played >= 0, `the server should log the play: ${told}`);
+      assert.ok(
+        askedAfterThePlayAt > 0,
+        `the wait should ask the editor whether it still plays the run: ${JSON.stringify(found.answer)} | ${told}`,
+      );
       assert.equal(
         get(found.answer, 'runtime', 'listening'),
         true,
@@ -54725,22 +54760,37 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
       );
       assert.equal(get(found.answer, 'runtime', 'pid'), game.pid, JSON.stringify(found.answer));
       const waited = account
-        .map((line) => /announce wait ended after (\d+)ms: pid (\d+) announced/.exec(line))
-        .find((said) => said !== null);
-      assert.ok(waited !== undefined, `the server should say how its wait ended: ${account.join(' | ')}`);
-      assert.equal(Number(waited[2]), game.pid, account.join(' | '));
+        .map((line) => /announce wait ended after (\d+)ms: pid (\d+) announced, editor asked/.exec(line))
+        .find((line) => line !== null);
+      assert.ok(
+        waited !== undefined,
+        `the server should say its wait asked the editor and found the game: ${told}`,
+      );
+      assert.equal(Number(waited[2]), game.pid, told);
       assert.ok(
         !account.some((line) => line.includes('playing_status did not answer')),
-        `the wait ended before the start stopped waiting for the editor's answer: ${account.join(' | ')}`,
+        `the wait ended before the start stopped waiting for the editor's answer: ${told}`,
       );
       assert.equal(
         answeredAfterThePlay,
         false,
-        `and found before the editor answered the question it was asked after the play: the wait took ${waited[1]}ms, ${sincePlayMs}ms after the play; the server said: ${account.join(' | ')}`,
+        `and found before the editor answered the question it was asked after the play: ${moments}; ${told}`,
+      );
+      assert.ok(writtenAt > 0 && endSaidAt >= writtenAt, `the wait should end after the write: ${moments}`);
+      const foundMs = endSaidAt - writtenAt;
+      assert.ok(
+        foundMs <= findsWithinMs,
+        `the wait ended ${String(foundMs)}ms after the announcement was written, against ${String(findsWithinMs)}ms: ${moments}; ${told}`,
+      );
+      const askedMs = Number(waited[1]) - (endSaidAt - askedAfterThePlayAt);
+      assert.ok(
+        askedMs <= asksWithinMs,
+        `the wait asked the editor ${String(askedMs)}ms after it began, against ${String(asksWithinMs)}ms: ${moments}; ${told}`,
       );
     },
   ).finally(() => {
     clearTimeout(cap);
+    clearTimeout(announcing);
     release();
     game.end();
   });
