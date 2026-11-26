@@ -198,8 +198,10 @@ Those functions are the cases it is expected to run, which is how a case that ne
 A case, a row or a whole suite skipped with `do_skip` never ran either, though gdUnit4 prints it
 passed and exits 0. The run fails and lists each skip with its `skip_reason`, and a suite skipped
 whole is listed once. `project_test` answers them under `casesSkipped`. `gdharness test` counts
-only the cases that ran. No option allows a skip. Both tools read each reason from the JUnit report
-gdUnit4 wrote. A skip the report misses is read off the console, and a reason the output cut off
+only the cases that ran. No option allows a skip. Both tools read each reason off the console, over
+as many lines as the reason has in the JUnit report gdUnit4 wrote. Where those lines do not close
+the reason's quote, the report's text is the reason, which lacks some words in square brackets. A
+skip the report misses is read off the console, and a reason the output cut off
 before its closing quote is listed by its first line and said to be cut. A run that wrote no report
 reads a reason off the console only when it closes on its own line, and lists no skip whose reason
 runs over several lines.

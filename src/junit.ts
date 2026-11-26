@@ -83,25 +83,12 @@ function positionPast(source: string, at: number, terminator: string, problem: s
 }
 
 /**
- * Where the CDATA opening at [param at] in a `<skipped>` element ends: at the last `]]>` before the
- * element closes. gdUnit4 writes a skip reason raw into it, so a reason holding `]]>` would end the
- * section early. Null when the element never closes after a `]]>`.
- */
-function skipReasonPast(source: string, at: number): number | null {
-  const closes = source.indexOf('</skipped>', at);
-  const end = closes === -1 ? -1 : source.lastIndexOf(']]>', closes);
-  return end < at + '<![CDATA['.length ? null : end + ']]>'.length;
-}
-
-/**
  * Reads the CDATA section, comment or declaration opening at `at`, adding CDATA to [param into]'s
  * text. Returns the position after it, or null when a tag opens there instead.
  */
 function skipNonElement(source: string, at: number, into: XmlElement): number | null {
   if (source.startsWith('<![CDATA[', at)) {
-    const after =
-      (into.name === 'skipped' ? skipReasonPast(source, at) : null) ??
-      positionPast(source, at, ']]>', 'CDATA that never ends');
+    const after = positionPast(source, at, ']]>', 'CDATA that never ends');
     into.text += source.slice(at + '<![CDATA['.length, after - ']]>'.length);
     return after;
   }

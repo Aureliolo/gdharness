@@ -846,9 +846,10 @@ function entryEnds(line: string): boolean {
  * line it is cut, and only its first line is surely the reason's: the lines after it are read as
  * they would be without it, the engine's last errors included.
  *
- * A [param reported] reason, the one gdUnit4's report holds for the skip, is the reason whatever
- * the console makes of it, and covers as many lines as it has, fewer where gdUnit4's own output
- * ends the entry sooner.
+ * A [param reported] reason, the one gdUnit4's report holds for the skip, says how many lines the
+ * reason covers. Their text is the reason, since the report's writer drops what it reads as a tag,
+ * such as `[blocked]`, and the console keeps it. Where those lines do not end in a quote, or
+ * gdUnit4's own output ends the entry sooner, the report's text is the reason.
  */
 function skipReasonAt(
   lines: RunState['lines'],
@@ -861,9 +862,32 @@ function skipReasonAt(
     return null;
   }
   if (reported !== undefined) {
-    return { reason: reported, ends: reportedEnds(lines, at, reported), cut: false };
+    return reportedReasonAt(lines, at, opened, reported);
   }
   return consoleReasonAt(lines, at, opened);
+}
+
+/**
+ * The reason printed over as many lines from [param at] as [param reported] has, whose first line
+ * after the opening quote is [param opened]. The report's text where the console's lines are fewer
+ * or the last does not close the quote.
+ */
+function reportedReasonAt(
+  lines: RunState['lines'],
+  at: number,
+  opened: string,
+  reported: string,
+): { reason: string; ends: number; cut: boolean } {
+  const ends = reportedEnds(lines, at, reported);
+  const parts = [opened];
+  for (let next = at + 1; next <= ends; next += 1) {
+    parts.push(lines.at(next) ?? '');
+  }
+  const last = (parts.at(-1) ?? '').trimEnd();
+  if (parts.length !== reported.split('\n').length || !last.endsWith("'")) {
+    return { reason: reported, ends, cut: false };
+  }
+  return { reason: [...parts.slice(0, -1), last.slice(0, -1)].join('\n'), ends, cut: false };
 }
 
 /** The last line a [param reported] reason covers from [param at], where the entry has not ended sooner. */

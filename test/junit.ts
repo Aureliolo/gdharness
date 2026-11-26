@@ -2279,15 +2279,15 @@ function testARunWithNoReportReadsItsSkipReasonsFromTheConsole(): void {
 }
 
 /**
- * gdUnit4 writes a skip reason raw into its report's CDATA, so a reason holding `]]>` comes back whole
- * only when the section runs to the last `]]>` of its element. Both tools then read it whole.
+ * gdUnit4 writes a skip reason raw into its report's CDATA, so a reason holding `]]>` ends the
+ * section early and the report loses those characters. Both tools read it whole off the console.
  */
 function testASkipReasonHoldingTheCdataEndIsReadWhole(): void {
   const skips = [['test_skip', "x ]]> can't"]] as const;
   const report = parseJUnit(reportedSkips(skips));
   assert.deepEqual(
     [skippedInReport(report), [...reportedFrom([report]).cases.values()]],
-    [[{ suite: REASONS_SUITE, name: 'test_skip', reason: "x ]]> can't" }], [["x ]]> can't"]]],
+    [[{ suite: REASONS_SUITE, name: 'test_skip', reason: "x  can't" }], [["x  can't"]]],
     'the report',
   );
   const read = bothToolsRead(printedSkips(skips).split('\n'), [], reportedFrom([report]));
@@ -2298,13 +2298,16 @@ function testASkipReasonHoldingTheCdataEndIsReadWhole(): void {
   );
 }
 
-/** Where the report and the console disagree on a reason, the report's is read and its lines are the reason's. */
-function testAReportedSkipReasonWinsOverTheConsole(): void {
-  const reason = 'from the report\nand its second line';
+/**
+ * Where the report and the console disagree on a reason's text, the console's lines are the reason
+ * over as many lines as the report's has, and they are no engine output.
+ */
+function testAReportSaysHowManyConsoleLinesASkipReasonCovers(): void {
+  const reason = "from the console\nERROR: and the engine's line";
   const read = bothToolsRead(
-    printedSkips([['test_skip', "from the console\nERROR: and the engine's line"]]).split('\n'),
+    printedSkips([['test_skip', reason]]).split('\n'),
     [],
-    reasonsReported([['test_skip', reason]]),
+    reasonsReported([['test_skip', 'one [b]\ntwo']]),
   );
   assert.deepEqual([read.skipped, read.errors, read.engineErrors], [[{ name: 'test_skip', reason }], [], 0]);
 }
@@ -2390,7 +2393,7 @@ testASkipReasonWhoseFirstLineEndsInAQuoteIsBothLines();
 testAPairedSkipReasonReadsAsTheConsoleReadsIt();
 testARunWithNoReportReadsItsSkipReasonsFromTheConsole();
 testASkipReasonHoldingTheCdataEndIsReadWhole();
-testAReportedSkipReasonWinsOverTheConsole();
+testAReportSaysHowManyConsoleLinesASkipReasonCovers();
 testASkipOnlyTheReportOrTheConsoleHoldsIsReadAsBefore();
 testAWholeSuiteSkipReasonReadsFromTheReport();
 console.log('junit reader tests passed');

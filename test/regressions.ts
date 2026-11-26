@@ -135600,13 +135600,13 @@ function testARunWithNoReportReadsItsSkipReasonsFromTheConsoleInBothTools(): voi
 }
 
 /**
- * Where the report and the console disagree on a reason, the report's is the reason, and the lines
- * it covers are no engine output in either tool.
+ * Where the report and the console disagree on a reason's text, the console's lines are the reason
+ * over as many lines as the report's has, and they are no engine output in either tool.
  */
-function testAReportedSkipReasonWinsOverTheConsolesReadingInBothTools(): void {
-  const reason = 'from the report\nand its second line';
+function testAReportSaysHowManyConsoleLinesASkipReasonCoversInBothTools(): void {
+  const reason = "from the console\nERROR: and the engine's line";
   const { answer, faults } = fedRunAnswered(
-    [fedSkippedLast(["  Reason: 'from the console", "ERROR: and the engine's line'", '', ''], reason)],
+    [fedSkippedLast(["  Reason: 'from the console", "ERROR: and the engine's line'", '', ''], 'one\ntwo')],
     0,
     { logged: true, reported: true },
   );
@@ -135616,6 +135616,76 @@ function testAReportedSkipReasonWinsOverTheConsolesReadingInBothTools(): void {
     'project_test',
   );
   assert.deepEqual(faults, [fedSkipFault(reason)], 'gdharness test');
+}
+
+/**
+ * Where the console's lines do not close the reason the report's line count gives, the report's text
+ * is the reason, and the lines after it are read as any other in both tools.
+ */
+function testASkipReasonTheConsoleDoesNotCloseIsTheReportsInBothTools(): void {
+  const { answer, faults } = fedRunAnswered(
+    [fedSkippedLast(["  Reason: 'not closed here", "ERROR: an engine error'", '', ''], 'one line')],
+    0,
+    { logged: true, reported: true },
+  );
+  assert.deepEqual(
+    [answer['casesSkipped'], answer['engineErrors']],
+    [[{ test: `${FED_A} > test_skip`, reason: 'one line' }], 1],
+    'project_test',
+  );
+  assert.deepEqual(
+    faults.map((fault) => fault.replace(/\. If .*/, '')),
+    [fedSkipFault('one line'), `an engine error in ${FED_A} > after: an engine error'`],
+    'gdharness test',
+  );
+}
+
+/**
+ * Both tools on a skipped last case whose console printed [param printed] as its reason, over its
+ * lines, and whose report holds [param written], as gdUnit4's writer left it: the reason is the
+ * console's text, and no line of it is an engine error.
+ */
+function assertTheConsolesSkipReasonIsRead(printed: string, written: string): void {
+  const under = printed.split('\n').map((line, at, all) => {
+    const opened = at === 0 ? `  Reason: '${line}` : line;
+    return at === all.length - 1 ? `${opened}'` : opened;
+  });
+  const { answer, faults } = fedRunAnswered([fedSkippedLast([...under, '', ''], written)], 0, {
+    logged: true,
+    reported: true,
+  });
+  assert.deepEqual(
+    [answer['casesSkipped'], answer['engineErrors'], answer['undeclaredErrors']],
+    [[{ test: `${FED_A} > test_skip`, reason: printed }], 0, undefined],
+    `project_test: ${printed}`,
+  );
+  assert.deepEqual(faults, [fedSkipFault(printed)], `gdharness test: ${printed}`);
+}
+
+/** gdUnit4's report writer drops `[blocked]` as a tag, and the console keeps it, in both tools. */
+function testASkipReasonOpeningOnABracketedWordKeepsItInBothTools(): void {
+  assertTheConsolesSkipReasonIsRead('[blocked] by the physics fix', ' by the physics fix');
+}
+
+/** gdUnit4's report writer drops `[bug 7]` as a tag, and the console keeps it, in both tools. */
+function testASkipReasonHoldingABracketedWordKeepsItInBothTools(): void {
+  assertTheConsolesSkipReasonIsRead('see [bug 7] here', 'see  here');
+}
+
+/**
+ * A reason holding `</skipped>` and then `]]>`, which gdUnit4 writes raw into its report, is read
+ * whole in both tools.
+ */
+function testASkipReasonHoldingTheElementsEndAndTheCdataEndIsReadWholeInBothTools(): void {
+  assertTheConsolesSkipReasonIsRead('a </skipped> b ]]> c', 'a </skipped> b ]]> c');
+}
+
+/**
+ * A reason over three lines, the middle one an `ERROR:` line with a bracketed word the report
+ * drops, is its three lines whole in both tools.
+ */
+function testASkipReasonOverThreeLinesWithAnErrorLineIsReadWholeInBothTools(): void {
+  assertTheConsolesSkipReasonIsRead('one\nERROR: two [bug 7]\nthree', 'one\nERROR: two \nthree');
 }
 
 /**
@@ -137529,7 +137599,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASkipReasonWhoseFirstLineEndsInAQuoteIsBothLinesInBothTools,
   testAPairedSkipReasonReadsTheSameFromTheReportInBothTools,
   testARunWithNoReportReadsItsSkipReasonsFromTheConsoleInBothTools,
-  testAReportedSkipReasonWinsOverTheConsolesReadingInBothTools,
+  testAReportSaysHowManyConsoleLinesASkipReasonCoversInBothTools,
+  testASkipReasonTheConsoleDoesNotCloseIsTheReportsInBothTools,
+  testASkipReasonOpeningOnABracketedWordKeepsItInBothTools,
+  testASkipReasonHoldingABracketedWordKeepsItInBothTools,
+  testASkipReasonHoldingTheElementsEndAndTheCdataEndIsReadWholeInBothTools,
+  testASkipReasonOverThreeLinesWithAnErrorLineIsReadWholeInBothTools,
   testASkipOnlyOneOfTheReportAndTheConsoleHoldsIsJudgedAsBefore,
   testASkipReasonHoldingTheCdataEndIsReadWholeInBothTools,
   testARunTheDeadlineEndedReadsAnApostrophesSkipReasonInBothTools,
