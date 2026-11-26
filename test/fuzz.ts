@@ -2854,6 +2854,20 @@ async function everyEndOfARequestIsSaid(): Promise<void> {
   );
 }
 
+/** Every way a game can end a request is run on every run, whatever the draw above picks. */
+async function everyModeIsSaidOnEveryRun(): Promise<void> {
+  for (const mode of ['answers', 'errors', 'wrongProtocol', 'closes', 'resets', 'silent'] as const) {
+    const game = await fakeGame(mode, process.pid);
+    try {
+      await modeIsSaid(game, mode, 0);
+    } finally {
+      await game.close();
+    }
+  }
+  await aClosedPortIsSaid(false, 0);
+  await aClosedPortIsSaid(true, 0);
+}
+
 /** A process that is held still for longer than a wait still gets the reply its game or its refused port gives. */
 async function aStalledProcessGetsTheSameReplies(): Promise<void> {
   const stall = 3 * SHORT_WAIT_MS;
@@ -5216,6 +5230,7 @@ await theCompileCheckTakesOnlyTheFirstSlotOffered();
 await anInheritedSlotServesOneTakeAtATime();
 await aTakeOverRereadsTheLockUnderTheStealFile();
 await everyEndOfARequestIsSaid();
+await everyModeIsSaidOnEveryRun();
 await aStalledProcessGetsTheSameReplies();
 await onlyTheFiftyLastLateAnswersAreKept();
 await aStrangerIsJudgedOnceAndForTheFileAsWritten();
