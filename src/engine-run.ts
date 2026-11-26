@@ -139,6 +139,8 @@ interface RunOptions {
   readonly desktop?: { readonly directory: string; readonly scratch: string };
   /** The project the engine runs for, which gives its slot a repository, and high priority where the list names it. */
   readonly project?: string;
+  /** Takes no engine slot and waits for none, for a short step every other call waits behind. */
+  readonly slotless?: boolean;
 }
 
 /** How often the pid a helper writes for its engine is looked for. */
@@ -192,6 +194,7 @@ export async function runEngine(
           crashedAtStart,
         ),
       options.project,
+      options.slotless,
     );
   } catch (error) {
     const said = errorMessage(error);
@@ -219,13 +222,13 @@ interface Launch {
 function launchOf(
   executable: string,
   args: readonly string[],
-  lock: string,
+  lock: string | null,
   desktop: RunOptions['desktop'],
   signal: AbortSignal | undefined,
 ): Launch {
   const options: SpawnOptions = {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: onTheSlot(process.env, lock),
+    env: lock === null ? process.env : onTheSlot(process.env, lock),
     ...(signal === undefined ? {} : { signal }),
   };
   if (desktop === undefined && process.platform !== 'win32') {
@@ -336,7 +339,7 @@ function engineExitCode(files: HelperFiles | null, told: number | null): number 
 function runStarted(
   executable: string,
   args: readonly string[],
-  lock: string,
+  lock: string | null,
   options: RunOptions,
   signal: AbortSignal | undefined,
   ceiling: Ceiling,
@@ -359,7 +362,7 @@ function runStarted(
     const engineAt = (): number | undefined => (files === null ? child.pid : helperPid(files.pid));
     // The lock names this process, and what the engine starts runs on its slot only when it names
     // the engine too.
-    if (child.pid !== undefined && files === null) {
+    if (lock !== null && child.pid !== undefined && files === null) {
       void nameSlotEngineOf(lock, process.pid, child.pid);
     }
     child.stdout?.on('data', (chunk: Buffer) => {
@@ -384,9 +387,9 @@ function runStarted(
           child.kill();
         },
         options.project === undefined ? undefined : { project: options.project, tool: 'headless' },
-        (bytes) => raiseSlotMemory(lock, bytes),
+        (bytes) => (lock === null ? Promise.resolve(null) : raiseSlotMemory(lock, bytes)),
       );
-      if (files !== null) {
+      if (lock !== null && files !== null) {
         void nameSlotEngineOf(lock, process.pid, engine);
       }
     };

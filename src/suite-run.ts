@@ -656,8 +656,6 @@ interface EngineRan {
   /** When it started, in milliseconds since the epoch, once it had a slot. */
   readonly began: number;
   readonly seconds: number;
-  /** Whether this is the engine run again alone after one ran out of memory. */
-  readonly again: boolean;
   /** The file the runner wrote what it loaded into, a line as each suite ended. */
   readonly reached: string;
   /** The most bytes the engine was read holding, when it was read at all. */
@@ -1346,7 +1344,7 @@ export async function takenLanes<P extends { readonly lane: number }>(
   );
   // A slot for each lane, taken only where one is free now: what the run was dealt holds only when
   // every lane starts at once. Held by memory, only the lanes memory has room for take one now.
-  // The rest take theirs in the slots' queue, then wait for memory holding them.
+  // The rest take theirs in the slots' queue, and give a slot back while they wait for memory.
   const startable = memoryHeld ? Math.min(byMemory.engines, lanes.length) : lanes.length;
   const granted =
     slotCommandOf() !== undefined && !run.ordered && lanes.length > 1
@@ -1365,7 +1363,7 @@ export async function takenLanes<P extends { readonly lane: number }>(
   return { lanes, taken, shared, follows, ...(granted === null ? {} : { granted }) };
 }
 
-/** Runs the engines of the deal, and runs again alone any that failed for want of memory. */
+/** Runs the engines of the deal, and says what each held when one ran out of memory. */
 async function ranEngines(
   context: RunContext,
   deal: Deal,
@@ -1397,7 +1395,7 @@ async function ranEngines(
           lanes.length,
           taken,
           times,
-          (plan, index, lock, holds, reuse) => runEngine(launch, plan, index, times, '', lock, holds, reuse),
+          (plan, index, lock, holds, reuse) => runEngine(launch, plan, index, times, lock, holds, reuse),
           handed,
           memory,
           follower === null
@@ -1421,29 +1419,10 @@ async function ranEngines(
     // A grant that came once the work was done goes back unused.
     started.granted?.end();
   }
-  return await rerunAfterStarving(ran, say, (engine) =>
-    runEngine(launch, engine.plan, engine.index, times, 'again'),
-  );
-}
-
-/**
- * [param ran] as it stands, or once an engine ran out of memory and another failed, with every
- * failed engine run again by [param runAgain], one after another in the order they ran.
- */
-export async function rerunAfterStarving<
-  T extends Pick<EngineRan, 'index' | 'peakBytes'> & {
-    readonly verdict: Pick<EngineVerdict, 'passed' | 'starved'>;
-  },
->(ran: readonly T[], say: (line: string) => void, runAgain: (engine: T) => Promise<T>): Promise<T[]> {
-  if (!ran.some((engine) => engine.verdict.starved) || ran.every((engine) => engine.verdict.passed)) {
-    return [...ran];
+  if (ran.some((engine) => engine.verdict.starved)) {
+    say(outOfMemorySaid(ran));
   }
-  say(outOfMemorySaid(ran));
-  const again: T[] = [];
-  for (const engine of ran) {
-    again.push(engine.verdict.passed ? engine : await runAgain(engine));
-  }
-  return again;
+  return ran;
 }
 
 /** Writes the times the engines measured, saying so where they could not be written. */
@@ -1494,8 +1473,8 @@ export function memorySaid(room: number, lanes: number, held: string): string {
 }
 
 /**
- * What a run says when an engine ran out of memory: the failed engines run again, and each
- * engine's most held in this run, or that it was not read, shows what else held the machine.
+ * What a run says when an engine ran out of memory: each engine's most held in this run, or that it
+ * was not read, which shows what else held the machine.
  */
 export function outOfMemorySaid(engines: readonly Pick<EngineRan, 'index' | 'peakBytes'>[]): string {
   const held = engines
@@ -1504,7 +1483,7 @@ export function outOfMemorySaid(engines: readonly Pick<EngineRan, 'index' | 'pea
         `engine ${String(engine.index)} ${engine.peakBytes === undefined ? 'unread' : gigabytes(engine.peakBytes)}`,
     )
     .join(', ');
-  return `An engine ran out of memory, so every engine that failed runs again, one at a time. The most each held in this run: ${held}.`;
+  return `An engine ran out of memory. The most each held in this run: ${held}.`;
 }
 
 /** How often a share held back for memory reads it again. */
@@ -1558,6 +1537,10 @@ export class MemoryGate {
   private readonly turn = new Turns();
   /** Whether the run's first engine is yet to start, which is the only one a reservation holds. */
   private firstPending: boolean;
+  /** Whether the caller whose turn it is has found no room and waits for some. */
+  private stalled = false;
+  /** What callers waiting for their turn were asked to do once the caller ahead of them stalls. */
+  private readonly queuedWaits = new Set<() => void>();
   /** When the first engine began waiting for a reservation, and whether the run has said so. */
   private readonly wait: { since?: number; said?: true } = {};
 
@@ -1596,13 +1579,45 @@ export class MemoryGate {
   /**
    * Waits until an engine needing [param need] has room, one caller at a time, and answers its
    * admission. [param need] is asked at each look, since the share a caller would draw changes as
-   * others draw theirs.
+   * others draw theirs. [param waiting] is called once, before the caller waits for room, which
+   * includes waiting behind a caller that is itself waiting for room, so a lane can give back the
+   * slot it holds while it waits. A caller told so is not admitted: once there is room it is
+   * answered null, so it takes a slot again and asks again holding it.
    */
-  admit(signal: AbortSignal, need: () => number): Promise<Admitted> {
-    return this.turn.run(() => this.room(signal, need));
+  admit(signal: AbortSignal, need: () => number): Promise<Admitted>;
+  admit(signal: AbortSignal, need: () => number, waiting: () => void): Promise<Admitted | null>;
+  admit(signal: AbortSignal, need: () => number, waiting?: () => void): Promise<Admitted | null> {
+    const told = { done: false };
+    const wait =
+      waiting === undefined
+        ? undefined
+        : (): void => {
+            if (!told.done) {
+              told.done = true;
+              waiting();
+            }
+          };
+    if (wait !== undefined) {
+      if (this.stalled) {
+        wait();
+      } else {
+        this.queuedWaits.add(wait);
+      }
+    }
+    return this.turn
+      .run(() => this.room(signal, need, told))
+      .finally(() => {
+        if (wait !== undefined) {
+          this.queuedWaits.delete(wait);
+        }
+      });
   }
 
-  private async room(signal: AbortSignal, need: () => number): Promise<Admitted> {
+  private async room(
+    signal: AbortSignal,
+    need: () => number,
+    told: { readonly done: boolean },
+  ): Promise<Admitted | null> {
     let unmark: (() => void) | undefined;
     let needed = 0;
     try {
@@ -1620,10 +1635,18 @@ export class MemoryGate {
           break;
         }
         unmark ??= this.slots.markWaiting();
+        this.stalled = true;
+        for (const queued of this.queuedWaits) {
+          queued();
+        }
         await delay(this.lookMs, undefined, { signal });
       }
     } finally {
+      this.stalled = false;
       unmark?.();
+    }
+    if (told.done) {
+      return null;
     }
     this.firstPending = false;
     const engine: Admitted = {
@@ -2245,7 +2268,7 @@ async function runLane(
     await handed?.lend(lock);
     const ran: EngineRan[] = [];
     for (const { plan, index } of lane) {
-      ran.push(await runEngine(launch, plan, index, times, '', lock));
+      ran.push(await runEngine(launch, plan, index, times, lock));
     }
     return ran;
   } finally {
@@ -2260,8 +2283,8 @@ async function runLane(
  * when the run is held by memory. A lane still
  * waiting once every share is handed out stops waiting: a slot somebody else holds is not to keep a
  * run open that has nothing left to give it. A lane takes its slot, lends it to a compile check that
- * wants one, and only then waits for memory, so an engine memory admits never waits for a slot or a
- * check. With [param raised] it starts one lane more for each
+ * wants one, and then asks for memory. Short of memory, it gives the slot back while it waits, takes
+ * one again once there is room, and memory is judged again before its engine starts. With [param raised] it starts one lane more for each
  * the run is raised to, up to its ceiling, asking again until every share is handed out. A lane the
  * lanes file tells to stop reads the file again after each of its waits and before it draws, and gives
  * its slot back to the machine.
@@ -2350,10 +2373,44 @@ export async function runShares<
     await handed?.lend(lock);
     return (await fallenPast(at)) ? 'again' : { lock };
   };
+  /** Gives the lane's slot back to the machine while it waits for memory. */
+  const slotGivenBack = (held: { lock: string | null }): void => {
+    if (held.lock !== null) {
+      slots.release(held.lock);
+      held.lock = null;
+    }
+  };
   /**
-   * Takes the lane's slot and waits for the memory its share needs, or answers null once the run is
-   * over. The lanes file is read again after the slot and the check, and after memory, since a wait
-   * can outlast a fall. A lane told fewer lanes goes back to waiting for the lanes to rise instead of
+   * Judges the memory the lane's share needs while it holds its slot, and answers the admission.
+   * Answers 'again' when the lane waited for memory, which gives its slot back meanwhile and admits
+   * nothing, when the lanes file fell past the lane, or when a heavier share is left than the one
+   * admitted for, which is admitted again.
+   */
+  const memoryHeld = async (
+    at: number,
+    held: { lock: string | null },
+  ): Promise<{ readonly admitted: Admitted | undefined } | 'again'> => {
+    const admitted = await memory?.admit(handedOut.signal, needed, () => {
+      slotGivenBack(held);
+    });
+    if (admitted === null) {
+      return 'again';
+    }
+    // With no lanes file nothing is awaited here, so the share admitted for is the one drawn. With
+    // one, a share another lane draws meanwhile may leave a heavier one.
+    const fallen = raised !== undefined && (await fallenPast(at));
+    if (!fallen && (admitted === undefined || needed() <= admitted.need)) {
+      return { admitted };
+    }
+    admitted?.ended();
+    return 'again';
+  };
+  /**
+   * Takes the lane's slot and the memory its share needs, or answers null once the run is over. A
+   * lane short of memory gives its slot back while it waits, then takes a slot again and asks memory
+   * again, so it never holds a slot while it waits for memory nor memory while it waits for a slot.
+   * The lanes file is read again after the slot and the check, and after memory, since a wait can
+   * outlast a fall. A lane told fewer lanes goes back to waiting for the lanes to rise instead of
    * waiting for memory or drawing a share.
    */
   const waitedFor = async (
@@ -2368,14 +2425,10 @@ export async function runShares<
       if (got === 'again') {
         continue;
       }
-      const admitted = await memory?.admit(handedOut.signal, needed);
-      // With no lanes file nothing is awaited here, so the share admitted for is the one drawn. With
-      // one, a share another lane draws meanwhile may leave a heavier one, which is admitted again.
-      const fallen = raised !== undefined && (await fallenPast(at));
-      if (!fallen && (admitted === undefined || needed() <= admitted.need)) {
-        return { lock: got.lock, admitted };
+      const room = await memoryHeld(at, held);
+      if (room !== 'again') {
+        return { lock: got.lock, admitted: room.admitted };
       }
-      admitted?.ended();
     }
   };
   /**
@@ -2647,12 +2700,11 @@ async function runEngine(
   plan: EnginePlan,
   index: number,
   times: SuiteTimes,
-  again = '',
   slot: string | null = null,
   holds?: (bytes: number) => void,
   reuse?: ShareReuse<EngineRan>,
 ): Promise<EngineRan> {
-  const directory = join(launch.runDirectory, `engine-${String(index)}${again === '' ? '' : `-${again}`}`);
+  const directory = join(launch.runDirectory, `engine-${String(index)}`);
   mkdirSync(join(directory, 'user'), { recursive: true });
   const sharesIn = reuse === undefined ? undefined : join(directory, 'shares');
   if (sharesIn !== undefined) {
@@ -2699,7 +2751,7 @@ async function runEngine(
       launch.slots.release(lock);
     }
   }
-  return judgedShare(launch, running.share, log, end, again);
+  return judgedShare(launch, running.share, log, end);
 }
 
 /** One share of suites as an engine runs it: where its files are and when it began. */
@@ -2750,7 +2802,7 @@ async function handedOn(
   if (drawn === null) {
     return null;
   }
-  reuse.done(judgedShare(launch, running.share, log, ended.end, '', ended.to));
+  reuse.done(judgedShare(launch, running.share, log, ended.end, ended.to));
   const directory = join(launch.runDirectory, `engine-${String(drawn.index)}`);
   mkdirSync(directory, { recursive: true });
   carryLaneFile(running.share.directory, directory);
@@ -2774,14 +2826,7 @@ async function handedOn(
  * the engine's log, or to its end. A share cut out of a longer log has its lines written beside its
  * files.
  */
-function judgedShare(
-  launch: Launch,
-  share: ShareRun,
-  log: string,
-  end: EngineEnd,
-  again: string,
-  to?: number,
-): EngineRan {
+function judgedShare(launch: Launch, share: ShareRun, log: string, end: EngineEnd, to?: number): EngineRan {
   const shareLog = join(share.directory, 'engine.log');
   if (log !== shareLog) {
     writeFileSync(shareLog, shareText(log, share.from, to));
@@ -2804,7 +2849,6 @@ function judgedShare(
     log: shareLog,
     began: share.began,
     seconds: (Date.now() - share.began) / 1000,
-    again: again !== '',
     reached: share.files.reached,
     ...(end.peakBytes === undefined ? {} : { peakBytes: end.peakBytes }),
     slot: share.slot,
@@ -2965,7 +3009,7 @@ function printWhatEnginesPrinted(ran: readonly EngineRan[]): void {
 /** Prints what failed in each engine of [param failed], and notes it at the top of its kept log. */
 function printFailedEngines(failed: readonly EngineRan[], logs: RunLogs): void {
   for (const engine of failed) {
-    const heading = `--- engine ${String(engine.index)}: ${plural(engine.plan.suites.length, 'suite')}, ${engine.seconds.toFixed(1)} s${engine.again ? ', run again alone after an engine ran out of memory, and failed again' : ''}`;
+    const heading = `--- engine ${String(engine.index)}: ${plural(engine.plan.suites.length, 'suite')}, ${engine.seconds.toFixed(1)} s`;
     console.log('');
     console.log(heading);
     for (const fault of engine.verdict.faults) {

@@ -170,12 +170,14 @@ import {
 import {
   handedRunSlot,
   handSlotToKeeper,
+  inOneSlot,
   keeperSlotOf,
   onTheSlot,
   raiseSlotMemory,
   settledRunSlot,
   slotEngineNamed,
   slotForCall,
+  withTheSlotFree,
 } from './engine-slots.js';
 import { processorSecondsOf } from './engine-spent.js';
 import { errorCode, errorMessage, Refusal } from './errors.js';
@@ -7381,7 +7383,7 @@ export class GodotServer {
       case 'script_info':
         return await this.askScriptInfo(...(SCRIPT_INFO_CALLS[op] ?? ['lsp_get_hover', 'Hover']), args);
       case 'script_diagnostics':
-        return await this.handleScriptDiagnostics(args);
+        return await inOneSlot(() => this.handleScriptDiagnostics(args));
 
       default:
         return await this.dispatchResourceTool(tool, op, args);
@@ -8409,7 +8411,8 @@ export class GodotServer {
     // engine, waits for a slot of its own and writes the same cache file.
     const running = this.classRebuilds.get(projectPath);
     if (running !== undefined) {
-      const joined = await running;
+      // The rebuild takes no slot, so the one this call holds between its engines goes to others meanwhile.
+      const joined = await withTheSlotFree(async () => await running);
       if (!joined.ok) {
         return joined;
       }
@@ -8526,6 +8529,11 @@ export class GodotServer {
     if (!this.editorHasOpen(projectPath)) {
       return { waitedMs: 0, stillScanning: false };
     }
+    // An editor's scan can take minutes, which a slot held between engines would idle through.
+    return await withTheSlotFree(async () => await this.untilTheScanIsWritten(projectPath));
+  }
+
+  private async untilTheScanIsWritten(projectPath: string): Promise<ScanWait> {
     const started = Date.now();
     let sawAScan = false;
     let scanEndedAt: number | null = null;
