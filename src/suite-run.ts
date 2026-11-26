@@ -2091,7 +2091,10 @@ export async function runShares<
   const empty = (): boolean => shares.empty;
   // The share this lane would draw now, read at each look.
   const needed = (): number => peakOf(shares.peek(), times, MEMORY_PER_ENGINE).bytes;
-  /** Takes the lane's slot, and answers null once every share is handed out. */
+  /**
+   * Takes the lane's slot. Once every share is handed out the take is aborted and throws, which
+   * {@link admit} answers as null.
+   */
   const slotHeld = async (held: { lock: string | null }): Promise<{ readonly lock: string } | null> => {
     held.lock ??= await slots.take(handedOut.signal);
     return { lock: held.lock };
@@ -2124,7 +2127,7 @@ export async function runShares<
     return 'again';
   };
   /**
-   * Takes the lane's slot and the memory its share needs, or answers null once the run is over. A
+   * Takes the lane's slot and the memory its share needs, or throws once the run is over. A
    * lane short of memory gives its slot back while it waits, then takes a slot again and asks memory
    * again, so it never holds a slot while it waits for memory nor memory while it waits for a slot.
    */

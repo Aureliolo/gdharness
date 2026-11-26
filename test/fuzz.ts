@@ -2520,10 +2520,18 @@ async function anInheritedSlotServesOneTakeAtATime(): Promise<void> {
     fc.asyncProperty(fc.array(round, { minLength: 1, maxLength: 4 }), async (rounds) => {
       const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-inherit-'));
       try {
-        const slots = new EngineSlots(join(root, 'slots'), 8, {
-          pid: process.pid,
-          started: await ownStart(),
-        });
+        // Room for every take, so the memory this machine has free now refuses none of them.
+        const slots = new EngineSlots(
+          join(root, 'slots'),
+          8,
+          { pid: process.pid, started: await ownStart() },
+          undefined,
+          undefined,
+          {
+            available: () => Promise.resolve(2 ** 50),
+            held: () => Promise.resolve(new Map<number, number>()),
+          },
+        );
         let turns: number[] = [];
         Reflect.set(slots, 'inheritedLock', async (): Promise<string | null> => {
           for (let tick = 0; tick < (turns.shift() ?? 0); tick += 1) {

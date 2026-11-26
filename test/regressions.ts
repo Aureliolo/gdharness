@@ -126774,6 +126774,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnOlderWaiterGoesBeforeNewerMarksInSecondsOrWithNoSince,
   testACountLoweredBelowTheSlotsHeldStartsNothingUntilEnoughGo,
   testALockTakenPastALoweredCountByARaceIsGivenBack,
+  testLocksWrittenInOneMillisecondAreOrderedBySlot,
+  testAStartIsReadAgainAfterTenSecondsAndAReusedPidFreesItsLock,
   testTheFirstEngineOnAMachineStartsWhateverMemoryReads,
   testALockWithNoMemoryOwesOneAndAHalfGiBASlot,
   testALockPastTheCountOwesItsMemory,
@@ -128149,6 +128151,92 @@ async function testALockTakenPastALoweredCountByARaceIsGivenBack(): Promise<void
     assert.equal(await slots.takeFree(), null, "the lock made after the other taker's is given back");
     assert.equal(existsSync(join(folder.directory, '0.lock')), false, 'and is gone');
   } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Two locks written in one millisecond keep the order of their slots: the lower slot was there
+ * first, so a race below a lowered count gives back the higher.
+ */
+async function testLocksWrittenInOneMillisecondAreOrderedBySlot(): Promise<void> {
+  for (const { theirs, ours, kept } of [
+    { theirs: 0, ours: 1, kept: false },
+    { theirs: 1, ours: 0, kept: true },
+  ]) {
+    const folder = await gameLineFolder(4);
+    try {
+      const past = new Date(Date.now() - 60_000);
+      slotsHeld(folder, [5]);
+      utimesSync(join(folder.directory, '5.lock'), past, past);
+      writeFileSync(join(folder.directory, SLOT_COUNT_FILE), '2');
+      let raced = false;
+      const slots = new EngineSlots(folder.directory, 4, folder.me, undefined, undefined, {
+        ...plentyOfMemory,
+        available: () => {
+          if (!raced) {
+            raced = true;
+            slotsHeld(folder, [theirs]);
+          }
+          return plentyOfMemory.available();
+        },
+      });
+      // Once both locks are there, both are given one time, to the millisecond.
+      const readTime: unknown = Reflect.get(slots, 'writtenAt');
+      assert.ok(typeof readTime === 'function');
+      const lockOf = (slot: number): string => join(folder.directory, `${String(slot)}.lock`);
+      let tied = false;
+      Reflect.set(slots, 'writtenAt', (path: string): unknown => {
+        if (!tied && existsSync(lockOf(theirs)) && existsSync(lockOf(ours))) {
+          tied = true;
+          const at = Math.floor(Date.now()) / 1000;
+          utimesSync(lockOf(theirs), at, at);
+          utimesSync(lockOf(ours), at, at);
+        }
+        const answer: unknown = Reflect.apply(readTime, slots, [path]);
+        return answer;
+      });
+      const got = await slots.takeFree();
+      assert.ok(tied, 'both locks were there at once');
+      assert.equal(
+        lockNumber(got),
+        kept ? ours : null,
+        kept ? 'the lower slot is first, so it is kept' : 'the higher slot is second, so it is given back',
+      );
+      assert.equal(existsSync(lockOf(ours)), kept);
+      slots.releaseAll();
+    } finally {
+      rmSync(folder.directory, { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * A holder's start, once read, is believed for ten seconds and then read again. A pid that a new
+ * process took after its holder ended then frees the lock it named, once the start is read again.
+ */
+async function testAStartIsReadAgainAfterTenSecondsAndAReusedPidFreesItsLock(): Promise<void> {
+  const folder = await gameLineFolder(1);
+  const realNow = Date.now;
+  try {
+    const earlier = folder.started - 60_000;
+    writeFileSync(join(folder.directory, '0.lock'), JSON.stringify({ pid: process.pid, started: earlier }));
+    const slots = new EngineSlots(folder.directory, 1, folder.me, undefined, undefined, plentyOfMemory);
+    const t0 = realNow();
+    // The start read while the lock's own holder still had the pid.
+    const starts: unknown = Reflect.get(slots, 'starts');
+    assert.ok(starts instanceof Map);
+    starts.set(process.pid, { started: earlier, readAt: t0 });
+    const look = async (at: number): Promise<number | null> => {
+      Date.now = () => at;
+      return lockNumber(await slots.takeFree());
+    };
+    assert.equal(await look(t0), null, 'the start read a moment ago is believed');
+    assert.equal(await look(t0 + 9_900), null, 'and still just inside ten seconds');
+    assert.equal(await look(t0 + 10_100), 0, 'past them the start is read again, and differs');
+    slots.releaseAll();
+  } finally {
+    Date.now = realNow;
     rmSync(folder.directory, { recursive: true, force: true });
   }
 }
