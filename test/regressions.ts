@@ -76190,7 +76190,7 @@ async function testAMarkWantingSeveralSlotsHasThemLeftToItForItsDrain(): Promise
         join(marks, '1-1.json'),
         JSON.stringify({ ...me, taker: 'other', since: (Date.now() - waitedMs) / 1000, wants }),
       );
-      const newcomer = new EngineSlots(directory, 4, me, undefined, () => 'other');
+      const newcomer = new EngineSlots(directory, 4, me);
       try {
         const lock = await newcomer.takeFree();
         return [lock === null ? null : basename(lock), [...(newcomer.drawn.left ?? [])]];
@@ -76280,7 +76280,7 @@ async function testAWaitForSeveralSlotsKeepsThemWhileItKeepsLooking(): Promise<v
       const now = new Date();
       utimesSync(note, now, now);
     };
-    const newcomer = new EngineSlots(directory, 4, me, undefined, () => 'other');
+    const newcomer = new EngineSlots(directory, 4, me);
     const line = new SlotLine('other');
     const look = async (): Promise<[string | null, number[]]> => {
       const lock = await newcomer.takeFree(false, line);
@@ -76345,7 +76345,7 @@ async function testATakeInsideAJobWaitsOnTheLentSlotAndMarksNothing(): Promise<v
       : [];
     assert.deepEqual(marked, [], 'and it marks no wait in the machine');
     delete process.env['GODOT_ENGINE_TIMED'];
-    const outsider = new EngineSlots(directory, 2, me, undefined, () => 'other');
+    const outsider = new EngineSlots(directory, 2, me);
     const free = await outsider.takeFree();
     process.env['GODOT_ENGINE_TIMED'] = lent;
     assert.equal(
@@ -76425,7 +76425,7 @@ async function testAnEngineOnASlotLendsItToWhatItStarts(): Promise<void> {
     writeFileSync(lent, JSON.stringify({ pid: above, started: aboveStarted, by: 'an engine' }));
     process.env['GODOT_ENGINE_HELD'] = lent;
     const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    const slots = new EngineSlots(directory, 2, holder, undefined, () => 'other');
+    const slots = new EngineSlots(directory, 2, holder);
     assert.equal(await slots.takeFree(), lent, 'the slot it was started on');
     assert.equal(
       await slots.takeFree(),
@@ -76455,7 +76455,7 @@ async function testAnEngineOnASlotLendsItToWhatItStarts(): Promise<void> {
         JSON.stringify({ pid: strangerPid, started: (await startTimesOf([strangerPid])).get(strangerPid) }),
       );
       process.env['GODOT_ENGINE_HELD'] = strangers;
-      const other = new EngineSlots(directory, 2, holder, undefined, () => 'other');
+      const other = new EngineSlots(directory, 2, holder);
       assert.equal(await other.takeFree(), null, "a live stranger's slot is not lent, and the other is held");
 
       // The same holder naming the process above this one as the engine it holds the slot for, as
@@ -76470,7 +76470,7 @@ async function testAnEngineOnASlotLendsItToWhatItStarts(): Promise<void> {
         false,
         'and by nobody else',
       );
-      const engineOf = new EngineSlots(directory, 2, holder, undefined, () => 'other');
+      const engineOf = new EngineSlots(directory, 2, holder);
       assert.equal(await engineOf.takeFree(), strangers, 'the slot of the engine the lock names');
       engineOf.releaseAll();
       assert.deepEqual(
@@ -76544,7 +76544,7 @@ async function testAStarvedMeasurementHoldsSideEngines(): Promise<void> {
   delete process.env['GODOT_ENGINE_STARVING'];
   try {
     claim(claimer, claimerStarted, { what: 'the bench of /p', starved: 7200 });
-    const outside = new EngineSlots(directory, 2, holder, undefined, () => 'other');
+    const outside = new EngineSlots(directory, 2, holder);
     assert.equal(await outside.takeFree(), null, 'side work starts no engine while a live claim stands');
     assert.equal(await outside.takeFree(true), null, 'nor does a game editor_run starts');
     assert.equal(
@@ -76631,7 +76631,7 @@ async function testATakerHeldBackByAClaimDoesNotSayItLooks(): Promise<void> {
       JSON.stringify({ pid: claimer, started: Math.round(read), what: 'the bench of /p', starved: 7200 }),
     );
     const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    const outside = new EngineSlots(directory, 2, holder, undefined, () => 'other');
+    const outside = new EngineSlots(directory, 2, holder);
     const line = new SlotLine('other');
     line.mark = 'held-1.json';
     const note = join(directory, WAITING_FOLDER, 'held-1.seen');
@@ -76666,7 +76666,7 @@ async function testAGameHeldBackByTheGamesLimitDoesNotSayItLooks(): Promise<void
       join(directory, QUEUED_FOLDER, 'ticket.json'),
       JSON.stringify({ pid: process.pid, started: holder.started }),
     );
-    const sessions = new EngineSlots(directory, 16, holder, undefined, () => 'other');
+    const sessions = new EngineSlots(directory, 16, holder);
     const games = [
       await sessions.takeFree(true),
       await sessions.takeFree(true),
@@ -77044,8 +77044,8 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
     return taken;
   };
   try {
-    const outside = new EngineSlots(directory, 4, holder, undefined, () => 'other');
-    const gate = new EngineSlots(directory, 4, holder, undefined, () => 'gate');
+    const outside = new EngineSlots(directory, 4, holder);
+    const gate = new EngineSlots(directory, 4, holder);
     const tier = new EngineSlots(directory, 4, holder, undefined, () => 'tier');
     const rig: SlotsRig = { directory, queued, started, holder, takeAll, outside, gate, tier };
     assert.deepEqual(await takeAll(outside), ['3.lock', '2.lock', '1.lock', '0.lock'], 'no gate queued');
@@ -77263,7 +77263,7 @@ async function checksTheSixteenSlots(
     mkdirSync(join(sixteen, QUEUED_FOLDER));
     writeFileSync(join(sixteen, QUEUED_FOLDER, 'ticket.json'), JSON.stringify({ pid: process.pid, started }));
     publishesNothingSpare(sixteen, started);
-    const sessions = new EngineSlots(sixteen, 16, holder, undefined, () => 'other');
+    const sessions = new EngineSlots(sixteen, 16, holder);
     const games = [
       await sessions.takeFree(true),
       await sessions.takeFree(true),
@@ -77367,7 +77367,7 @@ async function agedTakeWhileAGateIsQueued(
   const stop = new AbortController();
   try {
     Date.now = () => realNow() + skew;
-    const side = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, () => 'other');
+    const side = new EngineSlots(directory, 4, { pid: process.pid, started });
     let taken: string | null = null;
     side
       .take(stop.signal)
@@ -77417,7 +77417,7 @@ async function testSideWorkTakesOnlyKeptAndSpareSlotsWhileAGateWaitsWhateverItsA
         JSON.stringify({ spare: count, pid: process.pid, started, written: Date.now() }),
       );
     };
-    const side = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, () => 'other');
+    const side = new EngineSlots(directory, 4, { pid: process.pid, started });
     spare(1);
     const first = await side.takeFree();
     assert.equal(
@@ -77455,7 +77455,7 @@ async function testASeatedMarkWithNoSpareGivesAYoungAndAnAgedTakeNoGateSlot(): P
   const directory = slotsWithGatesQueued(marks, [2, 3], started);
   try {
     writeFileSync(join(directory, SPARE_FILE), published(0));
-    const young = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, () => 'other');
+    const young = new EngineSlots(directory, 4, { pid: process.pid, started });
     assert.equal(await young.takeFree(), null, 'a young take gets no gate slot beside the seat mark');
     assert.equal(young.drawn.limit, 'kept', JSON.stringify(young.drawn));
     await agedTakeWhileAGateIsQueued(directory, started, async (_side, taken) => {
@@ -78147,7 +78147,7 @@ async function testASlotGivenBackFiftyMillisecondsAgoIsNotLent(): Promise<void> 
       engine(5, a, start - 60_000);
       giveBackSlot(join(directory, '5.lock'), a.pid);
       at(start + 50);
-      const fresh = new EngineSlots(directory, 8, self, undefined, () => 'other', undefined, {
+      const fresh = new EngineSlots(directory, 8, self, undefined, undefined, {
         processes: () => Promise.resolve(new Map()),
       });
       try {
@@ -78438,7 +78438,7 @@ async function testSideWorkTakesNoGateSlotWhileALiveGateHasNoFreshCount(): Promi
     for (const [why, spare] of states) {
       const directory = eightSlotsWithTheKeptOnesHeld(started, seated, [], spare);
       try {
-        const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
+        const side = new EngineSlots(directory, 8, { pid: process.pid, started });
         const gate = seated ? 'a seated gate' : 'a queued gate';
         assert.equal(await side.takeFree(), null, `${gate} with ${why} keeps its free slots`);
         assert.equal(side.drawn.limit, 'kept', JSON.stringify(side.drawn));
@@ -78462,7 +78462,7 @@ async function testSideWorkTakesNoGateSlotWhileALiveGateHasNoFreshCount(): Promi
       join(dead, QUEUED_FOLDER, 'gate-1.json'),
       `{"pid": ${String(gone.pid)}, "started": ${String(started)}}`,
     );
-    const side = new EngineSlots(dead, 8, { pid: process.pid, started }, undefined, () => 'other');
+    const side = new EngineSlots(dead, 8, { pid: process.pid, started });
     const lock = await side.takeFree();
     assert.equal(lock === null ? null : basename(lock), '5.lock', 'a gate that has gone keeps nothing');
     side.releaseAll();
@@ -78484,7 +78484,7 @@ async function testACountFromBeforeASeatIsStaleForSideWork(): Promise<void> {
   const counted = (written: number): string =>
     `{"spare": 2, "pid": ${pid}, "started": ${String(started)}, "written": ${String(written)}}`;
   try {
-    const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
+    const side = new EngineSlots(directory, 8, { pid: process.pid, started });
     writeFileSync(join(directory, SPARE_FILE), counted(Date.now() - 3000));
     const seatedAt = new Date(Date.now() - 1000);
     utimesSync(seat, seatedAt, seatedAt);
@@ -78513,7 +78513,7 @@ async function testTwoConcurrentSideTakesUnderOneSpareSlotNeverHoldTwoGateSlots(
   const directory = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
   try {
     const makeSide = (): EngineSlots =>
-      new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
+      new EngineSlots(directory, 8, { pid: process.pid, started });
     const held: number[] = [];
     for (let round = 0; round < 60; round += 1) {
       writeFileSync(
@@ -100744,9 +100744,9 @@ interface TwoCallsAtOneRebuild {
 
 /**
  * A call over three scripts, and a second call sent once the first one's engine started, after a
- * class_name script was written. The second starts the class rebuild and the first joins it before
- * its next engine. With [param slotCount] 2, another process takes the second slot once the first
- * engine starts and keeps it for 12 seconds.
+ * class_name script was written. The second starts the class rebuild, which takes no slot, and the
+ * first joins it before its next engine, holding its slot. With [param slotCount] 2, another process
+ * takes the second slot once the first engine starts and keeps it for 12 seconds.
  */
 async function twoDiagnosticsAtOneRebuild(slotCount: 1 | 2): Promise<TwoCallsAtOneRebuild> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-rebuild-'));
@@ -100812,8 +100812,8 @@ async function twoDiagnosticsAtOneRebuild(slotCount: 1 | 2): Promise<TwoCallsAtO
 }
 
 /**
- * Two calls on one slot, one joining the class rebuild the other started, both answer: the joiner
- * gives its slot back while it waits, so the rebuild it waits for can run.
+ * Two calls on one slot, one joining the class rebuild the other started, both answer: the rebuild
+ * takes no slot, so the joiner's hold on the only one does not stop it.
  */
 async function testDiagnosticsJoiningAClassRebuildOnOneSlotBothAnswer(): Promise<void> {
   const ran = await twoDiagnosticsAtOneRebuild(1);
@@ -100824,8 +100824,8 @@ async function testDiagnosticsJoiningAClassRebuildOnOneSlotBothAnswer(): Promise
 }
 
 /**
- * With two slots, one held by another process, the rebuild a call joins runs on the slot the
- * joiner held, rather than waiting for the other process while the joiner's slot idles.
+ * With two slots, one held by the joiner and one by another process, the rebuild the joiner waits
+ * for starts at once, since it takes no slot.
  */
 async function testDiagnosticsJoiningAClassRebuildHoldNoIdleSlot(): Promise<void> {
   const ran = await twoDiagnosticsAtOneRebuild(2);
@@ -100900,83 +100900,6 @@ async function testScriptDiagnosticsKeepsOneSlotForAllItsEngines(): Promise<void
       assert.ok(
         takenAt >= answeredAt - 1000 && takenAt > Math.max(...starts),
         `the slot stays with the call until it answers: taken ${String(takenAt - answeredAt)} ms from the answer`,
-      );
-    } finally {
-      await server.stop();
-    }
-  } finally {
-    sweep(project);
-    sweep(slots);
-  }
-}
-
-/**
- * A call over several scripts that joins, between its engines, the class rebuild another call
- * started gives its slot back while it waits: a taker queued behind it gets the slot before the
- * rebuild ends.
- */
-async function testDiagnosticsJoiningARebuildBetweenItsEnginesGiveTheirSlotBack(): Promise<void> {
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-join-'));
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-join-slots-'));
-  const logFile = join(project, 'stand-in.log');
-  try {
-    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
-    for (const name of ['a', 'broken', 'c']) {
-      writeFileSync(join(project, `${name}.gd`), 'extends Node\n');
-    }
-    writeFileSync(logFile, '');
-    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    const taker = new EngineSlots(slots, 1, holder, undefined, () => 'other');
-    const server = new ServerProcess({
-      env: {
-        [SLOTS_VARIABLE]: slots,
-        [SLOT_COUNT_VARIABLE]: '1',
-        GODOT_PATH: operationStandIn(),
-        GDH_STAND_IN_LOG: logFile,
-        GDH_STAND_IN_PAUSE_MS: '1500',
-        GDH_STAND_IN_PAUSE_MS_refresh_class_cache: '8000',
-        GDHARNESS_BRIDGE_PORT: String(await reservePort()),
-        GDHARNESS_LSP_PORT: String(await reservePort()),
-      },
-    });
-    try {
-      await server.initialize('regression-test');
-      const diagnose = async (scriptPath: string | string[]): Promise<string | null> => {
-        const said = await server
-          .request(
-            'tools/call',
-            { name: 'script_diagnostics', arguments: { projectPath: project, scriptPath } },
-            60_000,
-          )
-          .catch(() => null);
-        return said === null ? null : (textOf(said) ?? null);
-      };
-      const first = diagnose(['a.gd', 'broken.gd', 'c.gd']);
-      assert.ok(
-        await cameTrue(() => standInEntries(logFile).some((entry) => entry.event === 'start'), 30_000),
-        'the first call starts its engine',
-      );
-      const got: { at?: number } = {};
-      const taken = taker.take().then((lock) => {
-        got.at = Date.now();
-        taker.release(lock);
-      });
-      writeFileSync(join(project, 'fresh.gd'), 'class_name Fresh\nextends Node\n');
-      const second = diagnose('c.gd');
-      const [firstSaid, secondSaid] = await Promise.all([first, second]);
-      await Promise.race([taken, delay(30_000)]);
-      const takenAt = got.at ?? Number.NaN;
-      const entries = standInEntries(logFile);
-      const at = (event: string, operation: string): number =>
-        entries.find((entry) => entry.event === event && entry.operation === operation)?.at ?? Number.NaN;
-      const engines = entries.map((entry) => `${entry.event} ${entry.operation}`).join(', ');
-      assert.match(firstSaid ?? '', /Parse Error: stand-in/, `the first call answers: ${engines}`);
-      assert.match(secondSaid ?? '', /"clean": true/, `the second call answers: ${engines}`);
-      const firstEnded = at('end', 'check_scripts');
-      const rebuildEnded = at('end', 'refresh_class_cache');
-      assert.ok(
-        takenAt > firstEnded && takenAt < rebuildEnded,
-        `the taker gets the slot while the first call waits for the rebuild: taken ${String(takenAt - firstEnded)} ms after its engine, the rebuild ended at ${String(rebuildEnded - firstEnded)} ms: ${engines}`,
       );
     } finally {
       await server.stop();
@@ -135606,7 +135529,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDiagnosticsJoiningAClassRebuildOnOneSlotBothAnswer,
   testDiagnosticsJoiningAClassRebuildHoldNoIdleSlot,
   testScriptDiagnosticsKeepsOneSlotForAllItsEngines,
-  testDiagnosticsJoiningARebuildBetweenItsEnginesGiveTheirSlotBack,
   testScriptCreateHoldsNoSlotWhileItAsksTheEditor,
   testScriptDiagnosticsHoldsNoSlotWhileTheEditorScans,
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,

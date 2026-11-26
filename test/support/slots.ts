@@ -13,11 +13,9 @@ import process from 'node:process';
 import { MOST_ENGINES } from '../../src/engine-launch.js';
 import {
   ENDED_SUFFIX,
-  FREED_FOLDER,
   PROJECTS_FOLDER,
   SLOT_COUNT_VARIABLE,
   SLOTS_VARIABLE,
-  slotsDrawnOn,
   WAITING_FOLDER,
 } from '../../src/engine-slots.js';
 
@@ -27,15 +25,9 @@ import {
  */
 export const SLOT_VARIABLES = [
   'GODOT_ENGINE_HELD',
-  'GODOT_ENGINE_LANES',
-  'GODOT_ENGINE_RESERVED',
   'GODOT_ENGINE_SLOT_COMMAND',
-  'GODOT_ENGINE_SHARE',
-  'GODOT_ENGINE_SHARE_COUNT',
   SLOTS_VARIABLE,
   SLOT_COUNT_VARIABLE,
-  'GODOT_ENGINE_STARVING',
-  'GODOT_ENGINE_TIER',
   'GODOT_ENGINE_TIMED',
   // The marker of a job the machine's queue runs, which nothing here reads but a program started
   // inside the job would.
@@ -77,19 +69,6 @@ export function withTheSuitesOwnSlotVariables(): void {
 withTheSuitesOwnSlotVariables();
 
 /**
- * The slot count, as the variable spells it, at which [param games] games editor_run started can
- * run at once whatever the suite's own count. A game leaves the last kept slot to a short headless
- * call, so two games need three slots.
- */
-export function slotCountForGames(games: number): string {
-  let count = 1;
-  while (slotsDrawnOn(count, 'other', 'none', undefined, true).numbers.length < games) {
-    count += 1;
-  }
-  return String(count);
-}
-
-/**
  * The slot count, as the variable spells it, at which a run can hold [param engines] engines at once:
  * [param suiteCount], the suite's own count, raised to [param engines] where a cap holds it lower.
  */
@@ -114,10 +93,9 @@ export function leftInSlots(slots: string): string[] {
   };
   return [
     ...readdirSync(slots).filter(
-      (name) => name !== WAITING_FOLDER && name !== FREED_FOLDER && name !== PROJECTS_FOLDER,
+      (name) => name !== WAITING_FOLDER && name !== PROJECTS_FOLDER,
     ),
     ...inside(WAITING_FOLDER, (name) => !name.endsWith(ENDED_SUFFIX)),
-    ...inside(FREED_FOLDER, (name) => !/^\d+$/.test(name)),
     ...inside(PROJECTS_FOLDER, () => true),
   ].toSorted();
 }

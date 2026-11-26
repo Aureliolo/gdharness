@@ -8,19 +8,94 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { totalmem } from 'node:os';
+import { freemem, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { alive } from './alive.js';
 import { type Sample, sampled, watching } from './engine-spent.js';
-import { EngineUsageError } from './errors.js';
+import { EngineUsageError, errorMessage } from './errors.js';
+import { askProcessTable } from './process-table.js';
 import { parseProjectGodot } from './resources.js';
 import { type PeakTool, recordEnginePeak } from './run-record.js';
+import { runHidden } from './spawn.js';
 
 const GIB = 1024 ** 3;
 const MIB = 1024 ** 2;
 
 /** What an engine is taken to need while its project has no peak kept. */
 export const MEMORY_PER_ENGINE = 1.5 * GIB;
+
+/** The memory left to the rest of the machine, which no engine starts into. */
+export const MEMORY_KEPT = 4 * GIB;
+
+/** How long Windows is given to say how much it can still commit, on a machine the run may load. */
+const COMMIT_ASK_MS = 15_000;
+
+/** The memory the machine can give engines, how the line on room words it, and why a reading failed. */
+export interface MemoryRoom {
+  readonly bytes: number;
+  readonly said: string;
+  readonly unread?: string;
+}
+
+/**
+ * The memory the machine can give engines. freemem on macOS counts only the pages nobody holds,
+ * a few hundred megabytes on a Mac whose file cache would give way at once, so a run there was held
+ * to one engine whatever it asked for. The kernel's own share of memory it counts as free, the
+ * percentage memory_pressure prints, includes what it can take back. Windows refuses an allocation
+ * at the commit limit rather than at physical memory, and a machine with 23 GB free and 4.9 GB left
+ * to commit started sixteen engines that died with STATUS_COMMITMENT_LIMIT, so there the smaller
+ * of the two is the room.
+ */
+export async function memoryAvailable(): Promise<MemoryRoom> {
+  const level = await macMemoryLevel();
+  if (level !== null) {
+    return { bytes: (totalmem() * level) / 100, said: 'of memory free' };
+  }
+  return memoryRoomOf(freemem(), await windowsCommitLeft());
+}
+
+/**
+ * The room [param free] physical bytes and [param commit], what Windows can still commit (null
+ * elsewhere, or why it did not say), leave engines: the smaller of the two.
+ */
+export function memoryRoomOf(free: number, commit: number | string | null): MemoryRoom {
+  if (typeof commit === 'string') {
+    return { bytes: free, said: 'of memory free', unread: commit };
+  }
+  return commit !== null && commit < free
+    ? { bytes: commit, said: 'of memory left to commit' }
+    : { bytes: free, said: 'of memory free' };
+}
+
+/**
+ * How much more Windows will commit, in bytes, which is what GlobalMemoryStatusEx answers as
+ * ullAvailPageFile. Null off Windows, or why Windows did not say.
+ */
+export async function windowsCommitLeft(): Promise<number | string | null> {
+  if (process.platform !== 'win32') {
+    return null;
+  }
+  try {
+    const said = await askProcessTable('CommitLeft()', COMMIT_ASK_MS);
+    const bytes = Number(said.trim());
+    return Number.isFinite(bytes) && bytes > 0 ? bytes : `it answered ${JSON.stringify(said.trim())}`;
+  } catch (error) {
+    return errorMessage(error);
+  }
+}
+
+/** The percentage of memory macOS counts as free, or null off macOS or when it would not say. */
+export async function macMemoryLevel(): Promise<number | null> {
+  if (process.platform !== 'darwin') {
+    return null;
+  }
+  try {
+    const level = Number((await runHidden('sysctl', ['-n', 'kern.memorystatus_level'])).stdout.trim());
+    return Number.isFinite(level) && level > 0 && level <= 100 ? level : null;
+  } catch {
+    return null;
+  }
+}
 
 /** The variable that sets the ceiling of every engine this server starts, in megabytes. */
 export const CEILING_VARIABLE = 'GDHARNESS_ENGINE_MEMORY_CEILING_MB';

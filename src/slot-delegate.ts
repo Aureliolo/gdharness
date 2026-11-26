@@ -4,7 +4,7 @@
  * reads and removes nothing in the slot folder for it.
  *
  * The command is started without a shell, hidden, with `--project <absolute path>` where the take
- * has a project and `--kind gate|side|one-off|game` appended. Its first line on standard output is
+ * has a project. Its first line on standard output is
  * `held <absolute lock path>` once the slot is granted, or `refused <reason>`. A command that cannot
  * grant at once may print `queued` before either, and a run that starts several engines then counts
  * the request as a busy slot, which it does not wait for. The command keeps the
@@ -22,9 +22,6 @@ import { type ChildProcess, spawnHidden } from './spawn.js';
 
 /** The variable naming the command that grants every engine slot, as a full command line. */
 export const SLOT_COMMAND_VARIABLE = 'GODOT_ENGINE_SLOT_COMMAND';
-
-/** How a take is classed for the command: the three lines gdharness's own taker draws, and a game's. */
-export type SlotKind = 'gate' | 'side' | 'one-off' | 'game';
 
 /**
  * How long a command that was told to give its slot back has to exit, past which it is ended. A
@@ -153,7 +150,6 @@ export class SlotGrant {
 /** What a take asks of the command, and how it reports a long wait. */
 export interface SlotRequest {
   readonly command: string;
-  readonly kind: SlotKind;
   /** The Godot project the take is for. A take with none passes no `--project`. */
   readonly project?: string | undefined;
   /** A cancelled call or a deadline: it stops the wait and gives the command's input end. */
@@ -363,13 +359,13 @@ async function firstLineOf(
  * reason of the signal, having ended the command in each case. Never takes a slot of its own.
  */
 export async function askForSlot(request: SlotRequest): Promise<SlotGrant> {
-  const { command, kind, project, signal } = request;
+  const { command, project, signal } = request;
   const [program, ...given] = commandLineWords(command);
   if (program === undefined) {
     throw new Refusal(`${SLOT_COMMAND_VARIABLE} holds no command.`);
   }
   signal?.throwIfAborted();
-  const args = [...given, ...(project === undefined ? [] : ['--project', resolve(project)]), '--kind', kind];
+  const args = [...given, ...(project === undefined ? [] : ['--project', resolve(project)])];
   const child = startedCommand(command, program, args);
   const answers = new CommandAnswers(child, request.onQueued);
   const first = await firstLineOf(request, child, answers);
