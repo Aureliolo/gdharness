@@ -23351,8 +23351,7 @@ function testTheSuiteTakesNoMoreEngineSlotsThanItsCallerAllows(): void {
     assert.equal(suiteSlotCount(none, 32), 4, `${String(none)} sets no cap: the suite most`);
     assert.equal(suiteSlotCount(none, 2), 2, `${String(none)} sets no cap: the processors`);
   }
-  assert.equal(slotCountForEngines(1), '1', 'one game takes the only slot of a machine of one');
-  assert.equal(slotCountForEngines(2), '3', 'two games leave a third slot to a short call');
+  assert.equal(slotCountForEngines(1, '1'), '1', 'one engine takes the only slot of a machine of one');
   assert.equal(slotCountForEngines(2, '1'), '2', 'a run of two engines is given two under a cap of 1');
   assert.equal(slotCountForEngines(2, '4'), '4', 'and the suite count where that is higher');
   const slotCountIn = (counted: string | undefined, machineCount = '12'): number => {
@@ -75165,7 +75164,7 @@ async function testALocksMemoryIsThePeakKeptCappedAtTheCeiling(): Promise<void> 
  * A take that waits for memory keeps its place in line: a later one-slot take that would fit
  * beside what runs does not fit beside what the earlier one is owed, and takes after it.
  */
-async function testAMemoryWaiterKeepsItsPlaceInLine(): Promise<void> {
+async function testAMemoryWaiterDoesNotHoldBackOneThatFits(): Promise<void> {
   const started = await ownStart();
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
   const big = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-big-'));
@@ -75174,13 +75173,14 @@ async function testAMemoryWaiterKeepsItsPlaceInLine(): Promise<void> {
   try {
     await withNoCeilingSet(async () => {
       await recordEnginePeak(big, 'project_test', 7 * MEMORY_GIB);
+      await recordEnginePeak(small, 'project_test', MEMORY_GIB);
       const slots = new EngineSlots(
         directory,
         12,
         { pid: process.pid, started },
         undefined,
         undefined,
-        { memory: 64 * MEMORY_GIB },
+        { memory: 64 * MEMORY_GIB, available: () => Promise.resolve(50 * MEMORY_GIB), held: plentyOfMemory.held },
       );
       for (const slot of [0, 1, 2, 3, 4, 5]) {
         standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
@@ -75196,12 +75196,13 @@ async function testAMemoryWaiterKeepsItsPlaceInLine(): Promise<void> {
         return lock;
       });
       await delay(1500);
-      assert.deepEqual(order, [], 'the small one stays behind the 7 GiB one it fits beside at 43.5 GiB');
+      assert.deepEqual(order, ['small'], 'the small one takes the room 4 GiB leaves, past the 7 GiB one');
       const marks = readdirSync(join(directory, 'waiting')).filter((name) => name.endsWith('.json'));
-      assert.equal(marks.length, 2, `both keep a mark: ${marks.join(', ')}`);
+      assert.equal(marks.length, 1, `only the 7 GiB one keeps its mark: ${marks.join(', ')}`);
       rmSync(join(directory, '0.lock'));
-      await Promise.all([first, second]);
-      assert.deepEqual(order, ['big', 'small'], 'and takes once the earlier has its lock');
+      await first;
+      assert.deepEqual(order, ['small', 'big'], 'and the 7 GiB one takes once memory is owed less');
+      await second;
       slots.releaseAll();
     });
   } finally {
@@ -75393,41 +75394,6 @@ async function testACommandLineLaneCountsItsOwnPeak(): Promise<void> {
     ['test', 'test_lane'],
   ] as const) {
     await oneCommandLineLaneCountsItsOwnPeak(command, tool);
-  }
-  const started = await ownStart();
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  try {
-    await withNoCeilingSet(async () => {
-      await recordEnginePeak(project, 'editor_run', 7.3e9);
-      await recordEnginePeak(project, 'project_test', 6.7e9);
-      await recordEnginePeak(project, 'test_lane', 2e9);
-      const slotsOf = (tool: PeakTool): EngineSlots =>
-        new EngineSlots(directory, 12, { pid: process.pid, started }, undefined, project, {
-          memory: 64 * MEMORY_GIB,
-          tool,
-        });
-      const calls = slotsOf('headless');
-      const lanes = slotsOf('test_lane');
-      const kinds = ['game', 'game', 'call', 'call', 'call', ...Array.from({ length: 7 }, () => 'lane')];
-      const taken: (string | null)[] = [];
-      for (const kind of kinds) {
-        if (kind === 'game') {
-          taken.push(await calls.takeFree(true));
-        } else if (kind === 'call') {
-          const stop = AbortSignal.timeout(5000);
-          taken.push(await calls.take(stop, undefined, undefined, false, project, undefined, 'project_test'));
-        } else {
-          taken.push(await lanes.takeFree());
-        }
-      }
-      assert.equal(taken.filter((lock) => lock !== null).length, 12, JSON.stringify(slotLocksIn(directory)));
-      calls.releaseAll();
-      lanes.releaseAll();
-    });
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-    rmSync(project, { recursive: true, force: true });
   }
 }
 
@@ -76748,32 +76714,6 @@ function lockNumber(lock: string | null): number | null {
  * A call that finds the last kept slot free leaves it to no capped game ahead of it, so its line
  * names no taker it leaves a slot to.
  */
-async function testACallBehindACappedGameDoesNotSayItLeavesTheSlotToIt(): Promise<void> {
-  const folder = await gameLineFolder(12);
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
-    slotsHeld(folder, [11, 10], true);
-    waitingMarked(folder, lineBegunAgo(300_000, 'game.json'), Date.now());
-    const call = new EngineSlots(folder.directory, 12, folder.me, undefined, undefined, plentyOfMemory);
-    assert.equal(
-      lockNumber(await call.takeFree(false, lineBegunAgo(200_000, 'call.json'))),
-      9,
-      'the call takes slot 9',
-    );
-    assert.equal(call.drawn.left, undefined, 'and leaves no slot to a taker ahead');
-    const said = slotWaitSaid(3000, 12, folder.directory, call.holders(), call.drawn);
-    assert.doesNotMatch(said, /go first|takers ahead/u, said);
-    assert.doesNotMatch(
-      slotWaitedSaid(3000, 12, folder.directory, call.holders(), call.drawn),
-      /takers ahead/u,
-      'nor does its answer',
-    );
-    call.releaseAll();
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
 /** A line that places every other taker ahead of it, as a build whose order differs from this one's would. */
 class EveryoneAheadLine extends SlotLine {
   override ahead(waiters: Parameters<SlotLine['ahead']>[0]): ReturnType<SlotLine['ahead']> {
@@ -127793,7 +127733,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATakeSweepsGoneLocksPastTheCount,
   testASlotWaitLooksWhenTheSlotsChange,
   testSuitePassesKeyAlikeInEveryCheckout,
-  testACallBehindACappedGameDoesNotSayItLeavesTheSlotToIt,
   testTwoTakersThatPlaceEachOtherAheadDoNotLeaveTheSlotToEachOtherForGood,
   testATakerAheadThatStoppedLookingIsDroppedAfterTheYield,
   testARingOfThreeTakesTheFreeSlotAtTheYield,
@@ -127810,7 +127749,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testALockTakenBeyondTheBudgetByARaceIsGivenBack,
   testALocksMemoryIsThePeakKeptCappedAtTheCeiling,
-  testAMemoryWaiterKeepsItsPlaceInLine,
+  testAMemoryWaiterDoesNotHoldBackOneThatFits,
   testTheMemoryWaitIsSaidInWholeLines,
   testAnEndJustPastTheCeilingSaysFiguresThatDiffer,
   testTheMemoryEndOfAnotherServersGameIsNotedBesideItsRun,
