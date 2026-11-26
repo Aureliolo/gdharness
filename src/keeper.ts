@@ -33,7 +33,7 @@ import { sampled } from './engine-spent.js';
 import { letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
 import { raisedMark } from './game-log.js';
-import { type KeeperListening, listenForTheServer } from './keeper-channel.js';
+import { endedOnce, type KeeperListening, listenForTheServer } from './keeper-channel.js';
 import {
   KEEPER_SCRIPT,
   readLaunched,
@@ -780,7 +780,7 @@ async function keep(): Promise<void> {
     writeNoteIfItCan(record);
   }
   const exited = exitOf(child);
-  const ender: Ender = { stop: false, end: endingTheGame(child, stopFile) };
+  const ender: Ender = { stop: false, end: endedOnce(endingTheGame(child, stopFile)) };
   const listening = record === null ? null : await listenAndNote(record, ender, debuggerPeer);
   await sayPid(pid);
   const slot = run?.slot;

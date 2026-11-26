@@ -32,24 +32,16 @@ export interface SlotWaits {
  */
 export interface CallNotes {
   readonly classList: Set<string>;
-  /**
-   * What the slot command said of a slot it lost or would not hand on, and that the priority list
-   * of the slots was malformed.
-   */
-  readonly slotNotes: Set<string>;
 }
 
 /** Notes with nothing in them, for a call that has found nothing yet. */
 export function newCallNotes(): CallNotes {
-  return { classList: new Set(), slotNotes: new Set() };
+  return { classList: new Set() };
 }
 
 /** The members a call's answer carries for what its code found: none where it found nothing. */
 export function callNotesSaid(notes: CallNotes): Record<string, string> {
-  return {
-    ...(notes.classList.size === 0 ? {} : { classListNote: [...notes.classList].join(' ') }),
-    ...(notes.slotNotes.size === 0 ? {} : { engineSlotNote: [...notes.slotNotes].join(' ') }),
-  };
+  return notes.classList.size === 0 ? {} : { classListNote: [...notes.classList].join(' ') };
 }
 
 interface Call {

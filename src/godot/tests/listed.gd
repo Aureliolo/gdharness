@@ -37,7 +37,8 @@ const ORPHANS_LEFT: String = "gdharness orphans:"
 const ORPHANS_NAMED: int = 8
 ## The flags turning off a report, with the gdUnit4 hook that writes it. A gate reads what a run
 ## prints, and each report finds every case it hears of in the session to write them all out as the
-## run ends, and project_test reads the JUnit one and turns off only the HTML one.
+## run ends. project_test and gdharness test read the JUnit one, for the skip reasons it holds, and
+## turn off only the HTML one.
 const REPORTS_OFF: Dictionary[String, String] = {
 	"--html-report-off": "res://addons/gdUnit4/src/core/hooks/GdUnitHtmlReporterTestSessionHook.gd",
 	"--junit-report-off": "res://addons/gdUnit4/src/core/hooks/GdUnitXMLReporterTestSessionHook.gd",

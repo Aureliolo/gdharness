@@ -22,7 +22,6 @@ import {
   heldRunSaid,
   inTurns,
   KEPT_RUN_DIRECTORIES,
-  memoryAvailable,
   plural,
   resPathOf,
   roomFor,
@@ -32,6 +31,7 @@ import {
   WINDOWS_EXCEPTION,
   watchedEngine,
 } from './engine-launch.js';
+import { memoryAvailable } from './engine-memory.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
 import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE } from './game-log.js';
@@ -273,7 +273,6 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
     (line) => {
       console.log(`[spread] ${line}`);
     },
-    undefined,
     options.projectPath,
     { tool: 'spread_lane' },
   );

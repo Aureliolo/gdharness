@@ -6,18 +6,16 @@
  * Set here, on import, before any server or command is spawned: each inherits the variables. A run
  * that names its own keeps them.
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { availableParallelism, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { MOST_ENGINES } from '../../src/engine-launch.js';
 import {
   ENDED_SUFFIX,
-  FREED_FOLDER,
   PROJECTS_FOLDER,
   SLOT_COUNT_VARIABLE,
   SLOTS_VARIABLE,
-  slotsDrawnOn,
   WAITING_FOLDER,
 } from '../../src/engine-slots.js';
 
@@ -27,16 +25,8 @@ import {
  */
 export const SLOT_VARIABLES = [
   'GODOT_ENGINE_HELD',
-  'GODOT_ENGINE_LANES',
-  'GODOT_ENGINE_RESERVED',
-  'GODOT_ENGINE_SLOT_COMMAND',
-  'GODOT_ENGINE_SHARE',
-  'GODOT_ENGINE_SHARE_COUNT',
   SLOTS_VARIABLE,
   SLOT_COUNT_VARIABLE,
-  'GODOT_ENGINE_STARVING',
-  'GODOT_ENGINE_TIER',
-  'GODOT_ENGINE_TIMED',
   // The marker of a job the machine's queue runs, which nothing here reads but a program started
   // inside the job would.
   ['GODOT', 'TOOLS', 'JOB'].join('_'),
@@ -77,19 +67,6 @@ export function withTheSuitesOwnSlotVariables(): void {
 withTheSuitesOwnSlotVariables();
 
 /**
- * The slot count, as the variable spells it, at which [param games] games editor_run started can
- * run at once whatever the suite's own count. A game leaves the last kept slot to a short headless
- * call, so two games need three slots.
- */
-export function slotCountForGames(games: number): string {
-  let count = 1;
-  while (slotsDrawnOn(count, 'other', 'none', undefined, true).numbers.length < games) {
-    count += 1;
-  }
-  return String(count);
-}
-
-/**
  * The slot count, as the variable spells it, at which a run can hold [param engines] engines at once:
  * [param suiteCount], the suite's own count, raised to [param engines] where a cap holds it lower.
  */
@@ -113,11 +90,8 @@ export function leftInSlots(slots: string): string[] {
       : [];
   };
   return [
-    ...readdirSync(slots).filter(
-      (name) => name !== WAITING_FOLDER && name !== FREED_FOLDER && name !== PROJECTS_FOLDER,
-    ),
+    ...readdirSync(slots).filter((name) => name !== WAITING_FOLDER && name !== PROJECTS_FOLDER),
     ...inside(WAITING_FOLDER, (name) => !name.endsWith(ENDED_SUFFIX)),
-    ...inside(FREED_FOLDER, (name) => !/^\d+$/.test(name)),
     ...inside(PROJECTS_FOLDER, () => true),
   ].toSorted();
 }
@@ -165,4 +139,42 @@ function livesSaid(pid: number): string {
       ? `pid ${String(pid)} has gone`
       : `pid ${String(pid)} lives`;
   }
+}
+
+/** A taker waiting for a slot, as its mark in the waiting folder names it. */
+export interface WaitingMark {
+  readonly mark: string;
+  readonly pid: number;
+  /** When it began to wait, in milliseconds since the epoch. */
+  readonly since: number;
+  /** When it last looked, in milliseconds. */
+  readonly seen: number;
+}
+
+/** The marks of the waiting folder of [param directory] that name a pid and a start, by mark name. */
+export function slotWaiters(directory: string): WaitingMark[] {
+  const marks = join(directory, WAITING_FOLDER);
+  if (!existsSync(marks)) {
+    return [];
+  }
+  return readdirSync(marks)
+    .filter((name) => name.endsWith('.json'))
+    .toSorted()
+    .flatMap((mark) => {
+      try {
+        const named: unknown = JSON.parse(readFileSync(join(marks, mark), 'utf8'));
+        const pid: unknown =
+          typeof named === 'object' && named !== null ? Reflect.get(named, 'pid') : undefined;
+        const since: unknown =
+          typeof named === 'object' && named !== null ? Reflect.get(named, 'since') : undefined;
+        if (typeof pid !== 'number' || typeof since !== 'number') {
+          return [];
+        }
+        const note = join(marks, mark.replace(/\.json$/u, '.seen'));
+        const seen = existsSync(note) ? statSync(note).mtimeMs : statSync(join(marks, mark)).mtimeMs;
+        return [{ mark, pid, since, seen: Math.floor(seen) }];
+      } catch {
+        return [];
+      }
+    });
 }

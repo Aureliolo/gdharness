@@ -16,7 +16,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { availableParallelism, freemem, totalmem } from 'node:os';
+import { availableParallelism, freemem } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import process from 'node:process';
 import type { Readable } from 'node:stream';
@@ -41,13 +41,16 @@ import {
   engineMemory,
   engineNeed,
   gigabytes,
+  MEMORY_KEPT,
   MEMORY_PER_ENGINE,
+  type MemoryRoom,
+  memoryAvailable,
   memoryEndedSaid,
   startRefusedSaid,
 } from './engine-memory.js';
 import { startedUntilItRuns } from './engine-run.js';
 import { handedOver, type ShareHandoff, shareMarker, shareText } from './engine-shares.js';
-import { nameSlotEngineOf, onTheSlot, raiseSlotMemory, reservedMemory } from './engine-slots.js';
+import { nameSlotEngineOf, onTheSlot, raiseSlotMemory } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { EngineUsageError, errorCode, errorMessage } from './errors.js';
 import { GameLog } from './game-log.js';
@@ -57,7 +60,6 @@ import { logLimitBytes, pastTheLogLimit, readLog } from './log-read.js';
 import { relativeWithin } from './paths.js';
 import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
 import { priorityOf } from './priority.js';
-import { askProcessTable } from './process-table.js';
 import { type PeakTool, readEnginePeaks } from './run-record.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
 import { diedAsItStarted, linesAsPrinted } from './start-race.js';
@@ -70,18 +72,10 @@ export const SILENCE_FLOOR_SECONDS = 300;
 
 /** The least exit code that is a Windows exception status, such as 0xC0000005, read unsigned. */
 export const WINDOWS_EXCEPTION = 0xc0000000;
-/**
- * Memory left to the rest of the machine, and what an engine is taken to need while no peak is kept
- * for its suites.
- */
-const MEMORY_KEPT = 4 * 1024 ** 3;
-
 export { MEMORY_PER_ENGINE };
 
 const LOOK_MS = 500;
 
-/** How long Windows is given to say how much it can still commit, on a machine the run may load. */
-const COMMIT_ASK_MS = 15_000;
 /** What the engine prints when an autoload did not start, after which nothing it does can mean anything. */
 const AUTOLOAD_FAILED = 'Failed to instantiate an autoload';
 
@@ -266,32 +260,6 @@ export function roomForAnother(available: number, owed: number, need: number): b
   return available - MEMORY_KEPT - owed >= need;
 }
 
-/** The memory the machine can give engines, how the line on room words it, and why a reading failed. */
-interface MemoryRoom {
-  readonly bytes: number;
-  readonly said: string;
-  readonly unread?: string;
-}
-
-/**
- * The memory the machine can give engines. freemem on macOS counts only the pages nobody holds,
- * a few hundred megabytes on a Mac whose file cache would give way at once, so a run there was held
- * to one engine whatever it asked for. The kernel's own share of memory it counts as free, the
- * percentage memory_pressure prints, includes what it can take back. Windows refuses an allocation
- * at the commit limit rather than at physical memory, and a machine with 23 GB free and 4.9 GB left
- * to commit started sixteen engines that died with STATUS_COMMITMENT_LIMIT, so there the smaller
- * of the two is the room. What other work has reserved on the machine and still owes comes off
- * either ({@link reservedMemory}), since that memory is spoken for before it is taken.
- */
-export async function memoryAvailable(): Promise<MemoryRoom> {
-  const reserved = await reservedMemory();
-  const level = await macMemoryLevel();
-  if (level !== null) {
-    return lessReserved({ bytes: (totalmem() * level) / 100, said: 'of memory free' }, reserved);
-  }
-  return memoryRoomOf(freemem(), await windowsCommitLeft(), reserved);
-}
-
 /**
  * Why an engine of [param tool] for [param project] is not started, or null: what the project's last
  * engine of that tool held (at most [param ceiling]) is more than the machine has left past what it
@@ -311,60 +279,6 @@ export async function memoryRefusal(
   }
   const free = await room();
   return free.bytes - MEMORY_KEPT >= need.bytes ? null : startRefusedSaid(need, free, MEMORY_KEPT, ceiling);
-}
-
-/**
- * The room [param free] physical bytes and [param commit], what Windows can still commit (null
- * elsewhere, or why it did not say), leave engines: the smaller of the two, less the [param reserved]
- * bytes other work still owes.
- */
-export function memoryRoomOf(free: number, commit: number | string | null, reserved = 0): MemoryRoom {
-  if (typeof commit === 'string') {
-    return lessReserved({ bytes: free, said: 'of memory free', unread: commit }, reserved);
-  }
-  return lessReserved(
-    commit !== null && commit < free
-      ? { bytes: commit, said: 'of memory left to commit' }
-      : { bytes: free, said: 'of memory free' },
-    reserved,
-  );
-}
-
-/** [param room] less [param reserved] bytes, the line saying how much when any is. */
-function lessReserved(room: MemoryRoom, reserved: number): MemoryRoom {
-  return reserved > 0
-    ? { ...room, bytes: room.bytes - reserved, said: `${room.said} after ${gigabytes(reserved)} reserved` }
-    : room;
-}
-
-/**
- * How much more Windows will commit, in bytes, which is what GlobalMemoryStatusEx answers as
- * ullAvailPageFile. Null off Windows, or why Windows did not say.
- */
-export async function windowsCommitLeft(): Promise<number | string | null> {
-  if (process.platform !== 'win32') {
-    return null;
-  }
-  try {
-    const said = await askProcessTable('CommitLeft()', COMMIT_ASK_MS);
-    const bytes = Number(said.trim());
-    return Number.isFinite(bytes) && bytes > 0 ? bytes : `it answered ${JSON.stringify(said.trim())}`;
-  } catch (error) {
-    return errorMessage(error);
-  }
-}
-
-/** The percentage of memory macOS counts as free, or null off macOS or when it would not say. */
-export async function macMemoryLevel(): Promise<number | null> {
-  if (process.platform !== 'darwin') {
-    return null;
-  }
-  try {
-    const level = Number((await runHidden('sysctl', ['-n', 'kern.memorystatus_level'])).stdout.trim());
-    return Number.isFinite(level) && level > 0 && level <= 100 ? level : null;
-  } catch {
-    return null;
-  }
 }
 
 /**

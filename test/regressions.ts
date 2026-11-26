@@ -64,16 +64,7 @@ import {
   readAnnouncement,
 } from '../src/bridge-announce.js';
 import { cacheHome, toolHome } from '../src/cache-home.js';
-import {
-  type CallNotes,
-  callNotesSaid,
-  callProgress,
-  callSignal,
-  newCallNotes,
-  type SlotWaits,
-  stillGoingSaid,
-  withCallSignal,
-} from '../src/call-signal.js';
+import { callProgress, stillGoingSaid, withCallSignal } from '../src/call-signal.js';
 import {
   type Contradicted,
   cachedClasses,
@@ -175,10 +166,7 @@ import {
   inTurns,
   KEPT_RUN_DIRECTORIES,
   MEMORY_PER_ENGINE,
-  macMemoryLevel,
-  memoryAvailable,
   memoryRefusal,
-  memoryRoomOf,
   resPathOf,
   roomFor,
   roomForAnother,
@@ -187,7 +175,6 @@ import {
   versionNamed,
   versionPrinted,
   watchedEngine,
-  windowsCommitLeft,
   writeLaneFile,
 } from '../src/engine-launch.js';
 import {
@@ -206,12 +193,16 @@ import {
   ceilingBytes,
   engineMemory,
   engineNeed,
+  MEMORY_KEPT,
   type MemoryEnd,
   MemoryWatch,
+  macMemoryLevel,
   memoryCeilingSaid,
   memoryEndedSaid,
   memoryEndSentence,
+  memoryRoomOf,
   startRefusedSaid,
+  windowsCommitLeft,
 } from '../src/engine-memory.js';
 import {
   crashedAtStart,
@@ -224,65 +215,33 @@ import {
 } from '../src/engine-run.js';
 import { shareText } from '../src/engine-shares.js';
 import {
-  type CallSlot,
-  claimIsOurs,
-  countSaid,
   EngineSlots,
   endedNoteOf,
-  FOLLOWS_SUFFIX,
   FolderChanges,
-  FollowedLanes,
-  FREED_FOLDER,
-  fileTimeMs,
-  GATE_LEND_MS,
-  gamesKeptOf,
   giveBackSlot,
-  giveBackSlotAsync,
-  handedRunSlot,
   handSlot,
-  handSlotToGame,
-  handSlotToKeeper,
   holderOf,
   inheritsSlot,
-  keeperSlotOf,
-  keptSlotsOf,
-  LANES_VARIABLE,
   lockIsFree,
   machineSlots,
   markBegan,
   nameSlotEngine,
-  onTheSlot,
   ownStart,
   PROJECTS_FOLDER,
-  poolCount,
   projectLockOf,
-  QUEUED_FOLDER,
-  RESERVED_FOLDER,
-  RESERVED_VARIABLE,
   raiseSlotMemory,
-  reservedMemory,
-  inAGate as runsInAGate,
-  SHARE_COUNT_VARIABLE,
-  SHARE_VARIABLE,
+  SINCE_IN_SECONDS_BELOW,
+  SLOT_COUNT_FILE,
   SLOT_COUNT_VARIABLE,
   SLOT_YIELD_MS,
   SLOTS_VARIABLE,
   type SlotHolder,
   SlotLine,
-  SPARE_FILE,
-  SPARE_STALE_MS,
   START_TOLERANCE_MS,
-  STARVED_FILE,
-  settledRunSlot,
-  slotEngineNamed,
-  slotForCall,
-  slotsClaimed,
-  slotsDrawnOn,
-  slotTaker,
+  slotCountFileOf,
+  slotMemoryFree,
   slotWaitedSaid,
-  slotWaiters,
   slotWaitSaid,
-  starvedSaid,
   UNWRITTEN_MS,
   WAITING_FOLDER,
 } from '../src/engine-slots.js';
@@ -402,14 +361,22 @@ import {
   orphansPrinted,
   parseJUnit,
   RENDERED_AWAY_NOTE,
+  type ReportedSkips,
+  reportedSkips,
   rowsIgnoredIn,
   type ScriptError,
   SuiteDiffs,
+  skipKey,
   suitesPrinted,
   whyNoReport,
   withActualsPrinted,
 } from '../src/junit.js';
-import { askTheKeepersDebugger, askTheKeeperToStop, listenForTheServer } from '../src/keeper-channel.js';
+import {
+  askTheKeepersDebugger,
+  askTheKeeperToStop,
+  endedOnce,
+  listenForTheServer,
+} from '../src/keeper-channel.js';
 import {
   editorArguments,
   engineFlags,
@@ -435,7 +402,7 @@ import {
 } from '../src/library-copies.js';
 import { callsInFlight, LIFECYCLE_LOG_LIMIT, writeLifecycle } from '../src/lifecycle-log.js';
 import { bytesOf, entriesOf, contentOf as listedContentOf, statOf } from '../src/listed-reads.js';
-import { LOG_LIMIT_BYTES, prependTo, readLog } from '../src/log-read.js';
+import { LOG_LIMIT_BYTES, pastTheLogLimit, prependTo, readLog } from '../src/log-read.js';
 import {
   DEFAULT_LSP_PORT,
   GodotLSPClient,
@@ -746,7 +713,6 @@ import {
   writeLoader,
 } from '../src/setup.js';
 import { skillFiles } from '../src/skill.js';
-import { SLOT_COMMAND_VARIABLE } from '../src/slot-delegate.js';
 import {
   type ChildProcess,
   runHidden,
@@ -838,21 +804,15 @@ import {
 import {
   type Admitted,
   acrossSaid,
-  compileUnlessUnchanged,
   displayFlags,
   engineSaid,
-  enginesCutFor,
-  followedAt,
-  HandedSlot,
   importEnd,
   importFault,
   importNeeded,
   importStartOf,
-  lanesSaid,
   MemoryGate,
   memorySaid,
   outOfMemorySaid,
-  RESERVED_WAIT_MS,
   RunLogs,
   type RunResult,
   reachedAlsoSaid,
@@ -979,8 +939,8 @@ import {
   leftInSlots,
   SLOT_VARIABLES,
   slotCountForEngines,
-  slotCountForGames,
   slotsSaid,
+  slotWaiters,
   suiteSlotCount,
   TEST_ENGINES_VARIABLE,
   withTheSuitesOwnSlotVariables,
@@ -23386,8 +23346,7 @@ function testTheSuiteTakesNoMoreEngineSlotsThanItsCallerAllows(): void {
     assert.equal(suiteSlotCount(none, 32), 4, `${String(none)} sets no cap: the suite most`);
     assert.equal(suiteSlotCount(none, 2), 2, `${String(none)} sets no cap: the processors`);
   }
-  assert.equal(slotCountForGames(1), '1', 'one game takes the only slot of a machine of one');
-  assert.equal(slotCountForGames(2), '3', 'two games leave a third slot to a short call');
+  assert.equal(slotCountForEngines(1, '1'), '1', 'one engine takes the only slot of a machine of one');
   assert.equal(slotCountForEngines(2, '1'), '2', 'a run of two engines is given two under a cap of 1');
   assert.equal(slotCountForEngines(2, '4'), '4', 'and the suite count where that is higher');
   const slotCountIn = (counted: string | undefined, machineCount = '12'): number => {
@@ -28521,7 +28480,7 @@ async function testAStopByNumberReachesAnotherProjectsGameWithNoEditor(): Promis
   const shared = {
     GODOT_PATH: godotPath,
     GDHARNESS_RUNTIME_DIR: runtime,
-    [SLOT_COUNT_VARIABLE]: slotCountForGames(2),
+    [SLOT_COUNT_VARIABLE]: slotCountForEngines(2),
   };
   const first = new ServerProcess({ env: { ...shared, GDHARNESS_PROJECT: project } });
   let second: ServerProcess | null = null;
@@ -32255,6 +32214,49 @@ async function saidToPieces(address: string, pieces: readonly string[]): Promise
  * stop, or is a debugger request that cannot be read, is refused with why rather than ending the
  * keeper. The listener is the real one, and a stop that throws what has no text is still answered.
  */
+/**
+ * Two servers that ask one keeper to end its game are told once that it was signalled: the second is
+ * answered that it had gone, and the game is signalled once. A stop that threw is no answer, so the
+ * stop after it still ends the game.
+ */
+async function testTwoStopsOfOneKeeperSignalItsGameOnce(): Promise<void> {
+  let signals = 0;
+  let throws = true;
+  const listening = await listenForTheServer(
+    endedOnce(() => {
+      if (throws) {
+        throws = false;
+        throw new Error('not yet');
+      }
+      signals += 1;
+      return 'signalled';
+    }),
+    null,
+  );
+  assert.ok(listening !== null, 'the keeper listens');
+  try {
+    const failed = await askTheKeeperToStop(listening.address, 10_000);
+    assert.equal(
+      typeof failed,
+      'object',
+      `a stop that threw is not answered as an end: ${JSON.stringify(failed)}`,
+    );
+    const answers = await Promise.all([
+      askTheKeeperToStop(listening.address, 10_000),
+      askTheKeeperToStop(listening.address, 10_000),
+    ]);
+    assert.deepEqual(
+      ['signalled', 'gone'].map((said) => answers.filter((answer) => answer === said).length),
+      [1, 1],
+      'one of two stops at once signals the game',
+    );
+    assert.equal(signals, 1, 'and the game is signalled once');
+    assert.equal(await askTheKeeperToStop(listening.address, 10_000), 'gone', 'a later stop is told it went');
+  } finally {
+    listening.close();
+  }
+}
+
 async function testTheKeepersListenerAnswersTheFirstLineOnly(): Promise<void> {
   let stops = 0;
   const requests: unknown[] = [];
@@ -37184,7 +37186,7 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
     env: {
       GODOT_PATH: godotPath,
       GDHARNESS_RUNTIME_DIR: runtimeDir,
-      [SLOT_COUNT_VARIABLE]: slotCountForGames(2),
+      [SLOT_COUNT_VARIABLE]: slotCountForEngines(2),
     },
   });
   const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
@@ -54271,7 +54273,14 @@ async function testAPlayedGameHoldsAnEngineSlot(): Promise<void> {
             `a game of ${project} the editor played for editor_run`,
           );
           await endGame(held.game);
-          const taker = new EngineSlots(slots, 1, { pid: process.pid, started: await ownStart() });
+          const taker = new EngineSlots(
+            slots,
+            1,
+            { pid: process.pid, started: await ownStart() },
+            undefined,
+            undefined,
+            plentyOfMemory,
+          );
           const taken = await taker.takeFree();
           assert.equal(taken, lock, `${round}: and it is free once the game has gone`);
           taker.release(lock);
@@ -55467,7 +55476,7 @@ async function testTheEditorsGameIsToldFromAnotherOfTheSameProject(): Promise<vo
         );
       },
       // The first round's game is still up when the second starts.
-      { realAddon: true, env: { [SLOT_COUNT_VARIABLE]: slotCountForGames(2) } },
+      { realAddon: true, env: { [SLOT_COUNT_VARIABLE]: slotCountForEngines(2) } },
     );
   } finally {
     for (const game of games) {
@@ -67745,7 +67754,7 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
           [
             '',
             '',
-            `func test_oneCase${index}() -> void:`,
+            `func test_case_${index}() -> void:`,
             '\tawait get_tree().create_timer(0.05).timeout',
             '\tassert_bool(true).is_true()',
           ].join('\n'),
@@ -68014,7 +68023,7 @@ async function testATestRunWhoseAutoloadDidNotCompileStops(): Promise<void> {
           [
             '',
             '',
-            `func test_oneCase${index}() -> void:`,
+            `func test_case_${index}() -> void:`,
             '\tawait get_tree().create_timer(0.05).timeout',
             '\tassert_bool(true).is_true()',
           ].join('\n'),
@@ -72567,7 +72576,7 @@ async function testASlotWaitLooksWhenTheSlotsChange(): Promise<void> {
     }
 
     const me = { pid: process.pid, started: await ownStart() };
-    const holding = new EngineSlots(directory, 1, me);
+    const holding = new EngineSlots(directory, 1, me, undefined, undefined, plentyOfMemory);
     const lock = await holding.take();
     class Counted extends EngineSlots {
       looks = 0;
@@ -72724,7 +72733,14 @@ async function testADeadLockHeldOpenIsTakenOverOnceLetGo(): Promise<void> {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-turns-'));
   try {
-    const slots = new EngineSlots(directory, 1, { pid: process.pid, started });
+    const slots = new EngineSlots(
+      directory,
+      1,
+      { pid: process.pid, started },
+      undefined,
+      undefined,
+      plentyOfMemory,
+    );
     await aHeldDeadLockIsTakenOverOnceLetGo(
       join(directory, '0.lock'),
       directory,
@@ -72746,25 +72762,6 @@ async function testADeadLockHeldOpenIsTakenOverOnceLetGo(): Promise<void> {
     rmSync(directory, { recursive: true, force: true });
     rmSync(project, { recursive: true, force: true });
   }
-}
-
-/**
- * A slot file a reader holds shut is waited on without stopping the process: the read retries on a
- * timer for its second and then refuses, and the loop keeps ticking meanwhile. Windows
- * alone, where an open that shares nothing refuses every other open.
- */
-async function testASlotFileHeldShutIsWaitedOnWithoutStoppingTheProcess(): Promise<void> {
-  await aNoteHeldShutLeavesTheLoopRunning(
-    'a slot file',
-    (project) => join(project, 'lanes.json'),
-    async (project, file) => {
-      await new EngineSlots(project, 1, { pid: process.pid, started: await ownStart() }).countIn(
-        file,
-        'lanes',
-      );
-    },
-    true,
-  );
 }
 
 /**
@@ -73362,7 +73359,14 @@ async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void
 
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
   try {
-    const slots = new EngineSlots(directory, 2, { pid: process.pid, started, by: 'gdharness test of /p' });
+    const slots = new EngineSlots(
+      directory,
+      2,
+      { pid: process.pid, started, by: 'gdharness test of /p' },
+      undefined,
+      undefined,
+      plentyOfMemory,
+    );
     const first = await slots.take();
     const second = await slots.take();
     assert.deepEqual(readdirSync(directory).toSorted(), ['0.lock', '1.lock'], 'one file a slot');
@@ -73455,545 +73459,27 @@ async function testATakeSweepsGoneLocksPastTheCount(): Promise<void> {
     for (const name of ['2.lock', '17.lock', '18.lock']) {
       writeFileSync(join(directory, name), deadHolder);
     }
-    for (const name of ['1.lock', '19.lock']) {
-      writeFileSync(join(directory, name), JSON.stringify({ pid: process.pid, started }));
-    }
+    // One live lock past the count, which leaves the take one slot under the cap of two.
+    writeFileSync(join(directory, '19.lock'), JSON.stringify({ pid: process.pid, started }));
     writeFileSync(join(directory, '18.lock.steal'), '');
     writeFileSync(join(directory, 'notes.lock'), deadHolder);
-    const slots = new EngineSlots(directory, 2, { pid: process.pid, started });
+    const slots = new EngineSlots(
+      directory,
+      2,
+      { pid: process.pid, started },
+      undefined,
+      undefined,
+      plentyOfMemory,
+    );
     const taken = await slots.takeFree();
     assert.equal(taken, join(directory, '0.lock'), 'the take itself goes on as it would');
     assert.deepEqual(
       readdirSync(directory).toSorted(),
-      ['0.lock', '1.lock', '18.lock', '18.lock.steal', '19.lock', FREED_FOLDER, 'notes.lock'],
+      ['0.lock', '18.lock', '18.lock.steal', '19.lock', 'notes.lock'],
       'the gone holders past the count are removed, and a live one and one being taken over stay',
-    );
-    assert.deepEqual(
-      readdirSync(join(directory, FREED_FOLDER)).toSorted(),
-      ['17', '2'],
-      'each removed one is marked freed',
     );
   } finally {
     sweep(directory);
-  }
-}
-
-const RESERVED_GIB = 1024 ** 3;
-
-/** A slots folder with a reserved folder, and live processes to hold marks, all removed by `close`. */
-function reservationFixture(): {
-  readonly directory: string;
-  readonly holder: () => Promise<{ pid: number; started: number }>;
-  readonly mark: (name: string, content: unknown) => void;
-  readonly close: () => void;
-} {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-reserved-'));
-  mkdirSync(join(directory, RESERVED_FOLDER));
-  const children: ReturnType<typeof spawnHidden>[] = [];
-  return {
-    directory,
-    holder: async () => {
-      const child = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
-        stdio: 'ignore',
-      });
-      children.push(child);
-      const pid = child.pid ?? 0;
-      const started = (await startTimesOf([pid])).get(pid);
-      assert.notEqual(started, undefined, 'the platform says when a live process started');
-      return { pid, started: started ?? 0 };
-    },
-    mark: (name, content) => {
-      writeFileSync(
-        join(directory, RESERVED_FOLDER, name),
-        typeof content === 'string' ? content : JSON.stringify(content),
-      );
-    },
-    close: () => {
-      for (const child of children) {
-        child.kill();
-      }
-      sweep(directory);
-    },
-  };
-}
-
-/** A live mark owing 30 GiB takes exactly 30 GiB from the room, and from the figure the room is read from. */
-async function testALiveReservationShrinksTheRoomByWhatItOwes(): Promise<void> {
-  const fixture = reservationFixture();
-  try {
-    assert.equal(await reservedMemory(fixture.directory), 0, 'no mark owes nothing');
-    fixture.mark('a.json', { ...(await fixture.holder()), owed: 30 * RESERVED_GIB });
-    assert.equal(await reservedMemory(fixture.directory), 30 * RESERVED_GIB);
-    assert.equal(memoryRoomOf(12 * RESERVED_GIB, null, 30 * RESERVED_GIB).bytes, -18 * RESERVED_GIB);
-    assert.equal(memoryRoomOf(12 * RESERVED_GIB, 5 * RESERVED_GIB, 3 * RESERVED_GIB).bytes, 2 * RESERVED_GIB);
-  } finally {
-    fixture.close();
-  }
-}
-
-/** A mark whose holder is gone, or whose pid a later process holds, counts nothing. */
-async function testAGoneHoldersReservationCountsNothing(): Promise<void> {
-  const fixture = reservationFixture();
-  try {
-    const live = await fixture.holder();
-    const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
-    await exitOf(gone);
-    fixture.mark('gone.json', { pid: gone.pid ?? 0, started: live.started, owed: 7 * RESERVED_GIB });
-    fixture.mark('reused.json', { pid: live.pid, started: live.started - 3_600_000, owed: 9 * RESERVED_GIB });
-    assert.equal(await reservedMemory(fixture.directory), 0, 'neither mark counts');
-    fixture.mark('live.json', { ...live, owed: 2 * RESERVED_GIB });
-    assert.equal(await reservedMemory(fixture.directory), 2 * RESERVED_GIB, 'and a live one still does');
-  } finally {
-    fixture.close();
-  }
-}
-
-/** Live marks add up. */
-async function testSeveralLiveReservationsSum(): Promise<void> {
-  const fixture = reservationFixture();
-  try {
-    fixture.mark('a.json', { ...(await fixture.holder()), owed: 10 * RESERVED_GIB });
-    fixture.mark('b.json', { ...(await fixture.holder()), owed: 20 * RESERVED_GIB });
-    fixture.mark('c.json', { ...(await fixture.holder()), owed: 1 });
-    assert.equal(await reservedMemory(fixture.directory), 30 * RESERVED_GIB + 1);
-  } finally {
-    fixture.close();
-  }
-}
-
-/** A mark that cannot be read as a whole-number debt counts nothing and throws nothing. */
-async function testAMalformedReservationCountsNothingAndThrowsNothing(): Promise<void> {
-  const fixture = reservationFixture();
-  try {
-    const live = await fixture.holder();
-    for (const [name, owed] of [
-      ['fraction', 1.5],
-      ['negative', -5],
-      ['zero', 0],
-      ['boolean', true],
-      ['text', '5'],
-      ['null', null],
-    ] as const) {
-      fixture.mark(`${name}.json`, { ...live, owed });
-    }
-    fixture.mark('missing.json', live);
-    fixture.mark('nobody.json', { owed: 5 });
-    fixture.mark('torn.json', '{"pid":');
-    fixture.mark('array.json', '[1,2]');
-    fixture.mark('empty.json', '');
-    mkdirSync(join(fixture.directory, RESERVED_FOLDER, 'unreadable.json'));
-    assert.equal(await reservedMemory(fixture.directory), 0, 'none of them counts');
-    fixture.mark('good.json', { ...live, owed: 4 * RESERVED_GIB });
-    assert.equal(await reservedMemory(fixture.directory), 4 * RESERVED_GIB, 'a good one beside them does');
-    assert.equal(await reservedMemory(join(fixture.directory, 'nowhere')), 0, 'no folder owes nothing');
-  } finally {
-    fixture.close();
-  }
-}
-
-/** The path of the mark `name` in [param fixture]. */
-function markPath(fixture: { readonly directory: string }, name: string): string {
-  return join(fixture.directory, RESERVED_FOLDER, name);
-}
-
-/** A mark the variable names is the run's own reservation and is not waited on, and one it does not name is. */
-async function testAMarkNamedInTheReservedVariableCountsNothing(): Promise<void> {
-  const fixture = reservationFixture();
-  try {
-    fixture.mark('own.json', { ...(await fixture.holder()), owed: 5 * RESERVED_GIB });
-    fixture.mark('other.json', { ...(await fixture.holder()), owed: 3 * RESERVED_GIB });
-    const named = { [RESERVED_VARIABLE]: markPath(fixture, 'own.json') };
-    assert.equal(await reservedMemory(fixture.directory, named), 3 * RESERVED_GIB, 'only the other counts');
-    assert.equal(await reservedMemory(fixture.directory, {}), 8 * RESERVED_GIB, 'unnamed, both count');
-  } finally {
-    fixture.close();
-  }
-}
-
-/** Nested holders name several marks, joined by the path-list separator, and every one is skipped. */
-async function testSeveralNamedMarksAreAllSkipped(): Promise<void> {
-  const fixture = reservationFixture();
-  try {
-    fixture.mark('a.json', { ...(await fixture.holder()), owed: 5 * RESERVED_GIB });
-    fixture.mark('b.json', { ...(await fixture.holder()), owed: 6 * RESERVED_GIB });
-    fixture.mark('c.json', { ...(await fixture.holder()), owed: 1 * RESERVED_GIB });
-    const named = {
-      [RESERVED_VARIABLE]: [markPath(fixture, 'a.json'), markPath(fixture, 'b.json')].join(delimiter),
-    };
-    assert.equal(await reservedMemory(fixture.directory, named), RESERVED_GIB, 'only the third counts');
-  } finally {
-    fixture.close();
-  }
-}
-
-/** A path spelt with other slashes, and on Windows another case, still names the mark. */
-async function testAMarkPathSpeltDifferentlyStillMatches(): Promise<void> {
-  const fixture = reservationFixture();
-  try {
-    fixture.mark('own.json', { ...(await fixture.holder()), owed: 5 * RESERVED_GIB });
-    const plain = markPath(fixture, 'own.json');
-    const spellings = [
-      join(fixture.directory, RESERVED_FOLDER, '..', RESERVED_FOLDER, 'own.json'),
-      process.platform === 'win32' ? plain.replaceAll('\\', '/') : plain,
-      process.platform === 'win32' ? plain.toUpperCase() : plain,
-    ];
-    for (const spelt of spellings) {
-      assert.equal(await reservedMemory(fixture.directory, { [RESERVED_VARIABLE]: spelt }), 0, spelt);
-    }
-    assert.equal(await reservedMemory(fixture.directory, {}), 5 * RESERVED_GIB, 'and unnamed it counts');
-  } finally {
-    fixture.close();
-  }
-}
-
-/** A count variable that cannot be read never stops the room being read. */
-async function testABadSlotCountNeverStopsTheRoomBeingRead(): Promise<void> {
-  const fixture = reservationFixture();
-  const before = { slots: process.env[SLOTS_VARIABLE], count: process.env['GODOT_ENGINE_SLOT_COUNT'] };
-  try {
-    fixture.mark('a.json', { ...(await fixture.holder()), owed: 2 * RESERVED_GIB });
-    process.env[SLOTS_VARIABLE] = fixture.directory;
-    process.env['GODOT_ENGINE_SLOT_COUNT'] = 'abc';
-    assert.equal(await reservedMemory(), 2 * RESERVED_GIB);
-    const room = await memoryAvailable();
-    assert.match(room.said, /after 2\.0 GB reserved$/);
-  } finally {
-    for (const [name, value] of [
-      [SLOTS_VARIABLE, before.slots],
-      ['GODOT_ENGINE_SLOT_COUNT', before.count],
-    ] as const) {
-      if (value === undefined) {
-        delete process.env[name];
-      } else {
-        process.env[name] = value;
-      }
-    }
-    fixture.close();
-  }
-}
-
-/** A gate whose memory reads -18 GiB, with [param owed] reserved and a clock the test moves. */
-function reservedGate(owed: { bytes: number }, clock: { ms: number }, told: string[]): MemoryGate {
-  return new MemoryGate(
-    { markWaiting: () => () => undefined },
-    () => Promise.resolve(-18 * RESERVED_GIB),
-    5,
-    {
-      owed: () => Promise.resolve(owed.bytes),
-      say: (line) => told.push(line),
-      now: () => clock.ms,
-    },
-  );
-}
-
-/** The first engine of a run waits while reserved memory leaves no room for it, and says so once. */
-async function testTheFirstEngineWaitsWhileReservedMemoryLeavesNoRoom(): Promise<void> {
-  const told: string[] = [];
-  const gate = reservedGate({ bytes: 30 * RESERVED_GIB }, { ms: 0 }, told);
-  let admitted = false;
-  const control = new AbortController();
-  const asked = gate
-    .admit(control.signal, () => RESERVED_GIB)
-    .then(
-      () => {
-        admitted = true;
-      },
-      () => undefined,
-    );
-  await delay(300);
-  assert.equal(admitted, false, 'the first engine waits');
-  assert.deepEqual(told, ['Waiting for memory other work reserved: 30.0 GB.'], 'and says so once');
-  control.abort();
-  await asked;
-}
-
-/** The first engine starts once the reservation is gone. */
-async function testTheFirstEngineStartsOnceTheReservationIsGone(): Promise<void> {
-  const owed = { bytes: 30 * RESERVED_GIB };
-  const gate = reservedGate(owed, { ms: 0 }, []);
-  let admitted = false;
-  const asked = gate
-    .admit(new AbortController().signal, () => RESERVED_GIB)
-    .then(() => {
-      admitted = true;
-    });
-  await delay(150);
-  assert.equal(admitted, false, 'it waits while the reservation stands');
-  owed.bytes = 0;
-  await asked;
-  assert.equal(admitted, true, 'and starts once it is gone');
-}
-
-/** The first engine starts anyway once the wait has lasted the limit. */
-async function testTheFirstEngineStartsAnywayAfterTheReservedWaitLimit(): Promise<void> {
-  const clock = { ms: 1_000_000 };
-  const gate = reservedGate({ bytes: 30 * RESERVED_GIB }, clock, []);
-  let admitted = false;
-  const asked = gate
-    .admit(new AbortController().signal, () => RESERVED_GIB)
-    .then(() => {
-      admitted = true;
-    });
-  await delay(100);
-  clock.ms += RESERVED_WAIT_MS - 1;
-  await delay(100);
-  assert.equal(admitted, false, 'one millisecond short of the limit it still waits');
-  clock.ms += 1;
-  await asked;
-  assert.equal(admitted, true, 'at the limit it starts');
-}
-
-/** Three lanes of two engines under a standing reservation wait once, for the first engine only, and say so once. */
-async function testTheFirstEngineWaitsOnceForTheWholeRun(): Promise<void> {
-  const told: string[] = [];
-  const limitMs = 400;
-  const gate = new MemoryGate(
-    { markWaiting: () => () => undefined },
-    () => Promise.resolve(-18 * RESERVED_GIB),
-    20,
-    { owed: () => Promise.resolve(30 * RESERVED_GIB), say: (line) => told.push(line), limitMs },
-  );
-  const control = new AbortController();
-  const began = Date.now();
-  const starts: number[] = [];
-  const lane = async (): Promise<void> => {
-    for (let engine = 0; engine < 2; engine += 1) {
-      const admitted = await gate.admit(control.signal, () => 1.5 * RESERVED_GIB);
-      starts.push(Date.now() - began);
-      await delay(30);
-      admitted.ended();
-    }
-  };
-  const finished = await Promise.race([
-    Promise.all([lane(), lane(), lane()]).then(
-      () => 'finished',
-      () => 'aborted',
-    ),
-    delay(limitMs * 6).then(() => 'stuck'),
-  ]);
-  control.abort();
-  assert.equal(finished, 'finished', `the lanes did not wait again and again: ${starts.join(', ')}`);
-  assert.equal(starts.length, 6, 'every engine started');
-  assert.ok((starts[0] ?? 0) >= limitMs - 50, `the first waited the limit: ${starts[0]}`);
-  assert.ok(
-    Math.max(...starts) - (starts[0] ?? 0) < limitMs,
-    `and the other five did not wait again: ${starts.join(', ')}`,
-  );
-  assert.equal(told.length, 1, 'and the line is said once');
-}
-
-/** A reservation that leaves room for the first engine holds nothing. */
-async function testTheFirstEngineStartsAtOnceWhenTheRoomFitsBesideAReservation(): Promise<void> {
-  const told: string[] = [];
-  const gate = new MemoryGate(
-    { markWaiting: () => () => undefined },
-    () => Promise.resolve(40 * RESERVED_GIB),
-    5,
-    { owed: () => Promise.resolve(2 * RESERVED_GIB), say: (line) => told.push(line), limitMs: 60_000 },
-  );
-  const control = new AbortController();
-  const first = await Promise.race([
-    gate
-      .admit(control.signal, () => RESERVED_GIB)
-      .then(
-        () => 'started',
-        () => 'aborted',
-      ),
-    delay(1000).then(() => 'waited'),
-  ]);
-  control.abort();
-  assert.equal(first, 'started', 'the first engine starts at once');
-  assert.deepEqual(told, [], 'and nothing is said');
-}
-
-/** A reservation that appears after the run's first engine started holds none of the engines after it. */
-async function testALaterReservationHoldsNoEngineAfterTheFirst(): Promise<void> {
-  const owed = { bytes: 0 };
-  const told: string[] = [];
-  const gate = new MemoryGate(
-    { markWaiting: () => () => undefined },
-    () => Promise.resolve(-18 * RESERVED_GIB),
-    5,
-    { owed: () => Promise.resolve(owed.bytes), say: (line) => told.push(line), limitMs: 60_000 },
-  );
-  const first = await gate.admit(new AbortController().signal, () => RESERVED_GIB);
-  first.ended();
-  owed.bytes = 30 * RESERVED_GIB;
-  const control = new AbortController();
-  const next = await Promise.race([
-    gate
-      .admit(control.signal, () => RESERVED_GIB)
-      .then(
-        () => 'started',
-        () => 'aborted',
-      ),
-    delay(1000).then(() => 'waited'),
-  ]);
-  control.abort();
-  assert.equal(next, 'started', 'the next engine starts at once');
-  assert.deepEqual(told, [], 'and nothing is said');
-}
-
-/** With nothing reserved the first engine starts at once and the memory is not read. */
-async function testTheFirstEngineStartsAtOnceWithNothingReserved(): Promise<void> {
-  let reads = 0;
-  const told: string[] = [];
-  const gate = new MemoryGate(
-    { markWaiting: () => () => undefined },
-    () => {
-      reads += 1;
-      return Promise.resolve(-18 * RESERVED_GIB);
-    },
-    5,
-    { owed: () => Promise.resolve(0), say: (line) => told.push(line) },
-  );
-  const control = new AbortController();
-  const first = await Promise.race([
-    gate
-      .admit(control.signal, () => RESERVED_GIB)
-      .then(
-        () => 'started',
-        () => 'aborted',
-      ),
-    delay(1000).then(() => 'waited'),
-  ]);
-  control.abort();
-  assert.equal(first, 'started', 'the first engine starts at once');
-  assert.equal(reads, 0, 'the memory is not read');
-  assert.deepEqual(told, [], 'and nothing is said');
-}
-
-/** Reservations are read from the machine's slots folder, never from the pool a gate shares. */
-async function testReservationsAreReadFromTheMachineFolderNotThePool(): Promise<void> {
-  const machine = reservationFixture();
-  const pool = reservationFixture();
-  const before = { slots: process.env[SLOTS_VARIABLE], share: process.env[SHARE_VARIABLE] };
-  try {
-    machine.mark('m.json', { ...(await machine.holder()), owed: 11 * RESERVED_GIB });
-    pool.mark('p.json', { ...(await pool.holder()), owed: 13 * RESERVED_GIB });
-    process.env[SLOTS_VARIABLE] = machine.directory;
-    process.env[SHARE_VARIABLE] = pool.directory;
-    assert.equal(await reservedMemory(), 11 * RESERVED_GIB);
-  } finally {
-    for (const [name, value] of [
-      [SLOTS_VARIABLE, before.slots],
-      [SHARE_VARIABLE, before.share],
-    ] as const) {
-      if (value === undefined) {
-        delete process.env[name];
-      } else {
-        process.env[name] = value;
-      }
-    }
-    machine.close();
-    pool.close();
-  }
-}
-
-/** The room every reader gets is less the reservations, and the line on room says how much. */
-async function testTheRoomEveryReaderGetsIsLessTheReservations(): Promise<void> {
-  const fixture = reservationFixture();
-  const before = process.env[SLOTS_VARIABLE];
-  try {
-    const untouched = await memoryAvailable();
-    assert.doesNotMatch(untouched.said, /reserved/, 'nothing reserved says nothing');
-    fixture.mark('a.json', { ...(await fixture.holder()), owed: 2 ** 50 });
-    process.env[SLOTS_VARIABLE] = fixture.directory;
-    const room = await memoryAvailable();
-    assert.ok(room.bytes < -(2 ** 49), `the room is below nothing: ${room.bytes}`);
-    assert.match(room.said, /^of memory (free|left to commit) after 1048576\.0 GB reserved$/);
-    const reserved = memoryRoomOf(12 * RESERVED_GIB, null, 30 * RESERVED_GIB);
-    assert.equal(reserved.said, 'of memory free after 30.0 GB reserved');
-    assert.deepEqual(
-      memoryRoomOf(12 * RESERVED_GIB, 'the commit query failed', 30 * RESERVED_GIB),
-      {
-        bytes: -18 * RESERVED_GIB,
-        said: 'of memory free after 30.0 GB reserved',
-        unread: 'the commit query failed',
-      },
-      'a commit left unread still loses the reservation from the free memory',
-    );
-    assert.deepEqual(roomFor(2, 16, reserved.bytes, reserved.said), {
-      engines: 1,
-      held: 'the machine has 0.0 GB of memory free after 30.0 GB reserved, 4.0 GB of it kept for everything else and 1.5 GB taken for each engine',
-    });
-  } finally {
-    if (before === undefined) {
-      delete process.env[SLOTS_VARIABLE];
-    } else {
-      process.env[SLOTS_VARIABLE] = before;
-    }
-    fixture.close();
-  }
-}
-
-/** A test run held by memory waits for what another program reserved before its first engine, then goes on. */
-async function testATestRunWaitsForReservedMemoryBeforeItsFirstEngine(): Promise<void> {
-  const engines = commandTestEngines();
-  if (engines === null) {
-    return;
-  }
-  const { project, slots, checkouts, env } = commandTestProject(engines.godotPath, engines.gdunit);
-  const fixture = reservationFixture();
-  let running: ReturnType<typeof spawnHidden> | undefined;
-  try {
-    fixture.mark('other.json', { ...(await fixture.holder()), owed: 2 ** 50 });
-    const suites = ['tests/ok_test.gd', 'tests/declared_test.gd'];
-    running = spawnHidden(process.execPath, ['build/cli.js', 'test', project, '--slots', slots, ...suites], {
-      env: { ...env, [SLOTS_VARIABLE]: fixture.directory },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let said = '';
-    for (const stream of [running.stdout, running.stderr]) {
-      stream?.setEncoding('utf8');
-      stream?.on('data', (chunk: string) => {
-        said += chunk;
-      });
-    }
-    const ended = exitOf(running);
-    const until = Date.now() + 120_000;
-    while (!said.includes('Waiting for memory other work reserved') && Date.now() < until) {
-      await delay(250);
-    }
-    assert.match(said, /^Waiting for memory other work reserved: .* GB\.$/m, said);
-    assert.doesNotMatch(said, /^Passed: /m, 'the first engine has not started while the reservation stands');
-    fixture.close();
-    const code = await Promise.race([ended, delay(4 * ENGINE_CALL_TIMEOUT_MS).then(() => null)]);
-    assert.deepEqual(code, { code: 0, signal: null }, said);
-    assert.match(said, /^Passed: 4 cases in 2 suites across \d engines?, /m, said);
-  } finally {
-    running?.kill();
-    fixture.close();
-    sweep(project, slots, checkouts);
-  }
-}
-
-/** The slot sweep reads only numbered locks and the waiting marks, and leaves reservations alone. */
-async function testTheSlotSweepLeavesReservationsAlone(): Promise<void> {
-  const fixture = reservationFixture();
-  try {
-    const started = await ownStart();
-    const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
-    await exitOf(gone);
-    const dead = { pid: gone.pid ?? 0, started, owed: 5 * RESERVED_GIB };
-    fixture.mark('dead.json', dead);
-    fixture.mark('dead.lock', dead);
-    fixture.mark('7.lock', dead);
-    writeFileSync(join(fixture.directory, '9.lock'), JSON.stringify(dead));
-    const slots = new EngineSlots(fixture.directory, 2, { pid: process.pid, started });
-    const taken = await slots.takeFree();
-    assert.ok(
-      [0, 1].some((one) => taken === join(fixture.directory, `${one}.lock`)),
-      `a slot is taken: ${taken}`,
-    );
-    assert.deepEqual(
-      readdirSync(join(fixture.directory, RESERVED_FOLDER)).toSorted(),
-      ['7.lock', 'dead.json', 'dead.lock'],
-      'the folder is untouched',
-    );
-    assert.equal(existsSync(join(fixture.directory, '9.lock')), false, 'while the sweep did run');
-  } finally {
-    fixture.close();
   }
 }
 
@@ -74596,59 +74082,6 @@ async function testARunHeldByMemoryStartsAnEngineForEachShare(): Promise<void> {
     ['admit 5', 'ended', 'admit 3', 'ended', 'admit 1', 'ended'],
     "each engine is admitted at its own share's need and gives it back when it exits",
   );
-}
-
-/** A lane told fewer lanes gives its slot back after its share instead of drawing another. */
-async function testALaneToldToStopGivesItsSlotBackBetweenShares(): Promise<void> {
-  const units = Array.from({ length: 4 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 120));
-  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  const events: string[] = [];
-  let told: number | null = null;
-  const waiting: Array<() => void> = [];
-  const slots = {
-    take: (): Promise<string> => {
-      events.push('take');
-      return Promise.resolve('B');
-    },
-    release: (lock: string): void => {
-      events.push(`release ${lock}`);
-    },
-  };
-  const raised = {
-    ceiling: 1,
-    told: (): Promise<number | null> => Promise.resolve(told),
-    untilTold: (_lane: number, signal: AbortSignal): Promise<void> =>
-      new Promise((resume, reject) => {
-        waiting.push(resume);
-        signal.addEventListener('abort', () => {
-          reject(new Error('the run is over'));
-        });
-      }),
-    past: (_above: number, signal: AbortSignal): Promise<number> =>
-      new Promise((_resolve, reject) => {
-        signal.addEventListener('abort', () => {
-          reject(new Error('the run is over'));
-        });
-      }),
-  };
-  const rig = reusingEngines((_plan, shares) => {
-    if (shares === 1) {
-      told = 0;
-    }
-    return delay(1);
-  });
-  const pending = runShares(slots, units, declared, 1, ['A'], {}, rig.run, undefined, undefined, raised);
-  assert.ok(await cameTrue(() => waiting.length === 1, 5000), 'the lane parks once told to stop');
-  assert.deepEqual(events, ['release A'], 'having given its slot back');
-  assert.equal(rig.shares.length, 1, 'after one share, not drawing a second for the engine it had');
-  told = 1;
-  for (const resume of waiting) {
-    resume();
-  }
-  const ran = await pending;
-  assert.equal(rig.engines(), 2, 'and a new engine starts when it is told to go on');
-  assert.equal(ran.length, 4, 'every share ran');
-  assert.deepEqual(events, ['release A', 'take', 'release B'], 'in a slot it took again');
 }
 
 /** An engine started with display flags ends after its windowed share, then a headless one starts in its lane. */
@@ -75312,396 +74745,6 @@ function testARunNotDealtInSharesStartsEveryEngineForItsOwnPart(): void {
   }
 }
 
-/** A run's lanes read the lanes file before each share and give a slot back when told fewer. */
-async function testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain(): Promise<void> {
-  const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-fall-'));
-  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-pool-'));
-  const holder = { pid: process.pid, started: await ownStart() };
-  const file = join(pool, 'lanes-1.json');
-  const say = (lanes: number, pid = process.pid): void => {
-    writeFileSync(file, JSON.stringify({ lanes, pid, started: holder.started, written: Date.now() }));
-  };
-  const locksHeld = (): number => readdirSync(machine).filter((name) => name.endsWith('.lock')).length;
-  const slots = new EngineSlots(machine, 4, holder);
-  const followed = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5);
-  const going = new Map<number, () => void>();
-  let started = 0;
-  const run = (_plan: EnginePlan, index: number): Promise<{ index: number }> => {
-    started += 1;
-    return new Promise((done) => {
-      going.set(index, () => {
-        going.delete(index);
-        done({ index });
-      });
-    });
-  };
-  const endAll = (): void => {
-    for (const end of going.values()) {
-      end();
-    }
-  };
-  const units = Array.from({ length: 30 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
-  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  try {
-    say(3);
-    const pending = runShares(slots, units, declared, 3, [], {}, run, undefined, undefined, followed);
-    assert.ok(
-      await cameTrue(() => started === 3 && locksHeld() === 3, 10_000),
-      'three lanes start on three slots',
-    );
-    say(2);
-    endAll();
-    assert.ok(
-      await cameTrue(() => started === 5 && locksHeld() === 2, 10_000),
-      `told two, the third lane gives its slot back: ${String(started)} started, ${String(locksHeld())} slots held`,
-    );
-    say(3);
-    endAll();
-    assert.ok(
-      await cameTrue(() => started === 8 && locksHeld() === 3, 10_000),
-      `told three again, it takes a slot and goes on: ${String(started)} started, ${String(locksHeld())} held`,
-    );
-    say(1, 2 ** 31 - 1);
-    endAll();
-    assert.ok(
-      await cameTrue(() => going.size === 0 || locksHeld() === 3, 10_000),
-      'a file whose writer has gone tells nothing, so all three lanes go on',
-    );
-    const over = { done: false };
-    void pending.then(() => {
-      over.done = true;
-    });
-    for (let round = 0; round < 2000 && !over.done; round += 1) {
-      endAll();
-      await delay(5);
-    }
-    const ran = await Promise.race([pending, delay(20_000).then(() => null)]);
-    assert.ok(ran !== null, 'the run ends once every share is handed out');
-    assert.deepEqual(
-      ran.map((one) => one.index),
-      Array.from({ length: started }, (_, at) => at),
-      'every engine ran once, in order',
-    );
-    assert.equal(locksHeld(), 0, 'and no slot is left held');
-  } finally {
-    endAll();
-    sweep(machine);
-    sweep(pool);
-  }
-}
-
-/**
- * A mark that cannot be taken, because another reader holds it or the take failed, hides nothing of
- * the number the file tells: the run still falls to it. It only stops the run rising above it.
- */
-async function testAMarkNotTakenStillLetsTheRunFallToTheLanesTold(): Promise<void> {
-  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-nomark-'));
-  const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-nomark-machine-'));
-  const holder = { pid: process.pid, started: await ownStart() };
-  const real = new EngineSlots(pool, 1, holder);
-  const tells = (lanes: number): string => {
-    const file = join(pool, `lanes-${String(lanes)}.json`);
-    writeFileSync(
-      file,
-      JSON.stringify({ lanes, pid: process.pid, started: holder.started, written: Date.now() }),
-    );
-    return file;
-  };
-  const refused = (failing: 'false' | 'throws'): Pick<EngineSlots, 'takeFile' | 'countIn' | 'holder'> => ({
-    holder,
-    countIn: (path, key) => real.countIn(path, key),
-    takeFile: () => (failing === 'false' ? Promise.resolve(false) : Promise.reject(new Error('busy'))),
-  });
-  try {
-    for (const failing of ['false', 'throws'] as const) {
-      const file = tells(1);
-      assert.equal(
-        await new FollowedLanes(refused(failing), file, 4, 5).told(),
-        1,
-        `the number is read when the mark take ${failing === 'false' ? 'is refused' : 'throws'}`,
-      );
-    }
-
-    const rising = new FollowedLanes(refused('false'), tells(3), 4, 5);
-    const stop = new AbortController();
-    const grown = await Promise.race([
-      rising.past(1, stop.signal).then(
-        () => 'rose',
-        () => 'aborted',
-      ),
-      delay(300).then(() => 'waits'),
-    ]);
-    stop.abort();
-    assert.equal(grown, 'waits', 'but it rises above the number only with the mark held');
-
-    let running = 0;
-    let most = 0;
-    let suitesRun = 0;
-    const units = Array.from({ length: 12 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
-    const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-    const ran = await runShares(
-      new EngineSlots(machine, 4, holder),
-      units,
-      declared,
-      3,
-      [],
-      {},
-      async (plan, index) => {
-        running += 1;
-        most = Math.max(most, running);
-        suitesRun += plan.suites.length;
-        await delay(150);
-        running -= 1;
-        return { index };
-      },
-      undefined,
-      undefined,
-      new FollowedLanes(refused('false'), tells(1), 4, 5),
-    );
-    assert.ok(ran.length > 1, 'the run deals more than one share');
-    assert.equal(suitesRun, 12, 'and every suite once');
-    assert.equal(most, 1, 'and runs one engine at a time under the one lane told');
-  } finally {
-    sweep(pool);
-    sweep(machine);
-  }
-}
-
-/**
- * A lane parked by a fall ends when the run fails, with shares still left. It neither loops on the
- * lanes file nor takes the follows mark back once the run has ended its follower.
- */
-async function testAParkedLaneEndsWhenTheRunFails(): Promise<void> {
-  const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-fail-'));
-  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-fail-pool-'));
-  const holder = { pid: process.pid, started: await ownStart() };
-  const file = join(pool, 'lanes-1.json');
-  writeFileSync(
-    file,
-    JSON.stringify({ lanes: 1, pid: process.pid, started: holder.started, written: Date.now() }),
-  );
-  const slots = new EngineSlots(machine, 4, holder);
-  const followed = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5);
-  let reads = 0;
-  const told = followed.told.bind(followed);
-  followed.told = async (): Promise<number | null> => {
-    reads += 1;
-    return await told();
-  };
-  const units = Array.from({ length: 12 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
-  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  const run = async (_plan: EnginePlan, index: number): Promise<{ index: number }> => {
-    await delay(300);
-    throw new Error(`engine ${String(index)} could not be started`);
-  };
-  try {
-    const failed = await runShares(
-      slots,
-      units,
-      declared,
-      3,
-      [],
-      {},
-      run,
-      undefined,
-      undefined,
-      followed,
-    ).then(
-      () => null,
-      (error: unknown) => (error instanceof Error ? error.message : String(error)),
-    );
-    assert.match(failed ?? '', /could not be started/, 'the engine failure ends the run');
-    followed.end();
-    const after = reads;
-    const began = Date.now();
-    await delay(400);
-    assert.ok(Date.now() - began < 800, 'and the process is not kept busy by a parked lane');
-    assert.ok(
-      reads - after <= 2,
-      `the lanes file is not read again once the run has ended: ${String(reads - after)}`,
-    );
-    assert.equal(existsSync(`${file}${FOLLOWS_SUFFIX}`), false, 'and no follows mark is written after it');
-  } finally {
-    followed.end();
-    sweep(machine);
-    sweep(pool);
-  }
-}
-
-/**
- * A run told one lane runs one engine at a time, and the lanes parked behind it end with the run once
- * its last share is out.
- */
-async function testAFallWhileEveryShareIsOutEndsTheParkedLanes(): Promise<void> {
-  const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-last-'));
-  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-last-pool-'));
-  const holder = { pid: process.pid, started: await ownStart() };
-  const file = join(pool, 'lanes-1.json');
-  writeFileSync(
-    file,
-    JSON.stringify({ lanes: 1, pid: process.pid, started: holder.started, written: Date.now() }),
-  );
-  const slots = new EngineSlots(machine, 4, holder);
-  const followed = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5);
-  const ends: Array<() => void> = [];
-  let suitesRun = 0;
-  let running = 0;
-  let mostRunning = 0;
-  let lastStart = Date.now();
-  const run = (plan: EnginePlan, index: number): Promise<{ index: number }> =>
-    new Promise((done) => {
-      suitesRun += plan.suites.length;
-      running += 1;
-      lastStart = Date.now();
-      mostRunning = Math.max(mostRunning, running);
-      ends.push(() => {
-        running -= 1;
-        done({ index });
-      });
-    });
-  const units = Array.from({ length: 12 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
-  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  try {
-    const pending = runShares(slots, units, declared, 3, [], {}, run, undefined, undefined, followed);
-    // Engines end once no other has started for a while, so every lane that is to run has begun.
-    for (let round = 0; round < 1000; round += 1) {
-      if (Date.now() - lastStart >= 600) {
-        for (const end of ends.splice(0)) {
-          end();
-        }
-      }
-      if (await Promise.race([pending.then(() => true), delay(20).then(() => false)])) {
-        break;
-      }
-    }
-    const ran = await Promise.race([pending, delay(10_000).then(() => null)]);
-    assert.ok(ran !== null, 'a lane told to stop ends with the run, and is not left waiting');
-    assert.equal(
-      suitesRun,
-      12,
-      `and the one lane told ran every suite once, in ${String(ran.length)} engines`,
-    );
-    assert.equal(mostRunning, 1, 'with one engine at a time, since the other two lanes were told to stop');
-  } finally {
-    sweep(machine);
-    sweep(pool);
-  }
-}
-
-/** A follower that tells [param told] lanes and waits until the run has handed out every share. */
-function toldLanes(
-  ceiling: number,
-  told: () => number | Promise<number>,
-): NonNullable<Parameters<typeof runShares>[9]> {
-  return {
-    ceiling,
-    past: () => Promise.resolve(ceiling),
-    told: async () => await told(),
-    untilTold: (_lane, signal) =>
-      new Promise<void>((over) => {
-        if (signal.aborted) {
-          over();
-          return;
-        }
-        signal.addEventListener(
-          'abort',
-          () => {
-            over();
-          },
-          { once: true },
-        );
-      }),
-  };
-}
-
-/**
- * A two-lane run whose second lane is held in a wait for a slot or for memory while the file falls to
- * one lane. Answers the engines started and the slots given back to the machine once the wait ended.
- */
-async function secondLaneHeldInAWhileTheFileFalls(
-  wait: 'slot' | 'memory',
-): Promise<{ started: number; released: string[] }> {
-  const released: string[] = [];
-  const takes: Array<(lock: string) => void> = [];
-  const slots = {
-    take: () =>
-      new Promise<string>((taken) => {
-        takes.push(taken);
-      }),
-    release: (lock: string) => {
-      released.push(lock);
-    },
-  };
-  let told = 2;
-  let free = 0;
-  let started = 0;
-  let finishing = false;
-  const ends: Array<() => void> = [];
-  const run = (_plan: EnginePlan, index: number): Promise<{ index: number }> =>
-    new Promise((done) => {
-      started += 1;
-      if (finishing) {
-        done({ index });
-      } else {
-        ends.push(() => {
-          done({ index });
-        });
-      }
-    });
-  const memory = new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(free), 10);
-  const units = Array.from({ length: 8 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
-  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  const pending = runShares(
-    slots,
-    units,
-    declared,
-    2,
-    wait === 'slot' ? ['T0'] : ['T0', 'T1'],
-    {},
-    run,
-    undefined,
-    memory,
-    toldLanes(2, () => told),
-  );
-  try {
-    if (wait === 'slot') {
-      assert.ok(await cameTrue(() => takes.length === 1, 5000), 'the second lane waits for a slot');
-    } else {
-      await delay(150);
-    }
-    assert.equal(started, 1, 'the first lane is running its share');
-    told = 1;
-    if (wait === 'memory') {
-      free = 2 ** 40;
-    }
-    takes[0]?.('N1');
-    await delay(200);
-    const snapshot = { started, released: [...released] };
-    finishing = true;
-    for (const end of ends.splice(0)) {
-      end();
-    }
-    const over = await Promise.race([pending, delay(10_000).then(() => null)]);
-    assert.ok(over !== null, `the run ends (${wait})`);
-    return snapshot;
-  } finally {
-    finishing = true;
-    for (const end of ends.splice(0)) {
-      end();
-    }
-  }
-}
-
-/** A lane reads the lanes file after the waits that can outlast a fall, and draws no share past it. */
-async function testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited(): Promise<void> {
-  const afterTheSlot = await secondLaneHeldInAWhileTheFileFalls('slot');
-  assert.equal(afterTheSlot.started, 1, 'a lane whose slot came after the fall starts no engine');
-  assert.deepEqual(afterTheSlot.released, ['N1'], 'and gives the slot it was handed back to the machine');
-  const afterMemory = await secondLaneHeldInAWhileTheFileFalls('memory');
-  assert.equal(afterMemory.started, 1, 'a lane that memory admitted after the fall starts no engine');
-  assert.deepEqual(afterMemory.released, ['T1'], 'and gives its slot back to the machine');
-}
-
 /** A pool of fake engine slots: a take waits while none is free, and a release serves the oldest wait. */
 function fakeSlotPool(): {
   take: () => Promise<string>;
@@ -75820,69 +74863,6 @@ function memoryKept(): number {
     }
   }
   return high;
-}
-
-/**
- * A lane told to stop while it waits for a slot holds no memory admission, so once memory has room
- * for one engine the lane still running starts its next one.
- */
-async function testALaneStoppedInItsSlotWaitHoldsNoMemory(): Promise<void> {
-  const pool = fakeSlotPool();
-  let told = 2;
-  let free = 2 ** 40;
-  let started = 0;
-  let finishing = false;
-  const ends: Array<() => void> = [];
-  const run = (_plan: EnginePlan, index: number): Promise<{ index: number }> =>
-    new Promise((done) => {
-      started += 1;
-      if (finishing) {
-        done({ index });
-      } else {
-        ends.push(() => {
-          done({ index });
-        });
-      }
-    });
-  const gate = new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(free), 10);
-  const units = Array.from({ length: 8 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
-  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  const pending = runShares(
-    pool,
-    units,
-    declared,
-    2,
-    ['T0'],
-    {},
-    run,
-    undefined,
-    gate,
-    toldLanes(2, () => told),
-  );
-  try {
-    assert.ok(await cameTrue(() => pool.waiters.length === 1, 5000), 'the second lane waits for a slot');
-    assert.equal(started, 1, 'the first lane runs its share');
-    told = 1;
-    pool.release('N1');
-    assert.ok(
-      await cameTrue(() => pool.free.includes('N1'), 5000),
-      'the stopped lane gives the slot it was handed back',
-    );
-    free = memoryKept() + 1.2 * MEMORY_PER_ENGINE;
-    ends.shift()?.();
-    assert.ok(
-      await cameTrue(() => started === 2, 5000),
-      'with room for one engine, the running lane starts its next engine',
-    );
-  } finally {
-    free = 2 ** 40;
-    finishing = true;
-    for (const end of ends.splice(0)) {
-      end();
-    }
-  }
-  const over = await Promise.race([pending, delay(10_000).then(() => null)]);
-  assert.ok(over !== null, 'the run ends');
 }
 
 /**
@@ -76074,2496 +75054,6 @@ async function testTwoRunsSharingSlotsStartPastTheRoomOnlyWithNothingGoing(): Pr
   }
 }
 
-/** A lane told to stop gives its slot to the machine, and a compile check still waiting takes its own. */
-async function testAParkedLanesSlotGoesToTheMachineNotTheCheck(): Promise<void> {
-  const released: string[] = [];
-  const slots = {
-    take: () => Promise.resolve('N'),
-    release: (lock: string) => {
-      released.push(lock);
-    },
-  };
-  const handed = new HandedSlot(true);
-  let reads = 0;
-  const units = Array.from({ length: 4 }, (_, at) => SHARE_UNIT(`s${String(at)}`, 30));
-  const declared = new Map(units.map((unit) => [unit.suite, ['test_one']]));
-  // The first lane reads the file a moment after the second, which is told it is past the number.
-  const raised = toldLanes(2, async () => {
-    reads += 1;
-    if (reads === 1) {
-      await delay(100);
-    }
-    return 1;
-  });
-  const pending = runShares(
-    slots,
-    units,
-    declared,
-    2,
-    ['T0', 'T1'],
-    {},
-    (_plan, index) => Promise.resolve({ index }),
-    handed,
-    undefined,
-    raised,
-  );
-  try {
-    const given = await Promise.race([handed.lock, delay(2000).then(() => null)]);
-    assert.equal(given, 'T0', 'the check runs in the slot of the lane that went on, not the parked one');
-    assert.deepEqual(released, ['T1'], 'the parked lane gave its slot to the machine');
-  } finally {
-    handed.ended();
-  }
-  assert.ok((await Promise.race([pending, delay(10_000).then(() => null)])) !== null, 'the run ends');
-}
-
-/** A run begun on every lane it may have still follows the file, for a fall, and is handed shares. */
-async function testARunBegunAtItsCeilingStillFollowsTheLanesFile(): Promise<void> {
-  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-ceiling-'));
-  try {
-    const holder = { pid: process.pid, started: await ownStart() };
-    const file = join(pool, 'lanes-1.json');
-    writeFileSync(
-      file,
-      JSON.stringify({ lanes: 2, pid: process.pid, started: holder.started, written: Date.now() }),
-    );
-    const flat = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5, false);
-    assert.equal(await flat.told(), 2, 'a run that cannot rise still reads the number, for a fall');
-    assert.equal(existsSync(`${file}.follows`), false, 'and holds no mark, since it has no lane to add');
-    const rising = new FollowedLanes(new EngineSlots(pool, 1, holder), file, 4, 5);
-    assert.equal(await rising.told(), 2, 'a run that can rise reads it too');
-    assert.equal(existsSync(`${file}.follows`), true, 'and holds the mark that tells the writer it may grow');
-    rising.end();
-  } finally {
-    sweep(pool);
-  }
-  assert.deepEqual(
-    followedAt('lanes.json', 4, 4),
-    { file: 'lanes.json', ceiling: 4 },
-    'four of four follows',
-  );
-  assert.deepEqual(
-    followedAt('lanes.json', 6, 3),
-    { file: 'lanes.json', ceiling: 6 },
-    'three of six follows',
-  );
-  assert.deepEqual(
-    followedAt('lanes.json', 2, 3),
-    { file: 'lanes.json', ceiling: 3 },
-    'more lanes than the ceiling follows with the lanes it has',
-  );
-  assert.equal(followedAt('lanes.json', 1, 1), null, 'one lane has no lane to give back');
-}
-
-/**
- * How many slots a machine counts: half the processors, held to the memory above 16 GiB at 1.5 GiB
- * an engine, and a variable replaces either.
- */
-function testTheSlotCountIsHeldToTheMemoryThereIs(): void {
-  const gib = 1024 ** 3;
-  const count = (processors: number, memory: number, env: NodeJS.ProcessEnv = {}): number =>
-    machineSlots(
-      { directory: null, count: null },
-      { env, platform: 'linux', processors, memory, home: join(sep, 'home'), cwd: join(sep, 'work') },
-    ).count;
-  assert.equal(count(32, 12 * gib), 1, 'memory below 16 GiB still counts one slot');
-  assert.equal(count(32, 16 * gib), 1, 'and exactly 16 GiB');
-  assert.equal(count(32, 24 * gib), 5, 'memory caps below half the processors: 8 GiB is five engines');
-  assert.equal(count(8, 64 * gib), 4, 'half the processors caps below the memory');
-  assert.equal(count(1, 64 * gib), 1, 'one processor is one slot');
-  assert.equal(count(32, 12 * gib, { GODOT_ENGINE_SLOT_COUNT: '7' }), 7, 'the variable overrides the memory');
-  assert.equal(count(2, 64 * gib, { GODOT_ENGINE_SLOT_COUNT: '9' }), 9, 'and the processors');
-}
-
-/**
- * A waiting mark naming `wants` above 1 has that many free slots left to it for its first drain, one
- * after, and a `wants` that is no whole number above 1 counts one.
- */
-async function testAMarkWantingSeveralSlotsHasThemLeftToItForItsDrain(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-wants-'));
-  const marks = join(directory, WAITING_FOLDER);
-  mkdirSync(marks, { recursive: true });
-  try {
-    const me = { pid: process.pid, started: await ownStart() };
-    const take = async (wants: unknown, waitedMs: number): Promise<[string | null, number[]]> => {
-      writeFileSync(
-        join(marks, '1-1.json'),
-        JSON.stringify({ ...me, taker: 'other', since: (Date.now() - waitedMs) / 1000, wants }),
-      );
-      const newcomer = new EngineSlots(directory, 4, me, undefined, () => 'other');
-      try {
-        const lock = await newcomer.takeFree();
-        return [lock === null ? null : basename(lock), [...(newcomer.drawn.left ?? [])]];
-      } finally {
-        newcomer.releaseAll();
-      }
-    };
-    assert.deepEqual(await take(3, 60_000), ['0.lock', [1, 2, 3]], 'three left to a mark wanting three');
-    assert.deepEqual(await take(3, 299_000), ['0.lock', [1, 2, 3]], 'to the end of its drain');
-    const past = await take(3, 301_000);
-    assert.deepEqual([past[0] !== null, past[1].length], [true, 1], 'one once the drain is past');
-    assert.deepEqual(await take(4, 10_000), [null, [0, 1, 2, 3]], 'and all four to a mark wanting four');
-    for (const odd of [undefined, 1, 0, -2, 1.5, '3', null, true]) {
-      const one = await take(odd, 60_000);
-      assert.deepEqual([one[0] !== null, one[1].length], [true, 1], `${JSON.stringify(odd)} counts one`);
-    }
-    assert.equal(slotWaiters(directory)[0]?.wants, 1, 'a mark read with no usable wants says one');
-  } finally {
-    sweep(directory);
-  }
-}
-
-/**
- * A program inside a timing or a heavy job runs on the slot the job lends, one engine at a time,
- * and takes none beside it. Once the lender has gone it takes slots as any program does.
- */
-async function testAProgramInsideAJobTakesNoSlotBesideTheOneItIsLent(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-job-'));
-  const lender = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
-  const had = process.env['GODOT_ENGINE_TIMED'];
-  try {
-    const pid = lender.pid;
-    assert.ok(typeof pid === 'number', 'the lender needs a live process');
-    const started = (await startTimesOf([pid])).get(pid);
-    assert.ok(started !== undefined, 'and a start');
-    const lent = join(directory, '0.lock');
-    writeFileSync(lent, JSON.stringify({ pid, started }));
-    process.env['GODOT_ENGINE_TIMED'] = lent;
-    const me = { pid: process.pid, started: await ownStart() };
-    const slots = new EngineSlots(directory, 3, me);
-    assert.equal(await slots.takeFree(), lent, 'the first engine runs on the lent slot');
-    assert.equal(await slots.takeFree(), null, 'the second waits rather than take another');
-    assert.equal(readdirSync(directory).filter((name) => name.endsWith('.lock')).length, 1, 'none was made');
-    slots.release(lent);
-    assert.equal(await slots.takeFree(), lent, 'and the lent slot serves the next once it is free');
-    slots.release(lent);
-    const ended = new Promise((over) => lender.once('exit', over));
-    lender.kill();
-    await ended;
-    const after = await slots.takeFree();
-    assert.ok(
-      after !== null && after !== lent,
-      `with the job gone it takes a slot of its own: ${String(after)}`,
-    );
-    slots.releaseAll();
-  } finally {
-    lender.kill();
-    if (had === undefined) {
-      delete process.env['GODOT_ENGINE_TIMED'];
-    } else {
-      process.env['GODOT_ENGINE_TIMED'] = had;
-    }
-    sweep(directory);
-  }
-}
-
-/**
- * A taker waiting for several slots at once keeps the slots left to it while it looks, which it says
- * by touching the note beside its mark, and a newcomer in a take loop of its own, looking again
- * and again from one set of slots, leaves them to it for its drain. One that stopped looking
- * loses them after five seconds.
- */
-async function testAWaitForSeveralSlotsKeepsThemWhileItKeepsLooking(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-looks-'));
-  const marks = join(directory, WAITING_FOLDER);
-  mkdirSync(marks, { recursive: true });
-  try {
-    const me = { pid: process.pid, started: await ownStart() };
-    const mark = join(marks, '1-1.json');
-    writeFileSync(
-      mark,
-      JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 10_000) / 1000, wants: 3 }),
-    );
-    const looked = (): void => {
-      const note = join(marks, '1-1.seen');
-      closeSync(openSync(note, 'a'));
-      const now = new Date();
-      utimesSync(note, now, now);
-    };
-    const newcomer = new EngineSlots(directory, 4, me, undefined, () => 'other');
-    const line = new SlotLine('other');
-    const look = async (): Promise<[string | null, number[]]> => {
-      const lock = await newcomer.takeFree(false, line);
-      const left = [...(newcomer.drawn.left ?? [])];
-      if (lock !== null) {
-        newcomer.release(lock);
-      }
-      return [lock === null ? null : basename(lock), left];
-    };
-    for (let second = 0; second < 8; second += 1) {
-      looked();
-      assert.deepEqual(
-        await look(),
-        ['0.lock', [1, 2, 3]],
-        `second ${String(second)}: the three slots stay left to the waiter while it looks`,
-      );
-      await delay(1000);
-    }
-    let lost = false;
-    for (let second = 0; second < 8 && !lost; second += 1) {
-      const [lock, left] = await look();
-      lost = left.length === 0;
-      assert.ok(lock !== null, 'the newcomer takes a slot');
-      await delay(1000);
-    }
-    assert.ok(lost, 'a waiter that stopped looking loses the slots five seconds on');
-  } finally {
-    sweep(directory);
-  }
-}
-
-/**
- * A take inside a job whose lent slot is in use waits for that slot alone: it puts down no mark in
- * the machine's waiting folder, so another program's free slot is not left idle for it.
- */
-async function testATakeInsideAJobWaitsOnTheLentSlotAndMarksNothing(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-lentwait-'));
-  const lender = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
-  const had = process.env['GODOT_ENGINE_TIMED'];
-  const waiting = new AbortController();
-  try {
-    const pid = lender.pid;
-    assert.ok(typeof pid === 'number', 'the lender needs a live process');
-    const started = (await startTimesOf([pid])).get(pid);
-    assert.ok(started !== undefined, 'and a start');
-    const lent = join(directory, '0.lock');
-    writeFileSync(lent, JSON.stringify({ pid, started }));
-    process.env['GODOT_ENGINE_TIMED'] = lent;
-    const me = { pid: process.pid, started: await ownStart() };
-    const inside = new EngineSlots(directory, 2, me);
-    assert.equal(await inside.take(), lent, 'the first take runs on the lent slot');
-    let blocked = 0;
-    const second = inside.take(waiting.signal, undefined, () => {
-      blocked += 1;
-    });
-    second.catch(() => undefined);
-    assert.ok(await cameTrue(() => blocked === 1, 5000), 'the second take waits, and says so once');
-    await delay(1500);
-    assert.equal(blocked, 1, 'once');
-    const marked = existsSync(join(directory, WAITING_FOLDER))
-      ? readdirSync(join(directory, WAITING_FOLDER))
-      : [];
-    assert.deepEqual(marked, [], 'and it marks no wait in the machine');
-    delete process.env['GODOT_ENGINE_TIMED'];
-    const outsider = new EngineSlots(directory, 2, me, undefined, () => 'other');
-    const free = await outsider.takeFree();
-    process.env['GODOT_ENGINE_TIMED'] = lent;
-    assert.equal(
-      free === null ? null : basename(free),
-      '1.lock',
-      'another program takes the free slot at once',
-    );
-    outsider.releaseAll();
-    inside.release(lent);
-    assert.equal(await second, lent, 'and the waiting take gets the lent slot once it is free');
-    inside.releaseAll();
-  } finally {
-    waiting.abort();
-    lender.kill();
-    if (had === undefined) {
-      delete process.env['GODOT_ENGINE_TIMED'];
-    } else {
-      process.env['GODOT_ENGINE_TIMED'] = had;
-    }
-    sweep(directory);
-  }
-}
-
-async function testAnEngineOnASlotLendsItToWhatItStarts(): Promise<void> {
-  const tree: ProcessTree = new Map([
-    [10, { parent: 9, command: '"C:\\tools\\Bun.exe" x gdharness test' }],
-    [9, { parent: 8, command: 'bun run test' }],
-    [8, { parent: 5, command: 'C:\\Godot\\Godot.exe --path C:\\game' }],
-    [7, { parent: 8, command: 'C:\\Godot\\Godot.exe --path C:\\game res://main.tscn' }],
-    [5, { parent: 1, command: 'claude' }],
-  ]);
-  const held = (pid: number): { pid: number } => ({ pid });
-  assert.equal(inheritsSlot(tree, 10, held(8), 'bun.exe'), true, "past its own launcher, the engine's slot");
-  assert.equal(inheritsSlot(tree, 9, held(8), 'bun'), true, 'and its launcher too');
-  assert.equal(inheritsSlot(tree, 7, held(8), 'Godot.exe'), false, 'not a game the editor plays');
-  assert.equal(inheritsSlot(tree, 10, held(5), 'bun.exe'), false, 'nor a holder further up');
-  assert.equal(inheritsSlot(tree, 5, held(8), 'claude'), false, 'nor one not above it');
-
-  // A keeper holds the slot for its game, through a desktop helper, and names the game beside it.
-  const kept: ProcessTree = new Map([
-    [10, { parent: 9, command: '"C:\\tools\\Bun.exe" x gdharness test', startedAt: 9_000 }],
-    [9, { parent: 8, command: 'bun run test', startedAt: 8_000 }],
-    [8, { parent: 6, command: 'C:\\Godot\\Godot.exe --path C:\\game', startedAt: 5_000 }],
-    [7, { parent: 8, command: 'C:\\Godot\\Godot.exe --path C:\\game res://main.tscn', startedAt: 6_000 }],
-    [6, { parent: 4, command: 'powershell.exe -File helper.ps1', startedAt: 4_500 }],
-    [4, { parent: 1, command: 'node keeper.js keep', startedAt: 4_000 }],
-  ]);
-  const keeper = (started: number): SlotHolder => ({ pid: 4, started: 4_000, engine: { pid: 8, started } });
-  assert.equal(inheritsSlot(kept, 10, keeper(5_000), 'bun.exe'), true, 'the engine the lock names');
-  assert.equal(inheritsSlot(kept, 10, keeper(6_900), 'bun.exe'), true, 'with a start inside the tolerance');
-  assert.equal(inheritsSlot(kept, 10, keeper(65_000), 'bun.exe'), false, 'not a later process on its pid');
-  assert.equal(inheritsSlot(kept, 7, keeper(5_000), 'Godot.exe'), false, 'nor a game the engine plays');
-  assert.equal(inheritsSlot(kept, 10, held(4), 'bun.exe'), false, 'nor the keeper with no engine named');
-  const undated: ProcessTree = new Map(
-    [...kept].map(([pid, { parent, command }]) => [pid, { parent, command }]),
-  );
-  assert.equal(
-    inheritsSlot(undated, 10, keeper(5_000), 'bun.exe'),
-    false,
-    'an engine with no start lends nothing',
-  );
-  assert.equal(inheritsSlot(undated, 10, keeper(5_000), 'bun.exe', 5_000), true, 'and one read apart does');
-
-  // The wiring, judged by the rule above: a lock naming the nearest process above this one on
-  // another executable, read from the variable, lent to one engine and never given back.
-  const listed = await processTree();
-  assert.ok(listed !== undefined, whyTheProcessTreeFailed() ?? 'the process table');
-  const above = ancestorsIn(listed, process.pid, 1).find((pid) =>
-    inheritsSlot(listed, process.pid, held(pid), basename(process.execPath)),
-  );
-  assert.ok(above !== undefined, 'a process above this one on another executable');
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-slots-'));
-  const before = process.env['GODOT_ENGINE_HELD'];
-  try {
-    const lent = join(directory, '0.lock');
-    const aboveStarted = (await startTimesOf([above])).get(above);
-    writeFileSync(lent, JSON.stringify({ pid: above, started: aboveStarted, by: 'an engine' }));
-    process.env['GODOT_ENGINE_HELD'] = lent;
-    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    const slots = new EngineSlots(directory, 2, holder, undefined, () => 'other');
-    assert.equal(await slots.takeFree(), lent, 'the slot it was started on');
-    assert.equal(
-      await slots.takeFree(),
-      join(directory, '1.lock'),
-      'for one engine, the next taking a slot of its own',
-    );
-    slots.release(lent);
-    assert.equal(
-      holderOf(readFileSync(lent, 'utf8'))?.pid,
-      above,
-      'and given back to nobody, being not its own',
-    );
-    assert.equal(await slots.takeFree(), lent, 'and lent again once that engine is done');
-    slots.releaseAll();
-    assert.equal(existsSync(join(directory, '1.lock')), false, 'its own given back as it ends');
-    assert.equal(holderOf(readFileSync(lent, 'utf8'))?.pid, above, 'the lent one left with its holder');
-
-    // The closest lock that is not the slot it runs on: a live holder that is not above it.
-    const stranger = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], {
-      stdio: 'ignore',
-    });
-    try {
-      const strangerPid = stranger.pid ?? 0;
-      const strangers = join(directory, '1.lock');
-      writeFileSync(
-        strangers,
-        JSON.stringify({ pid: strangerPid, started: (await startTimesOf([strangerPid])).get(strangerPid) }),
-      );
-      process.env['GODOT_ENGINE_HELD'] = strangers;
-      const other = new EngineSlots(directory, 2, holder, undefined, () => 'other');
-      assert.equal(await other.takeFree(), null, "a live stranger's slot is not lent, and the other is held");
-
-      // The same holder naming the process above this one as the engine it holds the slot for, as
-      // a keeper names its game: lent, and left as the holder wrote it.
-      assert.equal(
-        await nameSlotEngine(strangers, strangerPid, { pid: above, started: aboveStarted ?? 0 }),
-        true,
-        'named by its holder',
-      );
-      assert.equal(
-        await nameSlotEngine(strangers, process.pid, { pid: 1, started: 0 }),
-        false,
-        'and by nobody else',
-      );
-      const engineOf = new EngineSlots(directory, 2, holder, undefined, () => 'other');
-      assert.equal(await engineOf.takeFree(), strangers, 'the slot of the engine the lock names');
-      engineOf.releaseAll();
-      assert.deepEqual(
-        holderOf(readFileSync(strangers, 'utf8')),
-        {
-          pid: strangerPid,
-          started: (await startTimesOf([strangerPid])).get(strangerPid),
-          engine: { pid: above, started: aboveStarted },
-        },
-        'kept by its holder, naming its engine',
-      );
-
-      // An engine a desktop helper starts is named from the pid file the helper writes, once written.
-      const own = join(directory, 'own.lock');
-      writeFileSync(own, JSON.stringify(holder));
-      const pidFile = join(directory, 'pid');
-      let settle = (): void => undefined;
-      const settled = new Promise<void>((resolveSettled) => {
-        settle = resolveSettled;
-      });
-      const naming = slotEngineNamed(own, { pid: null, settled }, pidFile);
-      // Settled whatever is asserted, so a lookup that never names anything still ends.
-      try {
-        await delay(300);
-        assert.equal(holderOf(readFileSync(own, 'utf8'))?.engine, undefined, 'nothing named before the pid');
-        writeFileSync(pidFile, `${String(strangerPid)}\n`);
-        await Promise.race([naming, delay(10_000)]);
-        assert.deepEqual(
-          holderOf(readFileSync(own, 'utf8'))?.engine,
-          { pid: strangerPid, started: (await startTimesOf([strangerPid])).get(strangerPid) },
-          'the engine the helper started',
-        );
-      } finally {
-        settle();
-      }
-      rmSync(pidFile);
-      const unnamed = join(directory, 'unnamed.lock');
-      writeFileSync(unnamed, JSON.stringify(holder));
-      await slotEngineNamed(unnamed, { pid: null, settled: Promise.resolve() }, pidFile);
-      assert.equal(
-        holderOf(readFileSync(unnamed, 'utf8'))?.engine,
-        undefined,
-        'and none for a run that ended first',
-      );
-    } finally {
-      stranger.kill();
-    }
-  } finally {
-    if (before === undefined) {
-      delete process.env['GODOT_ENGINE_HELD'];
-    } else {
-      process.env['GODOT_ENGINE_HELD'] = before;
-    }
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-async function testAStarvedMeasurementHoldsSideEngines(): Promise<void> {
-  const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-  const claimer = process.ppid;
-  const read = (await startTimesOf([claimer])).get(claimer);
-  assert.ok(read !== undefined, 'the fixture needs the start of a live process that is not this one');
-  // The queue writes the start in whole milliseconds.
-  const claimerStarted = Math.round(read);
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-starved-'));
-  const claimFile = join(directory, STARVED_FILE);
-  const claim = (pid: number, started: number, extra: object = {}): void => {
-    writeFileSync(claimFile, JSON.stringify({ pid, started, ...extra }));
-  };
-  const before = process.env['GODOT_ENGINE_STARVING'];
-  delete process.env['GODOT_ENGINE_STARVING'];
-  try {
-    claim(claimer, claimerStarted, { what: 'the bench of /p', starved: 7200 });
-    const outside = new EngineSlots(directory, 2, holder, undefined, () => 'other');
-    assert.equal(await outside.takeFree(), null, 'side work starts no engine while a live claim stands');
-    assert.equal(await outside.takeFree(true), null, 'nor does a game editor_run starts');
-    assert.equal(
-      slotWaitSaid(3000, 2, directory, outside.holders(), outside.drawn),
-      'Waiting 3 s so far for an engine: held for the bench of /p, a measurement starved 2 h. The engine starts once that measurement has run.',
-    );
-    assert.equal(
-      slotWaitedSaid(5000, 2, directory, outside.holders(), outside.drawn),
-      'This call waited 5 s for an engine slot in all. When it first waited, it was held for the bench of /p, a measurement starved 2 h.',
-    );
-    for (const taker of ['gate', 'tier', 'timing'] as const) {
-      const slots = new EngineSlots(directory, 2, holder, undefined, () => taker);
-      const lock = await slots.takeFree();
-      assert.ok(lock !== null, `a ${taker} taker is not held by the claim`);
-      slots.release(lock);
-    }
-
-    process.env['GODOT_ENGINE_STARVING'] = `${String(claimer)}:${String(claimerStarted)}`;
-    const inherited = await outside.takeFree();
-    assert.ok(inherited !== null, "a program the claimer started takes a slot under the claimer's claim");
-    outside.release(inherited);
-    process.env['GODOT_ENGINE_STARVING'] = `${String(claimer)}:${String(claimerStarted + 60_000)}`;
-    assert.equal(await outside.takeFree(), null, 'a token naming another start of that pid is not its claim');
-    delete process.env['GODOT_ENGINE_STARVING'];
-
-    claim(process.pid, holder.started, { what: 'this measurement', starved: 7200 });
-    const own = await outside.takeFree();
-    assert.ok(own !== null, "the claimer's own engines take slots");
-    outside.release(own);
-
-    claim(claimer, claimerStarted);
-    assert.equal(await outside.takeFree(), null, 'a claim without its details still holds');
-    assert.equal(outside.drawn.heldFor, 'held for a measurement, a measurement starved 0 h');
-    assert.equal(
-      starvedSaid({ pid: 1, started: 1, what: 'the bench of /p', starvedSeconds: 7500 }),
-      'held for the bench of /p, a measurement starved 2.08333 h',
-      'the hours as the queue prints them',
-    );
-    assert.equal(claimIsOurs({ pid: 1, started: 2, what: '', starvedSeconds: 0 }, {}, 1), true);
-    assert.equal(
-      claimIsOurs({ pid: 1, started: 2, what: '', starvedSeconds: 0 }, { GODOT_ENGINE_STARVING: '1:2' }, 3),
-      true,
-    );
-    assert.equal(
-      claimIsOurs({ pid: 1, started: 2, what: '', starvedSeconds: 0 }, { GODOT_ENGINE_STARVING: '1:3' }, 3),
-      false,
-    );
-
-    const ended: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['--eval', ''], {
-      encoding: 'utf8',
-    });
-    assert.ok(ended.pid > 0, 'the fixture needs a process that has gone');
-    claim(ended.pid, Date.now(), { what: 'a gone bench', starved: 7200 });
-    const freed = await outside.takeFree();
-    assert.ok(freed !== null, 'a claim whose claimer has gone holds nothing');
-    assert.equal(existsSync(claimFile), false, 'and is removed');
-    outside.release(freed);
-  } finally {
-    if (before === undefined) {
-      delete process.env['GODOT_ENGINE_STARVING'];
-    } else {
-      process.env['GODOT_ENGINE_STARVING'] = before;
-    }
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A one-off held back by a starved measurement says nothing of looking, so the takers behind it are
- * not kept from a free slot by it. The same look with the claim gone says it looks.
- */
-async function testATakerHeldBackByAClaimDoesNotSayItLooks(): Promise<void> {
-  const claimer = process.ppid;
-  const read = (await startTimesOf([claimer])).get(claimer);
-  assert.ok(read !== undefined, 'the fixture needs the start of a live process that is not this one');
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-look-'));
-  const claimFile = join(directory, STARVED_FILE);
-  const before = process.env['GODOT_ENGINE_STARVING'];
-  delete process.env['GODOT_ENGINE_STARVING'];
-  try {
-    mkdirSync(join(directory, WAITING_FOLDER), { recursive: true });
-    writeFileSync(
-      claimFile,
-      JSON.stringify({ pid: claimer, started: Math.round(read), what: 'the bench of /p', starved: 7200 }),
-    );
-    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    const outside = new EngineSlots(directory, 2, holder, undefined, () => 'other');
-    const line = new SlotLine('other');
-    line.mark = 'held-1.json';
-    const note = join(directory, WAITING_FOLDER, 'held-1.seen');
-    assert.equal(await outside.takeFree(false, line), null, 'the claim holds the one-off');
-    assert.equal(existsSync(note), false, 'and a taker it holds back does not say it looks');
-    rmSync(claimFile);
-    const lock = await outside.takeFree(false, line);
-    assert.ok(lock !== null, 'with the claim gone the same look takes a slot');
-    assert.equal(existsSync(note), true, 'and says it looks');
-    outside.release(lock);
-  } finally {
-    if (before === undefined) {
-      delete process.env['GODOT_ENGINE_STARVING'];
-    } else {
-      process.env['GODOT_ENGINE_STARVING'] = before;
-    }
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A game held back by the games limit says nothing of looking either, and says it once the limit
- * lets it take a slot.
- */
-async function testAGameHeldBackByTheGamesLimitDoesNotSayItLooks(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-games-look-'));
-  try {
-    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    mkdirSync(join(directory, QUEUED_FOLDER));
-    mkdirSync(join(directory, WAITING_FOLDER));
-    writeFileSync(
-      join(directory, QUEUED_FOLDER, 'ticket.json'),
-      JSON.stringify({ pid: process.pid, started: holder.started }),
-    );
-    const sessions = new EngineSlots(directory, 16, holder, undefined, () => 'other');
-    const games = [
-      await sessions.takeFree(true),
-      await sessions.takeFree(true),
-      await sessions.takeFree(true),
-    ];
-    assert.ok(
-      games.every((lock) => lock !== null),
-      'three games take the kept slots games may hold',
-    );
-    const line = new SlotLine('other', true);
-    line.mark = 'game-1.json';
-    const note = join(directory, WAITING_FOLDER, 'game-1.seen');
-    assert.equal(await sessions.takeFree(true, line), null, 'a fourth game waits');
-    assert.equal(sessions.drawn.limit, 'games', 'held by the games limit');
-    assert.equal(existsSync(note), false, 'and a game it holds back does not say it looks');
-    const first = games[0];
-    assert.ok(first !== undefined, 'the first game holds a slot');
-    sessions.release(first);
-    const fourth = await sessions.takeFree(true, line);
-    assert.ok(fourth !== null, 'with the limit allowing it, the fourth game takes a slot');
-    assert.equal(existsSync(note), true, 'and says it looks');
-    sessions.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** The slot order every kind of taker draws from when nothing is kept back. */
-const EVERY_OF_16_SLOTS = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
-
-/** The numbers of slots kept and drawn, and who takes which slot, need no folder of locks. */
-function checksTheSlotRulesWithoutAFolder(): void {
-  // A quarter of the slots, at least two, kept for engines outside a gate, and every one of those but
-  // the last for the games editor_run started. The last stays for short calls.
-  assert.deepEqual(
-    [2, 4, 8, 12, 16, 32].map((count) => keptSlotsOf(count)),
-    [2, 2, 2, 3, 4, 8],
-  );
-  assert.deepEqual(
-    [1, 2, 3, 4, 8].map((kept) => gamesKeptOf(kept)),
-    [0, 1, 2, 3, 7],
-  );
-  const every16 = EVERY_OF_16_SLOTS;
-  assert.deepEqual(slotsDrawnOn(16, 'other', 'none'), { numbers: every16 });
-  assert.deepEqual(slotsDrawnOn(16, 'other', 'queued'), { numbers: [15, 14, 13, 12], limit: 'kept' });
-  assert.deepEqual(slotsDrawnOn(16, 'gate', 'queued'), {
-    numbers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-    limit: 'gate',
-  });
-  assert.deepEqual(slotsDrawnOn(16, 'timing', 'queued'), { numbers: every16 }, 'a timing takes any slot');
-  const tiered = [11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12];
-  assert.deepEqual(
-    [slotsDrawnOn(16, 'tier', 'queued'), slotsDrawnOn(16, 'tier', 'none')],
-    [{ numbers: tiered }, { numbers: tiered }],
-    "gate work outside a seat takes any slot, queued or not, the gates' from the top first",
-  );
-  assert.deepEqual(slotsDrawnOn(2, 'gate', 'none'), { numbers: [0], limit: 'gate' });
-  assert.deepEqual(slotsDrawnOn(2, 'other', 'queued'), { numbers: [1], limit: 'kept' });
-  assert.deepEqual(slotsDrawnOn(1, 'other', 'queued'), { numbers: [0] }, "one slot is everybody's");
-  assert.deepEqual(
-    [
-      slotTaker({ [SHARE_VARIABLE]: 'share', [SHARE_COUNT_VARIABLE]: '3', GODOT_ENGINE_TIMED: 'x' }),
-      slotTaker({ GODOT_ENGINE_TIMED: '/slots/3.lock', GODOT_ENGINE_TIER: 'fast' }),
-      slotTaker({ GODOT_ENGINE_TIER: 'full' }),
-      slotTaker({ GODOT_ENGINE_TIER: 'ship' }),
-      slotTaker({ GODOT_ENGINE_TIER: '' }),
-      slotTaker({}),
-    ],
-    ['gate', 'timing', 'tier', 'tier', 'other', 'other'],
-    "a gate, a timing, a gate's own step, anything shipping, and anything else",
-  );
-  assert.deepEqual(
-    [
-      runsInAGate({ [SHARE_VARIABLE]: 'share', [SHARE_COUNT_VARIABLE]: '3' }),
-      runsInAGate({ [SHARE_VARIABLE]: 'share' }),
-      runsInAGate({ [SHARE_VARIABLE]: '', [SHARE_COUNT_VARIABLE]: '3' }),
-    ],
-    [true, false, false],
-    'a gate names its pool in both variables',
-  );
-}
-
-/**
- * A run follows the lanes file a gate's paced portion writes in the pool: it holds a mark beside the
- * file, reads the number as the spare count is read, answers a rise to at most its ceiling and gives
- * the mark back there. A mark whose maker has gone is taken over under its steal file.
- */
-async function testARunFollowsTheLanesAGateWrites(): Promise<void> {
-  const started = await ownStart();
-  const holder = { pid: process.pid, started };
-  const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
-  await exitOf(gone);
-  const gonePid = gone.pid ?? 0;
-  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-'));
-  const other = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lanes-other-'));
-  const file = join(pool, 'lanes-1.json');
-  const mark = `${file}${FOLLOWS_SUFFIX}`;
-  const said = (lanes: unknown, agoMs = 0, pid = process.pid): void => {
-    writeFileSync(file, JSON.stringify({ lanes, pid, started, written: Date.now() - agoMs }));
-  };
-  const markedBy = (): number | undefined => {
-    try {
-      return holderOf(readFileSync(mark, 'utf8'))?.pid;
-    } catch {
-      return undefined;
-    }
-  };
-  const answerOf = (asked: Promise<number>, withinMs: number): Promise<string> =>
-    Promise.race([
-      asked.then(
-        (lanes) => `answered ${String(lanes)}`,
-        (error: unknown) => `rejected: ${errorMessage(error)}`,
-      ),
-      delay(withinMs).then(() => 'pending'),
-    ]);
-  const slots = new EngineSlots(other, 1, holder);
-  const helpers: Array<ReturnType<typeof spawnHidden>> = [];
-  const aborts: AbortController[] = [];
-  const followers: FollowedLanes[] = [];
-  const following = (
-    lanes: ConstructorParameters<typeof FollowedLanes>[0],
-    ceiling: number,
-  ): FollowedLanes => {
-    const made = new FollowedLanes(lanes, file, ceiling, 5);
-    followers.push(made);
-    return made;
-  };
-  const fresh = (): AbortSignal => {
-    const control = new AbortController();
-    aborts.push(control);
-    return control.signal;
-  };
-  try {
-    assert.equal(LANES_VARIABLE, 'GODOT_ENGINE_LANES', 'the lanes file is named by this variable');
-    // The count of the pool, read as a number.
-    assert.equal(poolCount({ [SHARE_COUNT_VARIABLE]: '9' }), 9, 'the pool count is a number');
-    assert.equal(poolCount({}), null, 'null with the count unset');
-    assert.equal(poolCount({ [SHARE_COUNT_VARIABLE]: '' }), null, 'and with it empty');
-    for (const wrong of ['x', '0', '2.5']) {
-      assert.throws(
-        () => poolCount({ [SHARE_COUNT_VARIABLE]: wrong }),
-        (error: unknown) => error instanceof EngineUsageError && error.message.includes(SHARE_COUNT_VARIABLE),
-        `a count of ${wrong} is refused by name`,
-      );
-    }
-
-    const followed = following(new EngineSlots(pool, 1, holder), 8);
-    const slotsOfPool = (): string[] => readdirSync(pool).toSorted();
-
-    // Rising mid-run.
-    said(2);
-    const rising = followed.past(2, fresh());
-    assert.equal(await answerOf(rising, 100), 'pending', 'a number the run holds adds no lane');
-    assert.equal(markedBy(), process.pid, 'the run holds its mark while it follows');
-    said(5);
-    assert.equal(await answerOf(rising, 20_000), 'answered 5', 'a rise mid-run is answered');
-    assert.deepEqual(slotsOfPool(), ['lanes-1.json', 'lanes-1.json.follows'], 'no lock stands in the pool');
-
-    // Each state that adds no lane, then the number.
-    const addsNoneUntilSaid = async (why: string, write: () => void): Promise<void> => {
-      followed.end();
-      rmSync(file, { force: true });
-      write();
-      const asked = followed.past(2, fresh());
-      assert.equal(await answerOf(asked, 100), 'pending', `${why} adds no lane`);
-      assert.equal(markedBy(), process.pid, `and the mark is made with ${why}`);
-      said(5);
-      assert.equal(
-        await answerOf(asked, 20_000),
-        'answered 5',
-        `and the number is taken once it is said after ${why}`,
-      );
-    };
-    await addsNoneUntilSaid('a stale file', () => {
-      said(5, SPARE_STALE_MS + 1000);
-    });
-    await addsNoneUntilSaid('a file whose writer has gone', () => {
-      said(5, 0, gonePid);
-    });
-    await addsNoneUntilSaid('no file', () => undefined);
-    for (const [why, content] of [
-      ['lanes of 0', JSON.stringify({ lanes: 0, pid: process.pid, started, written: Date.now() })],
-      ['lanes as a string', JSON.stringify({ lanes: '4', pid: process.pid, started, written: Date.now() })],
-      ['lanes of 2.5', JSON.stringify({ lanes: 2.5, pid: process.pid, started, written: Date.now() })],
-      ['lanes of -1', JSON.stringify({ lanes: -1, pid: process.pid, started, written: Date.now() })],
-      ['a file cut short', '{"lanes": 5, "pid":'],
-      ['no written', JSON.stringify({ lanes: 5, pid: process.pid, started })],
-    ] as const) {
-      await addsNoneUntilSaid(why, () => {
-        writeFileSync(file, content);
-      });
-    }
-
-    // The floor.
-    followed.end();
-    said(1);
-    const floor = followed.past(3, fresh());
-    assert.equal(await answerOf(floor, 100), 'pending', 'a number below the one the run holds adds none');
-    said(5);
-    assert.equal(await answerOf(floor, 20_000), 'answered 5', 'a higher number is taken');
-    said(2);
-    const fall = new AbortController();
-    assert.equal(await answerOf(followed.past(5, fall.signal), 100), 'pending', 'a fall adds none');
-    fall.abort(new Error('fall over'));
-    await delay(50);
-    followed.end();
-
-    // The ceiling.
-    let counts = 0;
-    const counted = following(
-      {
-        holder,
-        takeFile: (path) => new EngineSlots(pool, 1, holder).takeFile(path),
-        countIn: (path, key) => {
-          counts += 1;
-          return new EngineSlots(pool, 1, holder).countIn(path, key);
-        },
-      },
-      4,
-    );
-    said(9);
-    assert.equal(
-      await answerOf(counted.past(2, fresh()), 20_000),
-      'answered 4',
-      'the ceiling caps the answer',
-    );
-    assert.equal(existsSync(mark), false, 'and the mark is given back there');
-    const lookedBefore = counts;
-    const atCeiling = counted.past(4, fresh());
-    const timer = delay(50).then(() => 'timer');
-    assert.equal(
-      await Promise.race([
-        timer,
-        atCeiling.then(
-          () => 'answered',
-          () => 'rejected',
-        ),
-      ]),
-      'timer',
-      'a run at its ceiling pends',
-    );
-    await delay(100);
-    assert.equal(existsSync(mark), false, 'and makes no mark');
-    assert.equal(counts, lookedBefore, 'and looks at nothing');
-    for (const control of aborts) {
-      control.abort(new Error('done with the ceiling'));
-    }
-    assert.equal(
-      await answerOf(atCeiling, 5000),
-      'rejected: done with the ceiling',
-      'until its signal aborts',
-    );
-
-    // A live mark stands until its holder gives it back.
-    const keeper = await slotHeldElsewhere(mark, 2000);
-    helpers.push(keeper);
-    said(5);
-    const behind = followed.past(2, fresh());
-    assert.equal(await answerOf(behind, 300), 'pending', 'a live mark is never written over');
-    assert.equal(markedBy(), keeper.pid, 'and still names its holder');
-    assert.equal(await answerOf(behind, 20_000), 'answered 5', 'the run follows once the holder is done');
-    assert.equal(markedBy(), process.pid, 'and its mark names this process');
-    followed.end();
-
-    // A mark whose maker has gone is taken over under its steal file.
-    const dead = JSON.stringify({ pid: gonePid, started });
-    writeFileSync(mark, dead);
-    assert.equal(
-      await answerOf(followed.past(2, fresh()), 20_000),
-      'answered 5',
-      'a dead mark is taken over',
-    );
-    assert.equal(markedBy(), process.pid, 'and names this process');
-    assert.equal(existsSync(`${mark}.steal`), false, 'with no steal file left');
-    followed.end();
-    writeFileSync(mark, dead);
-    const first = new EngineSlots(pool, 1, holder);
-    const second = new EngineSlots(pool, 1, holder);
-    const won = await Promise.all([first.takeFile(mark), second.takeFile(mark)]);
-    assert.equal(won.filter(Boolean).length, 1, `exactly one of two takers wins: ${JSON.stringify(won)}`);
-    assert.equal(markedBy(), process.pid, 'and the mark names this process');
-    assert.equal(existsSync(`${mark}.steal`), false, 'with no steal file');
-    followed.end();
-    writeFileSync(mark, dead);
-    writeFileSync(`${mark}.steal`, JSON.stringify(holder));
-    assert.equal(await first.takeFile(mark), false, 'a mark another run is taking over is left');
-    assert.equal(readFileSync(mark, 'utf8'), dead, 'unchanged');
-    rmSync(`${mark}.steal`);
-    rmSync(mark);
-
-    // The end.
-    said(5);
-    const ending = following(new EngineSlots(pool, 1, holder), 8);
-    assert.equal(await answerOf(ending.past(2, fresh()), 20_000), 'answered 5', 'a run to end');
-    ending.end();
-    ending.end();
-    assert.deepEqual(slotsOfPool(), ['lanes-1.json'], 'the end gives the mark back and leaves the file');
-    assert.equal(await answerOf(ending.past(2, fresh()), 20_000), 'answered 5', 'the mark is made again');
-    writeFileSync(mark, JSON.stringify({ pid: process.ppid, started }));
-    ending.end();
-    assert.equal(markedBy(), process.ppid, 'a mark naming another process is left');
-    rmSync(mark);
-    const aborted = new AbortController();
-    aborted.abort(new Error('already aborted'));
-    assert.equal(
-      await answerOf(ending.past(2, aborted.signal), 5000),
-      'rejected: already aborted',
-      'an aborted signal rejects',
-    );
-    assert.equal(existsSync(mark), false, 'and leaves no mark');
-
-    // The mark counts as no slot: a wait for the first engine still says so.
-    rmSync(file, { force: true });
-    const lines: string[] = [];
-    const stop = new AbortController();
-    const waiter = new EngineSlots(other, 1, holder, (line) => {
-      lines.push(line);
-      stop.abort(new Error('heard'));
-    });
-    const lateStop = setTimeout(() => {
-      stop.abort(new Error('silent'));
-    }, 10_000);
-    const heldLock = await slotHeldElsewhere(join(other, '0.lock'), 20_000);
-    helpers.push(heldLock);
-    const markOther = join(other, 'lanes-2.json.follows');
-    assert.equal(await waiter.takeFile(markOther), true, 'a mark is made beside the slots');
-    await assert.rejects(waiter.take(stop.signal), /heard|silent/, 'the wait ends on its line');
-    clearTimeout(lateStop);
-    assert.equal(lines.length, 1, `one line was said: ${JSON.stringify(lines)}`);
-    assert.match(lines[0] ?? '', /for an engine/, 'and it says the run waits for an engine');
-
-    // A reader holding a dead mark open stands in its removal's way until it lets go.
-    if (process.platform === 'win32') {
-      const stuck = join(pool, 'lanes-3.json.follows');
-      writeFileSync(stuck, dead);
-      const reader = await heldOpenByAReader(stuck, 'ReadWrite');
-      try {
-        assert.equal(await slots.takeFile(stuck), false, 'a held dead mark is not taken');
-        assert.equal(existsSync(`${stuck}.steal`), false, 'and no steal file is left');
-      } finally {
-        await reader.letGo();
-      }
-      assert.equal(await slots.takeFile(stuck), true, 'it is taken once the reader has let go');
-    }
-  } finally {
-    for (const control of aborts) {
-      control.abort(new Error('finished'));
-    }
-    for (const made of followers) {
-      made.end();
-    }
-    for (const helper of helpers) {
-      helper.kill();
-    }
-    rmSync(pool, { recursive: true, force: true });
-    rmSync(other, { recursive: true, force: true });
-  }
-}
-
-async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
-  checksTheSlotRulesWithoutAFolder();
-  const started = await ownStart();
-  const holder = { pid: process.pid, started, by: 'gdharness test of /p' };
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gate-slots-'));
-  const queued = join(directory, QUEUED_FOLDER);
-  mkdirSync(queued);
-  const takeAll = async (slots: EngineSlots, game = false): Promise<string[]> => {
-    const taken: string[] = [];
-    for (let lock = await slots.takeFree(game); lock !== null; lock = await slots.takeFree(game)) {
-      taken.push(basename(lock));
-    }
-    for (const lock of taken) {
-      slots.release(join(directory, lock));
-    }
-    return taken;
-  };
-  try {
-    const outside = new EngineSlots(directory, 4, holder, undefined, () => 'other');
-    const gate = new EngineSlots(directory, 4, holder, undefined, () => 'gate');
-    const tier = new EngineSlots(directory, 4, holder, undefined, () => 'tier');
-    const rig: SlotsRig = { directory, queued, started, holder, takeAll, outside, gate, tier };
-    assert.deepEqual(await takeAll(outside), ['3.lock', '2.lock', '1.lock', '0.lock'], 'no gate queued');
-
-    // A gate whose process has gone: its mark is removed and holds nothing back.
-    const gone = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
-    assert.equal(typeof gone.pid, 'number', 'a process to have gone');
-    writeFileSync(join(queued, 'gone.json'), JSON.stringify({ pid: gone.pid, started }));
-    writeFileSync(join(queued, 'gone.json.seated'), '');
-    // And one still being written, which names nobody yet.
-    writeFileSync(join(queued, 'writing.json'), '');
-    // A taker killed while it waited leaves its mark, which a gate would count as a wait.
-    const waits = join(directory, WAITING_FOLDER);
-    mkdirSync(waits);
-    writeFileSync(join(waits, 'gone.json'), JSON.stringify({ pid: gone.pid, started }));
-    writeFileSync(join(waits, 'live.json'), JSON.stringify({ pid: process.pid, started }));
-    assert.deepEqual(
-      await takeAll(outside),
-      ['2.lock', '1.lock', '0.lock'],
-      'a gone gate and an unwritten mark keep no slots, and the live wait is left the first it takes',
-    );
-    assert.deepEqual(
-      readdirSync(queued).toSorted(),
-      ['writing.json'],
-      "and the gone gate's mark is removed with its seat",
-    );
-    assert.deepEqual(readdirSync(waits), ['live.json'], "and a gone taker's wait, while a live one's stays");
-    rmSync(join(waits, 'live.json'));
-
-    // A live gate, seated or not: a seat counts only the gates' slots, so work beside the gates keeps
-    // the kept ones, and gate work outside a seat takes any.
-    writeFileSync(join(queued, 'ticket.json'), JSON.stringify({ pid: process.pid, started }));
-    for (const seat of ['waiting for its seat', 'seated']) {
-      publishesNothingSpare(directory, started);
-      if (seat === 'seated') {
-        writeFileSync(join(queued, 'ticket.json.seated'), '');
-      }
-      assert.deepEqual(
-        await takeAll(outside),
-        ['3.lock', '2.lock'],
-        `a gate ${seat} leaves work beside it the kept slots`,
-      );
-      assert.equal(outside.drawn.limit, 'kept', JSON.stringify(outside.drawn));
-      assert.deepEqual(await takeAll(gate), ['0.lock', '1.lock'], 'and its engines take only those');
-      assert.deepEqual(
-        await takeAll(tier),
-        ['1.lock', '0.lock', '3.lock', '2.lock'],
-        "and gate work outside a seat any, the gates' from the top first",
-      );
-    }
-    await checksTheSpareSlots(rig, gone.pid);
-    await checksASlotAlreadyHeld(rig);
-    await checksTheSixteenSlots(started, holder);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** `slots.published` with nothing spare, as a queue process counting a waiting gate writes it. */
-function publishesNothingSpare(directory: string, started: number): void {
-  writeFileSync(
-    join(directory, SPARE_FILE),
-    `{"spare": 0, "pid": ${String(process.pid)}, "started": ${String(started)}, "written": ${String(Date.now())}}`,
-  );
-}
-
-/** What the slot checks share: the folder, the queue, the holder and three kinds of taker. */
-interface SlotsRig {
-  directory: string;
-  queued: string;
-  started: Awaited<ReturnType<typeof ownStart>>;
-  holder: ConstructorParameters<typeof EngineSlots>[2];
-  takeAll: (slots: EngineSlots, game?: boolean) => Promise<string[]>;
-  outside: EngineSlots;
-  gate: EngineSlots;
-  tier: EngineSlots;
-}
-
-/** The queue's count of spare slots lets side work take the gates' slots, and a game never. */
-async function checksTheSpareSlots(rig: SlotsRig, gonePid: number): Promise<void> {
-  const { directory, started, holder, takeAll, outside, gate, tier } = rig;
-  const every16 = EVERY_OF_16_SLOTS;
-  // The queue says how many of the gates' free slots no queued gate can take now. Side work takes
-  // those after the kept ones, and a game, which holds its slot for as long as it plays, never.
-  const spareFile = join(directory, SPARE_FILE);
-  const spareOf = (spare: unknown, writtenAgoMs: number, pid = process.pid): void => {
-    writeFileSync(spareFile, JSON.stringify({ spare, pid, started, written: Date.now() - writtenAgoMs }));
-  };
-  spareOf(2, 0);
-  assert.deepEqual(
-    [await takeAll(outside), await takeAll(outside, true)],
-    [['3.lock', '2.lock', '1.lock', '0.lock'], ['3.lock']],
-    'side work takes the spare slots of the gates, and a game only its share of the kept ones',
-  );
-  const kept = ['3.lock', '2.lock'];
-  for (const [why, write] of [
-    [
-      'none spare',
-      () => {
-        spareOf(0, 0);
-      },
-    ],
-    [
-      'a stale count',
-      () => {
-        spareOf(2, SPARE_STALE_MS + 1000);
-      },
-    ],
-    [
-      'a count whose writer has gone',
-      () => {
-        spareOf(2, 0, gonePid);
-      },
-    ],
-    [
-      'a count that is no whole number',
-      () => {
-        spareOf('2', 0);
-      },
-    ],
-  ] as const) {
-    write();
-    assert.deepEqual(await takeAll(outside), kept, `and only the kept slots with ${why}`);
-  }
-  rmSync(spareFile);
-  assert.deepEqual(await takeAll(outside), kept, 'or with no count at all');
-  assert.equal(
-    countSaid('{"spare": 3, "written": 1000}', 1000 + SPARE_STALE_MS, 'spare'),
-    3,
-    'a count is read up to its age limit',
-  );
-  assert.equal(
-    countSaid('{"spare": 3, "written": 1000}', 1001 + SPARE_STALE_MS, 'spare'),
-    0,
-    'and not past it',
-  );
-  assert.equal(countSaid('{"lanes": 3, "written": 1000}', 1000, 'lanes'), 3, 'a count is read under its key');
-  assert.equal(countSaid('{"lanes": 3, "written": 1000}', 1000, 'spare'), 0, 'and under no other');
-  assert.deepEqual(slotsDrawnOn(16, 'other', 12), { numbers: every16 }, 'the kept first, then the gates');
-  assert.deepEqual(
-    [slotsDrawnOn(16, 'other', 2).numbers, slotsDrawnOn(16, 'other', 2, [9, 3, 2, 14]).numbers],
-    [
-      [15, 14, 13, 12, 11, 10],
-      [15, 14, 13, 12, 9, 3],
-    ],
-    "and no more of the gates' free slots than are spare, the highest free ones",
-  );
-  assert.equal(
-    slotWaitSaid(3000, 4, 'slots', outside.holders(), outside.drawn),
-    'Waiting 3 s so far for an engine: the 2 engine slots of the 4 on this machine (slots) kept for engines outside a gate while a gate is queued are in use, by a gate or another tool, and the engine starts when one is given back or no gate is queued.',
-  );
-  assert.equal(
-    slotWaitSaid(3000, 4, 'slots', tier.holders(), tier.drawn),
-    'Waiting 3 s so far for an engine: all 4 engine slots on this machine (slots) are in use, by a gate or another tool, and the engine starts when one is given back.',
-  );
-  assert.equal(
-    slotWaitSaid(1000, 2, 'slots', [holder], slotsDrawnOn(2, 'other', 'queued')),
-    `Waiting 1 s so far for an engine: the one engine slot of the 2 on this machine (slots) kept for engines outside a gate while a gate is queued is in use, by this process (pid ${String(process.pid)}), and the engine starts when it is given back or no gate is queued.`,
-  );
-  assert.equal(
-    slotWaitedSaid(3000, 4, 'slots', [holder, holder], gate.drawn),
-    "This call waited 3 s for an engine slot in all. When it first waited, the 2 engine slots of the 4 on this machine (slots) a gate's engines draw on were in use: 2 by this process (pid " +
-      String(process.pid) +
-      ').',
-  );
-  // Of two kept, games hold one, and the other stays for a short call.
-  assert.deepEqual(
-    await takeAll(outside, true),
-    ['3.lock'],
-    'with two kept, a game takes one while a gate is queued',
-  );
-  assert.equal(outside.drawn.limit, 'games', JSON.stringify(outside.drawn));
-}
-
-/** A slot already held is kept to its end whatever arrives in the queue. */
-async function checksASlotAlreadyHeld(rig: SlotsRig): Promise<void> {
-  const { queued, started, takeAll, outside, tier } = rig;
-  // A slot already held is kept to its end whatever arrives in the queue.
-  rmSync(join(queued, 'ticket.json'));
-  rmSync(join(queued, 'ticket.json.seated'));
-  assert.deepEqual(
-    await takeAll(outside, true),
-    ['3.lock', '1.lock', '0.lock'],
-    'a game takes any slot but the last kept one with no gate queued',
-  );
-  const held = await outside.takeFree();
-  assert.equal(held === null ? null : basename(held), '3.lock', 'the queue empty again');
-  writeFileSync(join(queued, 'ticket.json'), JSON.stringify({ pid: process.pid, started }));
-  publishesNothingSpare(rig.directory, started);
-  assert.equal(
-    held === null ? false : existsSync(held) && holderOf(readFileSync(held, 'utf8'))?.pid === process.pid,
-    true,
-    'a gate arriving takes nothing already held',
-  );
-  assert.deepEqual(await takeAll(outside), ['2.lock'], 'and of the kept slots it takes the one not held');
-  assert.deepEqual(
-    await takeAll(tier),
-    ['1.lock', '0.lock', '2.lock'],
-    'while gate work outside a seat takes every one not held',
-  );
-  if (held !== null) {
-    outside.release(held);
-  }
-}
-
-/** Games hold three of the four kept slots on a machine with sixteen, and a short call has the last. */
-async function checksTheSixteenSlots(
-  started: SlotsRig['started'],
-  holder: SlotsRig['holder'],
-): Promise<void> {
-  // Sixteen slots, four kept: games hold three between them, and a short call still has the last.
-  // A probe's headless scene edit waited an hour behind the one game a session had started.
-  const sixteen = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-game-slots-'));
-  try {
-    mkdirSync(join(sixteen, QUEUED_FOLDER));
-    writeFileSync(join(sixteen, QUEUED_FOLDER, 'ticket.json'), JSON.stringify({ pid: process.pid, started }));
-    publishesNothingSpare(sixteen, started);
-    const sessions = new EngineSlots(sixteen, 16, holder, undefined, () => 'other');
-    const games = [
-      await sessions.takeFree(true),
-      await sessions.takeFree(true),
-      await sessions.takeFree(true),
-    ];
-    assert.deepEqual(
-      games.map((lock) => (lock === null ? null : basename(lock))),
-      ['15.lock', '14.lock', '13.lock'],
-      'three games take the highest kept slots',
-    );
-    assert.deepEqual(
-      games.map((lock) => (lock === null ? null : holderOf(readFileSync(lock, 'utf8'))?.game)),
-      [true, true, true],
-      "each lock says it is a game's",
-    );
-    assert.equal(await sessions.takeFree(true), null, 'a fourth game waits');
-    assert.deepEqual(
-      sessions.drawn,
-      { numbers: [13, 14, 15], limit: 'games' },
-      'held by the games holding theirs',
-    );
-    assert.equal(
-      slotWaitSaid(3000, 16, 'slots', sessions.holders(), sessions.drawn),
-      `Waiting 3 s so far for an engine: the 3 engine slots of the 16 on this machine (slots) that games editor_run started may hold while a gate is queued, the rest kept for short calls, are in use: 3 by this process (pid ${String(process.pid)}). The engine starts when one is given back or no gate is queued.`,
-    );
-    const short = await sessions.takeFree();
-    assert.equal(
-      short === null ? null : basename(short),
-      '12.lock',
-      'while a short call takes the kept slot the games leave',
-    );
-    if (short !== null) {
-      sessions.release(short);
-    }
-    // A game's slot handed to its keeper stays a game's.
-    const first = games[0] ?? '';
-    assert.equal(
-      await sessions.hand(first, { pid: process.ppid, started: 1, by: 'a keeper' }),
-      true,
-      'handed over',
-    );
-    assert.deepEqual(
-      holderOf(readFileSync(first, 'utf8')),
-      { pid: process.ppid, started: 1, by: 'a keeper', game: true, memory: 1.5 * 1024 ** 3 },
-      "the keeper's lock still says it is a game's",
-    );
-    rmSync(first, { force: true });
-    for (const other of games.slice(1)) {
-      if (other !== null) {
-        sessions.release(other);
-      }
-    }
-
-    // An upload beside a queued gate takes a gates' slot at once, where side work waits for a kept
-    // one: three uploads waited 50 minutes for the kept slots while gates' slots stood free.
-    for (const slot of [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15]) {
-      writeFileSync(join(sixteen, `${String(slot)}.lock`), JSON.stringify(holder));
-    }
-    const upload = new EngineSlots(sixteen, 16, holder, undefined, () =>
-      slotTaker({ GODOT_ENGINE_TIER: 'ship' }),
-    );
-    const uploaded = await upload.takeFree();
-    assert.equal(uploaded === null ? null : basename(uploaded), '11.lock', 'an upload starts at once');
-    assert.equal(await sessions.takeFree(), null, 'and side work waits for a kept slot');
-    if (uploaded !== null) {
-      upload.release(uploaded);
-    }
-  } finally {
-    rmSync(sixteen, { recursive: true, force: true });
-  }
-}
-
-/** A folder of four slots with the given marks in its queue folder and the given slots held by this process. */
-function slotsWithGatesQueued(
-  marks: Readonly<Record<string, string>>,
-  held: readonly number[],
-  started: number,
-): string {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gates-first-'));
-  mkdirSync(join(directory, QUEUED_FOLDER));
-  for (const [name, content] of Object.entries(marks)) {
-    writeFileSync(join(directory, QUEUED_FOLDER, name), content);
-  }
-  for (const slot of held) {
-    writeFileSync(join(directory, `${String(slot)}.lock`), JSON.stringify({ pid: process.pid, started }));
-  }
-  return directory;
-}
-
-/**
- * A take that has waited past two minutes while a gate is queued, the clock moved on after its mark
- * was made, and what it holds then. [param after] runs before the clock moves back.
- */
-async function agedTakeWhileAGateIsQueued(
-  directory: string,
-  started: number,
-  after: (side: EngineSlots, taken: () => string | null) => Promise<void>,
-): Promise<void> {
-  const realNow = Date.now;
-  let skew = 0;
-  const stop = new AbortController();
-  try {
-    Date.now = () => realNow() + skew;
-    const side = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, () => 'other');
-    let taken: string | null = null;
-    side
-      .take(stop.signal)
-      .then((lock) => {
-        taken = lock;
-      })
-      .catch(() => undefined);
-    assert.ok(
-      await cameTrue(() => existsSync(join(directory, WAITING_FOLDER)), 5000),
-      'the take waits and keeps a mark',
-    );
-    skew = 130_000;
-    writeFileSync(join(directory, 'wake.txt'), '');
-    await delay(1600);
-    await after(side, () => taken);
-  } finally {
-    stop.abort();
-    Date.now = realNow;
-  }
-}
-
-/**
- * Side work takes the kept slots and as many of the gates' free ones as are spare, however long it
- * has waited. The clock moves past two minutes while a take waits, and the only slot free is a gate's.
- */
-async function testSideWorkTakesOnlyKeptAndSpareSlotsWhileAGateWaitsWhateverItsAge(): Promise<void> {
-  const started = await ownStart();
-  const directory = slotsWithGatesQueued(
-    { 'ticket.json': JSON.stringify({ pid: process.pid, started }), 'ticket.json.seated': '' },
-    [1, 2, 3],
-    started,
-  );
-  try {
-    await agedTakeWhileAGateIsQueued(directory, started, async (side, taken) => {
-      assert.equal(taken(), null, 'a take that has waited past two minutes leaves the gates their free slot');
-      assert.equal(side.drawn.limit, 'kept', JSON.stringify(side.drawn));
-      rmSync(join(directory, '3.lock'));
-      assert.ok(await cameTrue(() => taken() !== null, 5000), 'and takes a kept slot once one is free');
-      assert.equal(basename(String(taken())), '3.lock');
-      side.releaseAll();
-    });
-    writeFileSync(join(directory, '3.lock'), JSON.stringify({ pid: process.pid, started }));
-    rmSync(join(directory, '1.lock'));
-    const spare = (count: number): void => {
-      writeFileSync(
-        join(directory, SPARE_FILE),
-        JSON.stringify({ spare: count, pid: process.pid, started, written: Date.now() }),
-      );
-    };
-    const side = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, () => 'other');
-    spare(1);
-    const first = await side.takeFree();
-    assert.equal(
-      first === null ? null : basename(first),
-      '1.lock',
-      'one spare slot gives the highest free one of the gates',
-    );
-    assert.deepEqual(side.drawn.numbers, [3, 2, 1], 'and it drew no second gate slot, though two stood free');
-    side.releaseAll();
-    spare(2);
-    await side.takeFree();
-    assert.deepEqual(side.drawn.numbers, [3, 2, 1, 0], 'two spare draw both');
-    side.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A setup running in a round's seat stands in the machine's queue as a queued and seated mark
- * naming the seat, while the count says nothing is spare. A young take and one that has waited past
- * two minutes get no gate slot, and both do once the mark goes. The files are the text `slots.seat_mark`
- * (the queued mark, `own()` and `SEAT_KEY`, and `seated_mark`) and `slots.published` write.
- */
-async function testASeatedMarkWithNoSpareGivesAYoungAndAnAgedTakeNoGateSlot(): Promise<void> {
-  const started = await ownStart();
-  const pid = String(process.pid);
-  const mark = '00001794808729280384700-1.json';
-  const marks = {
-    [mark]: `{"pid": ${pid}, "started": ${String(started)}, "seat": "20261116-000337-batch"}`,
-    [`${mark}.seated`]: '',
-  };
-  const published = (spare: number): string =>
-    `{"spare": ${String(spare)}, "pid": ${pid}, "started": ${String(started)}, "written": ${String(Date.now())}}`;
-  const directory = slotsWithGatesQueued(marks, [2, 3], started);
-  try {
-    writeFileSync(join(directory, SPARE_FILE), published(0));
-    const young = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, () => 'other');
-    assert.equal(await young.takeFree(), null, 'a young take gets no gate slot beside the seat mark');
-    assert.equal(young.drawn.limit, 'kept', JSON.stringify(young.drawn));
-    await agedTakeWhileAGateIsQueued(directory, started, async (_side, taken) => {
-      assert.equal(taken(), null, 'nor does a take that has waited past two minutes');
-      rmSync(join(directory, QUEUED_FOLDER, mark));
-      rmSync(join(directory, QUEUED_FOLDER, `${mark}.seated`));
-      assert.ok(await cameTrue(() => taken() !== null, 5000), 'and either does once the setup has ended');
-    });
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * Eight slots with the kept ones (6 and 7) held, as the gates' Python queue leaves them: a queued
- * gate mark and `.seated` file as `slots.queued_mark` and `slots.seated_mark` write them
- * (`slots.own()` for the mark), and `slots.published` for `spare.json` when [param spare] is given.
- * Every lock older than the file, as locks held for a while are.
- */
-function eightSlotsWithTheKeptOnesHeld(
-  started: number,
-  seated: boolean,
-  held: readonly number[],
-  spare?: string,
-): string {
-  const own = `{"pid": ${String(process.pid)}, "started": ${String(started)}}`;
-  const directory = slotsWithGatesQueued(
-    { 'gate-1.json': own, ...(seated ? { 'gate-1.json.seated': '' } : {}) },
-    [6, 7, ...held],
-    started,
-  );
-  const old = new Date(Date.now() - 3_600_000);
-  for (const slot of [6, 7, ...held]) {
-    utimesSync(join(directory, `${String(slot)}.lock`), old, old);
-  }
-  if (seated) {
-    utimesSync(join(directory, QUEUED_FOLDER, 'gate-1.json.seated'), old, old);
-  }
-  if (spare !== undefined) {
-    writeFileSync(join(directory, SPARE_FILE), spare);
-  }
-  return directory;
-}
-
-/** A process that stands for a gate or an engine's holder: alive, with a start a lock can name. */
-interface Tenant {
-  pid: number;
-  started: number;
-}
-
-interface LendRig {
-  directory: string;
-  side: EngineSlots;
-  gate: EngineSlots;
-  /** The clock at the start. */
-  start: number;
-  /** Moves the clock to [param at] and writes a count of [param spare] as of then. */
-  at: (at: number, spare?: number) => void;
-  /** Moves the clock to [param at] and writes no count. */
-  tick: (at: number) => void;
-  /** Seats the gate [param name], run by [param who], at [param when], or leaves its mark waiting. */
-  seat: (name: string, when: number, seated?: boolean, who?: Tenant) => void;
-  /** Makes [param slot] held by [param who] from [param when], the clock by default. */
-  engine: (slot: number, who: Tenant, when?: number) => void;
-  /** Frees [param slot] as its engine ends. */
-  end: (slot: number) => void;
-  /** The lock [param slots] takes now, dated by the clock, or null. */
-  take: (slots: EngineSlots) => Promise<string | null>;
-  /** The names of the slots [param slots] takes until it takes none, each dated by the clock. */
-  takeAll: (slots: EngineSlots) => Promise<string[]>;
-  /** This process, which holds the kept slots and takes as side work. */
-  self: Tenant;
-  /** Three other live processes: two stand for gates, and the gate engine takes as [param a]. */
-  a: Tenant;
-  b: Tenant;
-  c: Tenant;
-  /** What the process table says: each pid's parent. Empty unless a check fills it. */
-  parents: Map<number, number>;
-}
-
-/**
- * A directory of [param count] slots whose kept ones are held and the first [param held] are held
- * by this process, three stand-in processes, and a clock the checks move. The clock runs an hour
- * behind the files' own, so a lock a take writes reads as written after every count while the take
- * recounts, and each take dates its lock by the clock once it returns. The process table is the
- * one [param parents] gives, or unreadable where [param table] is false.
- */
-async function withALendRig(
-  run: (rig: LendRig) => Promise<void>,
-  {
-    count = 8,
-    held = [0, 1],
-    table = true,
-  }: { count?: number; held?: readonly number[]; table?: boolean } = {},
-): Promise<void> {
-  const started = await ownStart();
-  const realNow = Date.now;
-  let now = realNow() - 3_600_000;
-  const kept = Array.from({ length: Math.max(2, Math.floor(count / 4)) }, (_, one) => count - 1 - one);
-  const directory = slotsWithGatesQueued({}, [...kept, ...held], started);
-  const dated = (path: string, when: number): void => {
-    utimesSync(path, new Date(when), new Date(when));
-  };
-  for (const slot of [...kept, ...held]) {
-    dated(join(directory, `${String(slot)}.lock`), now - 60_000);
-  }
-  const standIns = [0, 1, 2].map(() =>
-    spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' }),
-  );
-  const tenant = async (pid: number | undefined): Promise<Tenant> => {
-    const said = pid === undefined ? undefined : (await startTimesOf([pid])).get(pid);
-    assert.ok(pid !== undefined && said !== undefined, 'a stand-in gate is listed');
-    return { pid, started: said };
-  };
-  const parents = new Map<number, number>();
-  const self = { pid: process.pid, started };
-  const a = await tenant(standIns[0]?.pid);
-  const take = async (slots: EngineSlots): Promise<string | null> => {
-    const lock = await slots.takeFree();
-    if (lock !== null) {
-      dated(lock, now);
-    }
-    return lock;
-  };
-  const rig: LendRig = {
-    directory,
-    start: now,
-    self,
-    a,
-    b: await tenant(standIns[1]?.pid),
-    c: await tenant(standIns[2]?.pid),
-    parents,
-    side: new EngineSlots(directory, count, self, undefined, () => 'other', undefined, {
-      processes: () =>
-        Promise.resolve(
-          table ? new Map([...parents].map(([pid, parent]) => [pid, { parent, command: '' }])) : undefined,
-        ),
-    }),
-    gate: new EngineSlots(directory, count, a, undefined, () => 'gate', undefined, {
-      processes: () => Promise.resolve(new Map()),
-    }),
-    at: (at, spare = 0) => {
-      now = at;
-      writeFileSync(
-        join(directory, SPARE_FILE),
-        JSON.stringify({ spare, pid: process.pid, started, written: at }),
-      );
-    },
-    tick: (at) => {
-      now = at;
-    },
-    seat: (name, when, seated = true, who = a) => {
-      writeFileSync(join(directory, QUEUED_FOLDER, `${name}.json`), JSON.stringify(who));
-      if (seated) {
-        const file = join(directory, QUEUED_FOLDER, `${name}.json.seated`);
-        writeFileSync(file, '');
-        dated(file, when);
-      }
-    },
-    engine: (slot, who, when = now) => {
-      const lock = join(directory, `${String(slot)}.lock`);
-      writeFileSync(lock, JSON.stringify(who));
-      dated(lock, when);
-    },
-    end: (slot) => {
-      rmSync(join(directory, `${String(slot)}.lock`));
-    },
-    take,
-    takeAll: async (slots) => {
-      const taken: string[] = [];
-      for (let lock = await take(slots); lock !== null; lock = await take(slots)) {
-        taken.push(basename(lock));
-      }
-      return taken;
-    },
-  };
-  try {
-    Date.now = () => now;
-    await run(rig);
-  } finally {
-    Date.now = realNow;
-    rig.side.releaseAll();
-    rig.gate.releaseAll();
-    for (const standIn of standIns) {
-      standIn.kill();
-    }
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** The lock names of slots [param from] to [param to] inclusive, the highest first. */
-function locksDown(to: number, from: number): string[] {
-  return Array.from({ length: to - from + 1 }, (_, one) => `${String(to - one)}.lock`);
-}
-
-/** Whether each of the slots [param slots] of [param directory] has its lock. */
-function locksStand(directory: string, slots: readonly number[]): boolean[] {
-  return slots.map((slot) => existsSync(join(directory, `${String(slot)}.lock`)));
-}
-
-/** Two gates seated, sixteen slots with twelve for the gates, so each gate is owed six. */
-const SIX_EACH = { count: 16, held: [] } as const;
-
-/**
- * A gate seated 0.5 s ago is owed its share whatever slots the older gate's engines hold: with the
- * older gate on slots 0 to 5 and 6 to 11 free, nothing is lent until the younger gate has been seated
- * ten seconds. Then its free part is lent and the older gate, running its whole share, lends none.
- */
-async function testAGateSeatedHalfASecondAgoIsOwedItsSlotsWhateverTheOlderGatesHold(): Promise<void> {
-  await withALendRig(async ({ start, at, seat, engine, side, take, takeAll, a, b }) => {
-    for (const slot of [0, 1, 2, 3, 4, 5]) {
-      engine(slot, a);
-    }
-    seat('gate-a', start - 60_000, true, a);
-    at(start);
-    assert.equal(await take(side), null, 'the older gate has just started its engines');
-    at(start + GATE_LEND_MS - 500);
-    seat('gate-b', start + GATE_LEND_MS - 500, true, b);
-    at(start + GATE_LEND_MS);
-    assert.equal(await take(side), null, 'nothing is lent while the younger gate has been seated 0.5 s');
-    at(start + GATE_LEND_MS + GATE_LEND_MS - 501);
-    assert.equal(await take(side), null, 'nor until it has been seated ten seconds');
-    at(start + GATE_LEND_MS + GATE_LEND_MS - 500);
-    assert.deepEqual(await takeAll(side), locksDown(11, 6), 'then its six free slots are lent');
-  }, SIX_EACH);
-}
-
-/**
- * A gate's part is counted the same whether its engines hold the lowest slots or the highest. One
- * gate runs six engines and the other is idle, both quiet.
- */
-async function testAGatesFreePartDoesNotDependOnTheSlotNumbersItsEnginesHold(): Promise<void> {
-  for (const mine of [
-    [0, 1, 2, 3, 4, 5],
-    [6, 7, 8, 9, 10, 11],
-    [0, 3, 6, 9, 10, 11],
-  ]) {
-    await withALendRig(async ({ start, at, seat, engine, side, take, takeAll, a, b }) => {
-      for (const slot of mine) {
-        engine(slot, a);
-      }
-      seat('gate-b', start, true, b);
-      seat('gate-a', start, true, a);
-      at(start + GATE_LEND_MS - 1);
-      assert.equal(await take(side), null);
-      at(start + GATE_LEND_MS);
-      const others = Array.from({ length: 12 }, (_, slot) => slot).filter((slot) => !mine.includes(slot));
-      assert.deepEqual(
-        await takeAll(side),
-        others.toReversed().map((slot) => `${String(slot)}.lock`),
-        `the idle gate's six slots are lent beside engines on ${mine.join(', ')}`,
-      );
-    }, SIX_EACH);
-  }
-}
-
-/**
- * Two gates each running half their share lend their free halves once both are quiet. Until the
- * younger gate is quiet, every engine of either gate counts against the older gate's part.
- */
-async function testTwoGatesRunningHalfTheirShareEachLendTheirFreeHalfAfterTenSeconds(): Promise<void> {
-  await withALendRig(async ({ start, at, seat, engine, side, take, takeAll, a, b }) => {
-    for (const slot of [0, 2, 4]) {
-      engine(slot, a);
-    }
-    for (const slot of [1, 3, 5]) {
-      engine(slot, b);
-    }
-    seat('gate-a', start - 60_000, true, a);
-    at(start);
-    assert.equal(await take(side), null, 'nothing is lent while the engines have just started');
-    at(start + 6000);
-    seat('gate-b', start + 6000, true, b);
-    at(start + GATE_LEND_MS - 1);
-    assert.equal(await take(side), null, 'nor just before ten seconds');
-    at(start + GATE_LEND_MS);
-    assert.equal(await take(side), null, "the six engines fill the quiet older gate's part");
-    at(start + 6000 + GATE_LEND_MS - 1);
-    assert.equal(await take(side), null, 'and the younger gate waits for its own ten seconds');
-    at(start + 6000 + GATE_LEND_MS);
-    assert.deepEqual(await takeAll(side), locksDown(11, 6), 'then both free halves are lent');
-    at(start + 10 * GATE_LEND_MS);
-    assert.equal(await take(side), null, 'and no more');
-  }, SIX_EACH);
-}
-
-/**
- * A gate whose engine ends is owed that slot, which is lent at once while the gate is quiet. The
- * older gate runs three engines on slots 0 to 2 and the younger one, seated 6 s in, six on 6 to 11.
- */
-async function testAnEngineThatEndsGrowsItsGatesFreePart(): Promise<void> {
-  await withALendRig(async ({ start, at, seat, engine, end, side, take, takeAll, a, b }) => {
-    for (const slot of [0, 1, 2]) {
-      engine(slot, b);
-    }
-    for (const slot of [6, 7, 8, 9, 10, 11]) {
-      engine(slot, a);
-    }
-    seat('gate-b', start - 60_000, true, b);
-    at(start);
-    assert.equal(await take(side), null);
-    at(start + 6000);
-    seat('gate-a', start + 6000, true, a);
-    at(start + GATE_LEND_MS);
-    assert.equal(await take(side), null, "nine engines fill the quiet older gate's part");
-    at(start + 6000 + GATE_LEND_MS);
-    assert.deepEqual(await takeAll(side), locksDown(5, 3), 'both quiet, the three free slots are lent');
-    at(start + 20_000);
-    end(11);
-    assert.deepEqual(await takeAll(side), ['11.lock'], 'the slot an engine of a quiet gate frees is lent');
-  }, SIX_EACH);
-}
-
-/** An engine whose lock holder runs below a gate's process counts to that gate. */
-async function testAnEngineBelowAGatesProcessCountsToThatGate(): Promise<void> {
-  await withALendRig(async ({ start, at, seat, engine, side, take, takeAll, a, b, c, parents }) => {
-    parents.set(c.pid, a.pid);
-    for (const slot of [0, 1, 2, 3, 4, 5]) {
-      engine(slot, c);
-    }
-    seat('gate-a', start - 60_000, true, a);
-    at(start);
-    assert.equal(await take(side), null, 'the gate below whose process the engines run is not quiet');
-    at(start + GATE_LEND_MS - 1000);
-    seat('gate-b', start + GATE_LEND_MS - 1000, true, b);
-    at(start + GATE_LEND_MS);
-    assert.equal(
-      await take(side),
-      null,
-      'the engines below the older gate use its share, and the other is young',
-    );
-    at(start + 2 * GATE_LEND_MS - 1000);
-    assert.deepEqual(await takeAll(side), locksDown(11, 6), 'the younger gate lends its free part');
-  }, SIX_EACH);
-}
-
-/** With no process table, no engine can be placed under a gate and none of its slots is lent. */
-async function testNothingIsLentWhereTheProcessTableCannotBeRead(): Promise<void> {
-  await withALendRig(
-    async ({ start, at, seat, engine, side, take, a, b }) => {
-      engine(0, a);
-      seat('gate-a', start - 60_000, true, a);
-      seat('gate-b', start - 60_000, true, b);
-      at(start);
-      assert.equal(await take(side), null);
-      at(start + 5 * GATE_LEND_MS);
-      assert.equal(await take(side), null);
-    },
-    { ...SIX_EACH, table: false },
-  );
-}
-
-/**
- * Side work never holds more than the free slots, however large the gates' free parts, and a slot
- * it holds is not taken back from it. The older gate runs nine engines, over its share of six, so
- * three slots stand free while the younger gate is idle.
- */
-async function testSideWorkNeverTakesMoreThanTheFreeSlotsOrAnEngineBack(): Promise<void> {
-  await withALendRig(async ({ start, at, seat, engine, side, gate, take, takeAll, directory, a, b }) => {
-    const mine = [0, 1, 2, 3, 4, 5, 6, 7, 8];
-    for (const slot of mine) {
-      engine(slot, a);
-    }
-    seat('gate-a', start - 60_000, true, a);
-    at(start);
-    assert.equal(await take(side), null);
-    at(start + 6000);
-    seat('gate-b', start + 6000, true, b);
-    at(start + GATE_LEND_MS);
-    assert.equal(await take(side), null, "the older gate's own share is all its engines hold");
-    at(start + 6000 + GATE_LEND_MS);
-    assert.deepEqual(
-      await takeAll(side),
-      locksDown(11, 9),
-      "the idle gate's part is six, three slots stand free",
-    );
-    at(start + 10 * GATE_LEND_MS);
-    assert.equal(await take(side), null, 'nothing more is lent');
-    assert.equal(await take(gate), null, 'and the gate finds no slot free');
-    assert.deepEqual(
-      locksStand(
-        directory,
-        Array.from({ length: 12 }, (_, slot) => slot),
-      ),
-      Array.from({ length: 12 }, () => true),
-      "no gate engine's lock is touched and what side work holds stays held",
-    );
-    assert.deepEqual(
-      mine.map((slot) => holderOf(readFileSync(join(directory, `${String(slot)}.lock`), 'utf8'))?.pid),
-      mine.map(() => a.pid),
-      'the older gate still holds its slots',
-    );
-  }, SIX_EACH);
-}
-
-/**
- * A seated gate's free slots, which no engine of the gate takes for ten seconds, are lent to side
- * work, and not before. A slot side work frees goes to a gate engine that takes it first, and a slot
- * a side engine holds is never taken back.
- */
-async function testAGateSlotNoEngineTakesForTenSecondsIsLentToSideWork(): Promise<void> {
-  await withALendRig(async ({ start, at, seat, side, gate, take, takeAll, directory }) => {
-    seat('gate-1', start);
-    at(start + 1);
-    assert.equal(await take(side), null, 'a gate just seated keeps its four free slots');
-    at(start + GATE_LEND_MS - 1);
-    assert.equal(await take(side), null, 'and until ten seconds have passed');
-    at(start + GATE_LEND_MS);
-    assert.deepEqual(await takeAll(side), locksDown(5, 2), 'then side work takes all four');
-
-    at(start + GATE_LEND_MS + 1000);
-    side.release(join(directory, '5.lock'));
-    const back = await take(gate);
-    assert.equal(back === null ? null : basename(back), '5.lock', 'the gate engine takes the freed slot');
-    at(start + GATE_LEND_MS + 60_000);
-    assert.equal(await take(gate), null, 'a slot a side engine still holds is not taken back');
-    assert.deepEqual(locksStand(directory, [4, 3, 2]), [true, true, true], 'and its lock stands');
-  });
-}
-
-/** A gate whose engines take the owed slots within ten seconds has nothing lent. */
-async function testAGateThatTakesItsSlotsInTimeLendsNothing(): Promise<void> {
-  await withALendRig(async ({ start, at, seat, side, gate, take, takeAll, directory }) => {
-    seat('gate-1', start);
-    at(start + 1);
-    assert.equal(await take(side), null, 'nothing is lent at first');
-    at(start + 5000);
-    assert.deepEqual(await takeAll(gate), ['2.lock', '3.lock', '4.lock', '5.lock']);
-    for (const after of [GATE_LEND_MS, 3 * GATE_LEND_MS]) {
-      at(start + after);
-      assert.equal(await take(side), null, `the gate holds its share ${String(after)} ms in`);
-    }
-    for (const lock of ['2', '3', '4', '5']) {
-      gate.release(join(directory, `${lock}.lock`));
-    }
-    at(start + 100_000);
-    const retaken = await take(gate);
-    assert.equal(retaken === null ? null : basename(retaken), '2.lock', 'the gate retakes its lowest');
-    assert.equal(await take(side), null, 'a gate that has just taken a slot lends nothing');
-    at(start + 100_000 + GATE_LEND_MS);
-    assert.deepEqual(await takeAll(side), locksDown(5, 3), 'and the ones it did not retake are lent');
-  });
-}
-
-/** Each seated gate's free part is lent from its own seat. */
-async function testTwoSeatedGatesHaveTheirOwedSlotsLentOnTheirOwnSeats(): Promise<void> {
-  await withALendRig(async ({ start, at, seat, side, take, takeAll, b }) => {
-    seat('gate-1', start);
-    at(start + 1);
-    assert.equal(await take(side), null, 'a gate just seated lends nothing');
-    at(start + 6001);
-    seat('gate-2', start + 6000, true, b);
-    at(start + GATE_LEND_MS);
-    assert.deepEqual(await takeAll(side), ['5.lock'], "only the older gate's free one of its three is lent");
-    at(start + 16_000);
-    assert.deepEqual(
-      await takeAll(side),
-      locksDown(4, 2),
-      "and the younger gate's three ten seconds after its seat",
-    );
-  });
-}
-
-/** The queue's count is read as before: none lent on a stale count, or while no gate is seated. */
-async function testNothingIsLentOnAStaleCountOrToAGateNotYetSeated(): Promise<void> {
-  await withALendRig(async ({ start, at, seat, side, take }) => {
-    seat('gate-1', start - 60_000);
-    at(start, 0);
-    writeFileSync(
-      join(side.directory, SPARE_FILE),
-      JSON.stringify({
-        spare: 0,
-        pid: process.pid,
-        started: await ownStart(),
-        written: start - SPARE_STALE_MS - 1000,
-      }),
-    );
-    assert.equal(await take(side), null, 'a stale count lends nothing, however quiet the gate');
-    at(start + 1);
-    const lent = await take(side);
-    assert.equal(lent === null ? null : basename(lent), '5.lock', 'a fresh count lends again');
-    side.release(lent ?? '');
-    rmSync(join(side.directory, QUEUED_FOLDER, 'gate-1.json.seated'));
-    at(start + 120_000);
-    assert.equal(await take(side), null, 'a gate not yet seated is lent nothing');
-  });
-}
-
-/**
- * Side work keeps every slot it is lent, the last one included: the recount after each take, which
- * sees the take's lock as written after the count, finds it within the lend. With six to lend side
- * work keeps six, and with one it keeps one, through later looks.
- */
-async function testSideWorkKeepsEverySlotItIsLent(): Promise<void> {
-  for (const running of [0, 5]) {
-    await withALendRig(
-      async ({ start, at, seat, engine, side, take, takeAll, directory, a }) => {
-        for (let slot = 0; slot < running; slot += 1) {
-          engine(slot, a, start - 60_000);
-        }
-        seat('gate-1', start);
-        at(start + GATE_LEND_MS - 1);
-        assert.equal(await take(side), null, 'nothing is lent before ten seconds');
-        at(start + GATE_LEND_MS);
-        const lent = locksDown(5, running);
-        assert.deepEqual(
-          await takeAll(side),
-          lent,
-          `with ${String(running)} running, ${String(6 - running)} are lent`,
-        );
-        for (const later of [2, 3, 6]) {
-          at(start + later * GATE_LEND_MS);
-          assert.equal(await take(side), null, 'no more is lent');
-          assert.deepEqual(
-            locksStand(directory, [0, 1, 2, 3, 4, 5]),
-            [0, 1, 2, 3, 4, 5].map(() => true),
-            'and nothing lent is given back',
-          );
-        }
-      },
-      { held: [] },
-    );
-  }
-}
-
-/**
- * A slot a gate engine freed 50 ms ago is not lent while the gate took a lane under ten seconds
- * ago, even to a taker that last looked long before, when the slot stood free.
- */
-async function testASlotFreedWhileTheGateStartsLanesIsNotLentToAnOldLook(): Promise<void> {
-  await withALendRig(
-    async ({ start, at, seat, engine, end, side, take, takeAll, a }) => {
-      for (const slot of [0, 1, 2]) {
-        engine(slot, a);
-      }
-      seat('gate-1', start - 60_000);
-      at(start);
-      assert.equal(await take(side), null, 'the gate has just started its engines');
-      at(start + 5000);
-      engine(5, a);
-      at(start + 35_000);
-      engine(4, a);
-      at(start + 40_000);
-      end(5);
-      at(start + 40_050);
-      assert.equal(await take(side), null, 'the gate took a lane 5 s ago');
-      at(start + 35_000 + GATE_LEND_MS);
-      assert.deepEqual(await takeAll(side), ['5.lock', '3.lock'], 'once it is quiet, its free part is lent');
-    },
-    { held: [] },
-  );
-}
-
-/** One second of a gate starting a lane every [param apart] s from 2 s, and a side taker looking. */
-async function aSecondOfLanes(
-  { start, at, tick, side, gate, take }: LendRig,
-  second: number,
-  apart: number,
-  seen: { lanes: string[]; lent: string[] },
-): Promise<void> {
-  const when = start + second * 1000;
-  if (second % 5 === 0) {
-    at(when);
-  } else {
-    tick(when);
-  }
-  if (seen.lanes.length < 6 && second >= 2 && (second - 2) % apart === 0) {
-    const lane = await take(gate);
-    seen.lanes.push(lane === null ? `${String(second)}s: none` : basename(lane));
-  }
-  const taken = await take(side);
-  if (taken !== null) {
-    seen.lent.push(`${String(second)}s: ${basename(taken)}`);
-  }
-}
-
-/** A gate that starts its six lanes 4 s or 9 s apart gets all six, and side work none of them. */
-async function testAGateStartingLanesSecondsApartGetsAllOfThem(): Promise<void> {
-  for (const apart of [4, 9]) {
-    await withALendRig(
-      async (rig) => {
-        rig.seat('gate-1', rig.start);
-        const seen = { lanes: [] as string[], lent: [] as string[] };
-        for (let second = 1; second <= 2 + 5 * apart + 3 * (GATE_LEND_MS / 1000); second += 1) {
-          await aSecondOfLanes(rig, second, apart, seen);
-        }
-        assert.deepEqual(
-          seen.lanes,
-          locksDown(5, 0).toReversed(),
-          `lanes ${String(apart)} s apart all start`,
-        );
-        assert.deepEqual(seen.lent, [], 'and side work is lent none of their slots');
-      },
-      { held: [] },
-    );
-  }
-}
-
-/**
- * The lend answers as the machine's queue counts it: every gate engine, of any gate, counts against
- * the free parts of the quiet gates. Eight slots, six of them the gates', free 20 s, a young gate
- * seated 5 s ago.
- */
-async function testTheLendCountsEveryGateEngineAsTheQueueDoes(): Promise<void> {
-  const tables: {
-    name: string;
-    gates: { age: number; running: number }[];
-    sideHolds?: number;
-    lent: number;
-  }[] = [
-    { name: 'one quiet gate idle', gates: [{ age: 60, running: 0 }], lent: 6 },
-    {
-      name: 'a quiet idle, b 5 s running 3',
-      gates: [
-        { age: 60, running: 0 },
-        { age: 5, running: 3 },
-      ],
-      lent: 0,
-    },
-    {
-      name: 'a quiet running 4, b quiet idle',
-      gates: [
-        { age: 60, running: 4 },
-        { age: 60, running: 0 },
-      ],
-      lent: 2,
-    },
-    {
-      name: 'a 5 s running 4, b quiet idle',
-      gates: [
-        { age: 5, running: 4 },
-        { age: 60, running: 0 },
-      ],
-      lent: 0,
-    },
-    {
-      name: 'a quiet idle, b quiet running 1, c 5 s idle',
-      gates: [
-        { age: 60, running: 0 },
-        { age: 60, running: 1 },
-        { age: 5, running: 0 },
-      ],
-      lent: 3,
-    },
-    {
-      name: 'one quiet gate idle, side work holds 2',
-      gates: [{ age: 60, running: 0 }],
-      sideHolds: 2,
-      lent: 4,
-    },
-    {
-      name: 'a quiet running 1, b 5 s running 2',
-      gates: [
-        { age: 60, running: 1 },
-        { age: 5, running: 2 },
-      ],
-      lent: 0,
-    },
-  ];
-  for (const table of tables) {
-    await withALendRig(
-      async ({ start, at, seat, engine, side, takeAll, a, b, c }) => {
-        const who = [a, b, c];
-        let slot = table.sideHolds ?? 0;
-        for (const [index, one] of table.gates.entries()) {
-          const gate = who[index] ?? a;
-          seat(`gate-${String(index)}`, start - one.age * 1000, true, gate);
-          for (let engines = 0; engines < one.running; engines += 1) {
-            engine(slot, gate, start - 20_000);
-            slot += 1;
-          }
-        }
-        at(start);
-        assert.equal((await takeAll(side)).length, table.lent, table.name);
-      },
-      { held: Array.from({ length: table.sideHolds ?? 0 }, (_, one) => one) },
-    );
-  }
-}
-
-/**
- * A gate slot given back 50 ms ago is not lent, whatever a taker saw when it last looked, and is
- * lent once its mark in the freed folder is ten seconds old. Slots with no mark there stand free.
- */
-async function testASlotGivenBackFiftyMillisecondsAgoIsNotLent(): Promise<void> {
-  await withALendRig(
-    async ({ directory, start, at, seat, engine, side, takeAll, a, self }) => {
-      seat('gate-1', start - 60_000);
-      engine(5, a, start - 60_000);
-      giveBackSlot(join(directory, '5.lock'), a.pid);
-      at(start + 50);
-      const fresh = new EngineSlots(directory, 8, self, undefined, () => 'other', undefined, {
-        processes: () => Promise.resolve(new Map()),
-      });
-      try {
-        assert.deepEqual(await takeAll(side), locksDown(4, 0), 'the slots never given back are lent');
-        assert.equal(await fresh.takeFree(), null, 'and a taker that never looked is not lent the one freed');
-      } finally {
-        fresh.releaseAll();
-      }
-      at(start + GATE_LEND_MS - 1);
-      assert.deepEqual(await takeAll(side), [], 'nor until ten seconds have passed');
-      at(start + GATE_LEND_MS);
-      assert.deepEqual(await takeAll(side), ['5.lock'], 'then it is lent');
-      assert.ok(!existsSync(join(directory, FREED_FOLDER, '5')), 'and the take removes its freed mark');
-    },
-    { held: [] },
-  );
-}
-
-/**
- * A slot whose freed mark cannot be written is given back all the same, so a long-lived server never
- * loses it, and it reads as a slot with no mark: freed at the gate's seat.
- */
-async function testASlotWhoseFreedMarkCannotBeWrittenIsGivenBackAndReadsAsUnmarked(): Promise<void> {
-  await withALendRig(
-    async ({ directory, start, at, seat, engine, side, takeAll, a }) => {
-      seat('gate-1', start - 60_000);
-      engine(5, a, start - 60_000);
-      writeFileSync(join(directory, FREED_FOLDER), 'not a folder');
-      giveBackSlot(join(directory, '5.lock'), a.pid);
-      assert.ok(!existsSync(join(directory, '5.lock')), 'the slot is given back');
-      at(start + 50);
-      assert.deepEqual(await takeAll(side), locksDown(5, 0), 'and lent as one freed at the seat');
-    },
-    { held: [] },
-  );
-}
-
-/** A side taker of the lend rig's [param directory] whose process table, from [param parents], counts its reads. */
-function countingSideTaker(
-  directory: string,
-  self: Tenant,
-  parents: ReadonlyMap<number, number>,
-): { slots: EngineSlots; reads: () => number } {
-  let reads = 0;
-  const slots = new EngineSlots(directory, 8, self, undefined, () => 'other', undefined, {
-    processes: () => {
-      reads += 1;
-      return Promise.resolve(new Map([...parents].map(([pid, parent]) => [pid, { parent, command: '' }])));
-    },
-  });
-  return { slots, reads: () => reads };
-}
-
-/**
- * A gate running three of its six engines, with its three free slots given back a moment ago, has
- * nothing a waiting side taker could be lent by the slot folder alone. Twenty looks read no process
- * table.
- */
-async function testALookWithNoSlotFreedTenSecondsReadsNoProcessTable(): Promise<void> {
-  await withALendRig(
-    async ({ directory, start, at, seat, engine, take, a, self, parents }) => {
-      seat('gate-1', start - 60_000);
-      for (const slot of [0, 1, 2]) {
-        engine(slot, a, start - 2000);
-      }
-      mkdirSync(join(directory, FREED_FOLDER), { recursive: true });
-      for (const slot of [3, 4, 5]) {
-        writeFileSync(join(directory, FREED_FOLDER, String(slot)), JSON.stringify({ freed: start - 500 }));
-      }
-      const side = countingSideTaker(directory, self, parents);
-      try {
-        for (let look = 0; look < 20; look += 1) {
-          at(start + look * 100);
-          assert.equal(await take(side.slots), null, 'nothing is lent');
-        }
-        assert.equal(side.reads(), 0, 'and no look reads the process table');
-      } finally {
-        side.slots.releaseAll();
-      }
-    },
-    { held: [] },
-  );
-}
-
-/**
- * A waiting side taker keeps its reading of the process table: twenty looks over four seconds, each
- * with three unmarked slots it could be lent beside a gate still starting engines, read it once.
- */
-async function testTwentyLooksOverFourSecondsReadTheProcessTableOnce(): Promise<void> {
-  await withALendRig(
-    async ({ directory, start, at, seat, engine, take, a, self, parents }) => {
-      seat('gate-1', start - 60_000);
-      for (const slot of [0, 1, 2]) {
-        engine(slot, a, start - 2000);
-      }
-      const side = countingSideTaker(directory, self, parents);
-      try {
-        for (let look = 0; look < 20; look += 1) {
-          at(start + look * 200);
-          assert.equal(await take(side.slots), null, 'the gate is not quiet, so nothing is lent');
-        }
-        assert.equal(side.reads(), 1, 'and the process table is read once');
-      } finally {
-        side.slots.releaseAll();
-      }
-    },
-    { held: [] },
-  );
-}
-
-/**
- * A kept process table is read again once a lock is written after it, since its holder may be new:
- * an engine the gate starts below its process a second after the reading keeps the gate from quiet.
- */
-async function testALockWrittenAfterAKeptProcessTableIsPlacedByANewReading(): Promise<void> {
-  await withALendRig(
-    async ({ directory, start, at, seat, engine, take, a, c, self, parents }) => {
-      seat('gate-1', start - 60_000);
-      engine(0, a, start - 8000);
-      const side = countingSideTaker(directory, self, parents);
-      try {
-        at(start);
-        assert.equal(await take(side.slots), null, 'the gate took its engine 8 s ago');
-        parents.set(c.pid, a.pid);
-        engine(1, c, start + 1000);
-        at(start + 2100);
-        assert.equal(await take(side.slots), null, 'its new engine below it keeps it from quiet');
-        assert.equal(side.reads(), 2, 'which a second reading places');
-      } finally {
-        side.slots.releaseAll();
-      }
-    },
-    { held: [] },
-  );
-}
-
-/** One table of the shared lending fixture. */
-interface LendTable {
-  name: string;
-  now: number;
-  gated: number;
-  owed: number;
-  running: number;
-  seats: number[];
-  newest_engine: number | null;
-  free: { slot: number; freed: number | null; lock: boolean }[];
-  lent: number;
-  lendable: number[];
-}
-
-/** One table of the shared lending fixture, read from [param value]. */
-function lendTableOf(value: unknown): LendTable {
-  const {
-    name,
-    now,
-    gated,
-    owed,
-    running,
-    seats,
-    newest_engine: newest,
-    free,
-    lent,
-    lendable,
-  } = asObject(value, 'a lending table');
-  return {
-    name: asString(name, 'name'),
-    now: asNumber(now, 'now'),
-    gated: asNumber(gated, 'gated'),
-    owed: asNumber(owed, 'owed'),
-    running: asNumber(running, 'running'),
-    seats: asArray(seats, 'seats').map((one) => asNumber(one, 'seat')),
-    newest_engine: newest === null ? null : asNumber(newest, 'newest_engine'),
-    free: asArray(free, 'free').map((one) => {
-      const { slot, freed, lock } = asObject(one, 'a free slot');
-      return {
-        slot: asNumber(slot, 'slot'),
-        freed: freed === null ? null : asNumber(freed, 'freed'),
-        lock: lock === true,
-      };
-    }),
-    lent: asNumber(lent, 'lent'),
-    lendable: asArray(lendable, 'lendable').map((one) => asNumber(one, 'lendable')),
-  };
-}
-
-/** Sets up one fixture [param table] in [param rig]: seats, engines, side work and freed marks. */
-async function lendTableLaidOut(rig: LendRig, table: LendTable, gone: Tenant): Promise<void> {
-  const { start, at, seat, engine, directory, a, b } = rig;
-  const when = (ms: number): number => start + ms - table.now;
-  for (const [index, seatedAt] of table.seats.entries()) {
-    seat(`gate-${String(index)}`, when(seatedAt), true, index === 0 ? a : b);
-  }
-  const free = new Set(table.free.map((one) => one.slot));
-  const held = Array.from({ length: table.gated }, (_, slot) => slot).filter((slot) => !free.has(slot));
-  for (const [index, slot] of held.slice(0, table.running).entries()) {
-    engine(slot, a, when((table.newest_engine ?? table.now) - index * 1000));
-  }
-  mkdirSync(join(directory, FREED_FOLDER), { recursive: true });
-  for (const one of table.free) {
-    if (one.freed !== null) {
-      writeFileSync(
-        join(directory, FREED_FOLDER, String(one.slot)),
-        JSON.stringify({ freed: when(one.freed) }),
-      );
-    }
-    if (one.lock) {
-      engine(one.slot, gone, when(table.now - 60_000));
-    }
-  }
-  at(start, table.free.length - table.owed);
-  await Promise.resolve();
-}
-
-/**
- * The shared lending tables answer here as the machine's queue answers them: side work takes the
- * count's slots and the lent ones, and each lent slot is one the table may lend.
- */
-async function testTheSharedLendingTablesAnswerAsTheQueueDoes(): Promise<void> {
-  const tables = asArray(
-    get(JSON.parse(readFileSync(join(import.meta.dirname, 'support', 'lend.json'), 'utf8')), 'cases'),
-  ).map(lendTableOf);
-  const exited = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
-  await exitOf(exited);
-  const gone = { pid: exited.pid ?? 0, started: await ownStart() };
-  for (const table of tables) {
-    const free = new Set(table.free.map((one) => one.slot));
-    const sideHolds = Array.from({ length: table.gated }, (_, slot) => slot)
-      .filter((slot) => !free.has(slot))
-      .slice(table.running);
-    await withALendRig(
-      async (rig) => {
-        await lendTableLaidOut(rig, table, gone);
-        const taken = (await rig.takeAll(rig.side)).map((name) => Number(name.replace('.lock', '')));
-        const counted = table.free
-          .map((one) => one.slot)
-          .toSorted((x, y) => y - x)
-          .slice(0, table.free.length - table.owed);
-        assert.equal(taken.length, counted.length + table.lent, `${table.name}: ${JSON.stringify(taken)}`);
-        assert.ok(
-          taken.every((slot) => counted.includes(slot) || table.lendable.includes(slot)),
-          `${table.name}: each lent slot may be lent, ${JSON.stringify(taken)}`,
-        );
-      },
-      { count: table.gated + (table.gated === 6 ? 2 : 4), held: sideHolds },
-    );
-  }
-}
-
-/** A gate seated long ago and quiet ten seconds, running 2 of its share of 6, lends 4. */
-async function testAQuietGateRunningTwoOfSixLendsFour(): Promise<void> {
-  for (const [since, lent] of [
-    [GATE_LEND_MS - 500, []],
-    [GATE_LEND_MS, locksDown(5, 2)],
-  ] as const) {
-    await withALendRig(
-      async ({ start, at, seat, engine, side, takeAll, a }) => {
-        seat('gate-1', start - 3_600_000);
-        engine(0, a, start - since);
-        engine(1, a, start - since - 1000);
-        at(start);
-        assert.deepEqual(await takeAll(side), lent, `engines started ${String(since)} ms ago`);
-      },
-      { held: [] },
-    );
-  }
-}
-
-/**
- * A gate whose process is alive keeps the free slots of the gates from side work unless a fresh
- * count from a live writer says how many are spare, seated or not: a queue process counting for a
- * waiting gate writes the count under its own pid, and a count whose writer has ended says nothing
- * about the gate its ticker still counts for. With no live gate, the free slots are side work's
- * whatever the file says.
- */
-async function testSideWorkTakesNoGateSlotWhileALiveGateHasNoFreshCount(): Promise<void> {
-  const started = await ownStart();
-  const gone = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
-  assert.equal(typeof gone.pid, 'number', 'a process to have gone');
-  const counted = (pid: number, written: number): string =>
-    `{"spare": 6, "pid": ${String(pid)}, "started": ${String(started)}, "written": ${String(written)}}`;
-  const states = [
-    ['a missing count', undefined],
-    ['an unreadable one', `{"spare": 6, "pid": ${String(process.pid)}, `],
-    ['a count whose writer has gone', counted(gone.pid, Date.now() - 500)],
-    ['a stale count', counted(process.pid, Date.now() - SPARE_STALE_MS - 1000)],
-  ] as const;
-  for (const seated of [false, true]) {
-    for (const [why, spare] of states) {
-      const directory = eightSlotsWithTheKeptOnesHeld(started, seated, [], spare);
-      try {
-        const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
-        const gate = seated ? 'a seated gate' : 'a queued gate';
-        assert.equal(await side.takeFree(), null, `${gate} with ${why} keeps its free slots`);
-        assert.equal(side.drawn.limit, 'kept', JSON.stringify(side.drawn));
-        rmSync(join(directory, QUEUED_FOLDER, 'gate-1.json'));
-        const lock = await side.takeFree();
-        assert.equal(
-          lock === null ? null : basename(lock),
-          '5.lock',
-          `side work takes one once the gate is gone`,
-        );
-        assert.deepEqual(side.drawn.numbers, [7, 6, 5, 4, 3, 2, 1, 0], `and draws every slot with ${why}`);
-        side.releaseAll();
-      } finally {
-        rmSync(directory, { recursive: true, force: true });
-      }
-    }
-  }
-  const dead = eightSlotsWithTheKeptOnesHeld(started, false, [], counted(gone.pid, Date.now()));
-  try {
-    writeFileSync(
-      join(dead, QUEUED_FOLDER, 'gate-1.json'),
-      `{"pid": ${String(gone.pid)}, "started": ${String(started)}}`,
-    );
-    const side = new EngineSlots(dead, 8, { pid: process.pid, started }, undefined, () => 'other');
-    const lock = await side.takeFree();
-    assert.equal(lock === null ? null : basename(lock), '5.lock', 'a gate that has gone keeps nothing');
-    side.releaseAll();
-  } finally {
-    rmSync(dead, { recursive: true, force: true });
-  }
-}
-
-/**
- * A gate seated after the count was written is one the count could not have counted, as it stood
- * before that seat (`slots.seated_mark`, newer than `written`). Side work takes no gate slot on
- * it, and takes the counted share once a count written after the seat stands.
- */
-async function testACountFromBeforeASeatIsStaleForSideWork(): Promise<void> {
-  const started = await ownStart();
-  const pid = String(process.pid);
-  const directory = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
-  const seat = join(directory, QUEUED_FOLDER, 'gate-1.json.seated');
-  const counted = (written: number): string =>
-    `{"spare": 2, "pid": ${pid}, "started": ${String(started)}, "written": ${String(written)}}`;
-  try {
-    const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
-    writeFileSync(join(directory, SPARE_FILE), counted(Date.now() - 3000));
-    const seatedAt = new Date(Date.now() - 1000);
-    utimesSync(seat, seatedAt, seatedAt);
-    assert.equal(
-      await side.takeFree(),
-      null,
-      'a seat newer than the count leaves the free slots to its gate',
-    );
-    assert.equal(side.drawn.limit, 'kept', JSON.stringify(side.drawn));
-    writeFileSync(join(directory, SPARE_FILE), counted(Date.now() - 500));
-    const lock = await side.takeFree();
-    assert.equal(lock === null ? null : basename(lock), '5.lock', 'and the count written after it stands');
-    side.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * Two side takes that begin together under a count of 1 never both keep a gate slot. Each reads
- * one spare slot before either takes it, so the one that comes second counts the folder again and
- * gives its slot back. Run 60 times, each with the takes started together.
- */
-async function testTwoConcurrentSideTakesUnderOneSpareSlotNeverHoldTwoGateSlots(): Promise<void> {
-  const started = await ownStart();
-  const directory = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
-  try {
-    const makeSide = (): EngineSlots =>
-      new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
-    const held: number[] = [];
-    for (let round = 0; round < 60; round += 1) {
-      writeFileSync(
-        join(directory, SPARE_FILE),
-        `{"spare": 1, "pid": ${String(process.pid)}, "started": ${String(started)}, "written": ${String(Date.now() - 500)}}`,
-      );
-      const sides = [makeSide(), makeSide()];
-      const took = await Promise.all(sides.map((side) => side.takeFree()));
-      const mine = took.filter((lock) => lock !== null).length;
-      held.push(mine);
-      assert.ok(mine <= 1, `round ${String(round)} held ${String(mine)}`);
-      assert.equal(
-        [4, 5].filter((slot) => existsSync(join(directory, `${String(slot)}.lock`))).length,
-        mine,
-        'and the slot given back is free',
-      );
-      for (const side of sides) {
-        side.releaseAll();
-      }
-    }
-    assert.ok(
-      held.some((count) => count === 1),
-      'one of the two takes is kept',
-    );
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * Runs [param after] right after [param slots] first reads the free slots of the folder, as
- * another taker's take would land there, and answers how many times the folder has been read.
- */
-function afterTheFirstLook(slots: EngineSlots, after: () => void): () => number {
-  const read: unknown = Reflect.get(slots, 'openSlots');
-  if (typeof read !== 'function') {
-    throw new TypeError('the read of the free slots is there to watch');
-  }
-  let looks = 0;
-  Reflect.set(slots, 'openSlots', async (): Promise<unknown> => {
-    looks += 1;
-    const open: unknown = await Reflect.apply(read, slots, []);
-    if (looks === 1) {
-      after();
-    }
-    return open;
-  });
-  return () => looks;
-}
-
 const MEMORY_GIB = 1024 ** 3;
 
 /** Runs [param body] with no engine memory ceiling set and a runtime folder of its own. */
@@ -78592,176 +75082,45 @@ function standInLock(
   );
 }
 
-/**
- * The engines of a machine together stay inside what it holds. On 64 GiB with twelve slots the
- * budget is 48 GiB: a take counts the live locks' memory and its own, a lock without a figure counts
- * 1.5 GiB for each slot it holds, and the first engine of a machine takes whatever it needs.
- */
-async function testEnginesTogetherStayInsideTheMachinesMemory(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
-  try {
-    await withNoCeilingSet(async () => {
-      await recordEnginePeak(project, 'project_test', 7 * MEMORY_GIB);
-      const slots = new EngineSlots(
-        directory,
-        12,
-        { pid: process.pid, started },
-        undefined,
-        () => 'other',
-        project,
-        { memory: 64 * MEMORY_GIB },
-      );
-      assert.equal(slots.memoryBudget, 48 * MEMORY_GIB, 'the machine less what everything else keeps');
-      for (const slot of [0, 1, 2, 3]) {
-        standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
-      }
-      const fifth = await slots.takeFree();
-      assert.notEqual(fifth, null, 'the fifth 7 GiB engine fits');
-      assert.equal(
-        holderOf(readFileSync(fifth ?? '', 'utf8'))?.memory,
-        7 * MEMORY_GIB,
-        'and its lock counts the 7 GiB the project held last',
-      );
-      standInLock(directory, 5, started, { memory: 7 * MEMORY_GIB });
-      rmSync(fifth ?? '');
-      standInLock(directory, 4, started, { memory: 7 * MEMORY_GIB });
-      assert.equal(await slots.takeFree(), null, 'a seventh at 42 GiB live does not');
-      assert.deepEqual(
-        slots.drawn.short,
-        { budget: 48 * MEMORY_GIB, held: 42 * MEMORY_GIB, ahead: 0, need: 7 * MEMORY_GIB },
-        'and says what it waits for while slots are free',
-      );
-      rmSync(join(directory, '0.lock'));
-      assert.notEqual(await slots.takeFree(), null, 'it takes once a lock goes');
-      slots.releaseAll();
-    });
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-    rmSync(project, { recursive: true, force: true });
-  }
-}
-
-/** A lock with no figure counts 1.5 GiB a slot it holds, so another tool's slots weigh what its queue counts. */
-async function testALockWithNoMemoryCountsOneAndAHalfGiBASlot(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
-  try {
-    await withNoCeilingSet(async () => {
-      await recordEnginePeak(project, 'project_test', 7 * MEMORY_GIB);
-      const slots = new EngineSlots(
-        directory,
-        12,
-        { pid: process.pid, started },
-        undefined,
-        () => 'other',
-        project,
-        { memory: 64 * MEMORY_GIB },
-      );
-      standInLock(directory, 0, started, {});
-      standInLock(directory, 1, started, { wants: 3 });
-      for (const slot of [2, 3, 4, 5, 6, 7]) {
-        standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
-      }
-      assert.equal(await slots.takeFree(), null, '1.5 + 4.5 + 42 GiB live and 7 more passes 48');
-      assert.equal(slots.drawn.short?.held, 48 * MEMORY_GIB, 'the one slot and the three count 6 GiB');
-    });
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-    rmSync(project, { recursive: true, force: true });
-  }
-}
-
-/**
- * Two takers that both counted room for one engine before either took it cannot both keep theirs:
- * the newest lock is given back and its take waits for memory.
- */
 async function testALockTakenBeyondTheBudgetByARaceIsGivenBack(): Promise<void> {
   const started = await ownStart();
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
+  const past = new Date(Date.now() - 120_000);
+  const landed = (slot: number): void => {
+    standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
+    utimesSync(join(directory, `${String(slot)}.lock`), past, past);
+  };
   try {
-    await withNoCeilingSet(async () => {
-      await recordEnginePeak(project, 'project_test', 7 * MEMORY_GIB);
-      const slots = new EngineSlots(
-        directory,
-        12,
-        { pid: process.pid, started },
-        undefined,
-        () => 'other',
-        project,
-        { memory: 64 * MEMORY_GIB },
-      );
-      for (const slot of [0, 1, 2, 3, 4]) {
-        standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
-      }
-      const read: unknown = Reflect.get(slots, 'liveMemory');
-      if (typeof read !== 'function') {
-        throw new TypeError('the count of the live locks is there to watch');
-      }
-      let looks = 0;
-      Reflect.set(slots, 'liveMemory', async (): Promise<unknown> => {
-        const live: unknown = await Reflect.apply(read, slots, []);
-        looks += 1;
-        if (looks === 1) {
-          // Another taker's lock lands, older than the one this take is about to make.
-          standInLock(directory, 5, started, { memory: 7 * MEMORY_GIB });
-          standInLock(directory, 6, started, { memory: 7 * MEMORY_GIB });
-          const past = new Date(Date.now() - 60_000);
-          utimesSync(join(directory, '5.lock'), past, past);
-          utimesSync(join(directory, '6.lock'), past, past);
+    let reads = 0;
+    const slots = new EngineSlots(directory, 12, { pid: process.pid, started }, undefined, undefined, {
+      need: 7 * MEMORY_GIB,
+      available: () => {
+        reads += 1;
+        if (reads === 1) {
+          // Another taker's locks land, older than the one this take is about to make.
+          landed(5);
+          landed(6);
         }
-        return live;
-      });
-      assert.equal(await slots.takeFree(), null, 'the lock that passes 48 GiB is given back');
-      assert.equal(
-        readdirSync(directory).filter((name) => name.endsWith('.lock')).length,
-        7,
-        'and only the takers that came first keep theirs',
-      );
-      assert.equal(slots.drawn.short?.held, 49 * MEMORY_GIB, 'with what the others hold said');
+        return Promise.resolve(48 * MEMORY_GIB);
+      },
+      held: () => Promise.resolve(new Map()),
     });
+    for (const slot of [0, 1, 2, 3, 4]) {
+      landed(slot);
+    }
+    assert.equal(
+      await slots.takeFree(),
+      null,
+      'the lock that passes what the machine can give is given back',
+    );
+    assert.equal(
+      readdirSync(directory).filter((name) => name.endsWith('.lock')).length,
+      7,
+      'and only the takers that came first keep theirs',
+    );
+    assert.equal(slots.drawn.short?.owed, 49 * MEMORY_GIB, 'with what the others still owe said');
   } finally {
     rmSync(directory, { recursive: true, force: true });
-    rmSync(project, { recursive: true, force: true });
-  }
-}
-
-/** The first engine on a machine with no live lock takes, however much it needs. */
-async function testTheFirstEngineOnAMachineTakesWhateverItNeeds(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
-  try {
-    await withNoCeilingSet(async () => {
-      await recordEnginePeak(project, 'project_test', 3 * MEMORY_GIB);
-      const slots = new EngineSlots(
-        directory,
-        2,
-        { pid: process.pid, started },
-        undefined,
-        () => 'other',
-        project,
-        { memory: 8 * MEMORY_GIB },
-      );
-      assert.equal(slots.memoryBudget, 3 * MEMORY_GIB, 'a count set stands for 1.5 GiB a slot at least');
-      standInLock(directory, 0, started, { memory: 3 * MEMORY_GIB });
-      rmSync(join(directory, '0.lock'));
-      const first = await slots.takeFree();
-      assert.notEqual(first, null, 'the first takes at its figure');
-      assert.equal(
-        await slots.takeFree(),
-        null,
-        'the next with 3 GiB live waits for memory with a slot free',
-      );
-      assert.equal(slots.drawn.short?.held, 3 * MEMORY_GIB);
-      slots.releaseAll();
-    });
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-    rmSync(project, { recursive: true, force: true });
   }
 }
 
@@ -78775,15 +75134,9 @@ async function testALocksMemoryIsThePeakKeptCappedAtTheCeiling(): Promise<void> 
   const figureOf = async (take: (slots: EngineSlots) => Promise<string | null>): Promise<unknown> => {
     const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
     try {
-      const slots = new EngineSlots(
-        directory,
-        4,
-        { pid: process.pid, started },
-        undefined,
-        () => 'other',
-        project,
-        { memory: 64 * MEMORY_GIB },
-      );
+      const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, project, {
+        memory: 64 * MEMORY_GIB,
+      });
       const lock = await take(slots);
       const figure = holderOf(readFileSync(lock ?? '', 'utf8'))?.memory;
       slots.releaseAll();
@@ -78816,7 +75169,7 @@ async function testALocksMemoryIsThePeakKeptCappedAtTheCeiling(): Promise<void> 
  * A take that waits for memory keeps its place in line: a later one-slot take that would fit
  * beside what runs does not fit beside what the earlier one is owed, and takes after it.
  */
-async function testAMemoryWaiterKeepsItsPlaceInLine(): Promise<void> {
+async function testAMemoryWaiterDoesNotHoldBackOneThatFits(): Promise<void> {
   const started = await ownStart();
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
   const big = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-big-'));
@@ -78825,15 +75178,12 @@ async function testAMemoryWaiterKeepsItsPlaceInLine(): Promise<void> {
   try {
     await withNoCeilingSet(async () => {
       await recordEnginePeak(big, 'project_test', 7 * MEMORY_GIB);
-      const slots = new EngineSlots(
-        directory,
-        12,
-        { pid: process.pid, started },
-        undefined,
-        () => 'other',
-        undefined,
-        { memory: 64 * MEMORY_GIB },
-      );
+      await recordEnginePeak(small, 'project_test', MEMORY_GIB);
+      const slots = new EngineSlots(directory, 12, { pid: process.pid, started }, undefined, undefined, {
+        memory: 64 * MEMORY_GIB,
+        available: () => Promise.resolve(50 * MEMORY_GIB),
+        held: plentyOfMemory.held,
+      });
       for (const slot of [0, 1, 2, 3, 4, 5]) {
         standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
       }
@@ -78848,12 +75198,13 @@ async function testAMemoryWaiterKeepsItsPlaceInLine(): Promise<void> {
         return lock;
       });
       await delay(1500);
-      assert.deepEqual(order, [], 'the small one stays behind the 7 GiB one it fits beside at 43.5 GiB');
+      assert.deepEqual(order, ['small'], 'the small one takes the room 4 GiB leaves, past the 7 GiB one');
       const marks = readdirSync(join(directory, 'waiting')).filter((name) => name.endsWith('.json'));
-      assert.equal(marks.length, 2, `both keep a mark: ${marks.join(', ')}`);
+      assert.equal(marks.length, 1, `only the 7 GiB one keeps its mark: ${marks.join(', ')}`);
       rmSync(join(directory, '0.lock'));
-      await Promise.all([first, second]);
-      assert.deepEqual(order, ['big', 'small'], 'and takes once the earlier has its lock');
+      await first;
+      assert.deepEqual(order, ['small', 'big'], 'and the 7 GiB one takes once memory is owed less');
+      await second;
       slots.releaseAll();
     });
   } finally {
@@ -78864,21 +75215,21 @@ async function testAMemoryWaiterKeepsItsPlaceInLine(): Promise<void> {
   }
 }
 
-/** What a wait for memory says, as the wait line and the block's account of it, whole. */
 function testTheMemoryWaitIsSaidInWholeLines(): void {
-  const short = { budget: 48 * MEMORY_GIB, held: 42 * MEMORY_GIB, ahead: 0, need: 7 * MEMORY_GIB };
+  const short = {
+    free: 16 * MEMORY_GIB,
+    kept: 4 * MEMORY_GIB,
+    owed: 13 * MEMORY_GIB,
+    need: 1.6 * MEMORY_GIB,
+  };
   const drawn = { numbers: [6, 7], short };
   assert.equal(
     slotWaitSaid(3000, 12, 'slots', [], drawn),
-    'Waiting 3 s so far for an engine: the engines on this machine (slots) may hold 48.0 GB together, those running hold 42.0 GB and this engine needs 7.0 GB, so it starts once enough memory is given back.',
-  );
-  assert.equal(
-    slotWaitSaid(23_000, 12, 'slots', [], { numbers: [6], short: { ...short, ahead: 7 * MEMORY_GIB } }),
-    'Waiting 23 s so far for an engine: the engines on this machine (slots) may hold 48.0 GB together, those running hold 42.0 GB, 7.0 GB is left to takers ahead of it in line and this engine needs 7.0 GB, so it starts once enough memory is given back.',
+    'Waiting 3 s so far for an engine: the machine has 16.0 GB of memory free, 4.0 GB of it kept for everything else, the engines running still owe 13.0 GB and this engine needs 1.6 GB, so it starts once enough memory is given back.',
   );
   assert.equal(
     slotWaitedSaid(25_000, 12, 'slots', [], drawn),
-    'This call waited 25 s for engine memory in all. When it first waited, the engines on this machine (slots) could hold 48.0 GB together, those running held 42.0 GB and this engine needed 7.0 GB.',
+    'This call waited 25 s for engine memory in all. When it first waited, the machine had 16.0 GB of memory free, 4.0 GB of it kept for everything else, the engines running still owed 13.0 GB and this engine needed 1.6 GB.',
   );
 }
 
@@ -78928,256 +75279,23 @@ async function testTheFirstMemoryEndNotedOfARunStays(): Promise<void> {
   });
 }
 
-/** One, two and three slots hold what they stand for, a gate queued or not, and never wait for memory. */
-async function testSmallMachinesNeverWaitForMemoryWithinTheirSlots(): Promise<void> {
-  const started = await ownStart();
-  await withNoCeilingSet(async () => {
-    for (const count of [1, 2, 3]) {
-      for (const queued of [false, true]) {
-        await oneSmallMachineTakesTheLastSlot(count, queued, started);
-      }
-    }
-  });
-}
-
-/** A machine of [param count] slots, all but one held at 1.5 GiB, and the take of the last. */
-async function oneSmallMachineTakesTheLastSlot(
-  count: number,
-  queued: boolean,
-  started: number,
-): Promise<void> {
-  const directory = slotsWithGatesQueued(
-    queued ? { 'ticket.json': JSON.stringify({ pid: process.pid, started }) } : {},
-    [],
-    started,
-  );
-  try {
-    for (let slot = 0; slot < count - 1; slot += 1) {
-      standInLock(directory, slot, started, { memory: 1.5 * MEMORY_GIB });
-    }
-    const slots = new EngineSlots(
-      directory,
-      count,
-      { pid: process.pid, started },
-      undefined,
-      () => 'other',
-      undefined,
-      { memory: 8 * MEMORY_GIB },
-    );
-    const lock = await slots.takeFree();
-    const label = `${String(count)} slots, gate ${queued ? 'queued' : 'not queued'}`;
-    assert.equal(slots.drawn.short, undefined, `${label}: no wait for memory`);
-    assert.ok(queued || lock !== null, `${label}: the last slot is taken`);
-    slots.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * The budget counts the locks the slot count counts. A live lock past the count and a lock that
- * names no holder yet count nothing. On a 16 GiB machine, a CI runner's size, the budget is the
- * slots' 1.5 GiB each, and engines with no peak kept take every slot, as on 64 GiB.
- */
-async function testTheBudgetCountsOnlyTheLocksOfTheSlotsCounted(): Promise<void> {
-  const started = await ownStart();
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
-  const beside = (directory: string): void => {
-    standInLock(directory, 19, started, { memory: 7 * MEMORY_GIB });
-    writeFileSync(join(directory, '5.lock'), '');
-  };
-  try {
-    await withNoCeilingSet(async () => {
-      await recordEnginePeak(project, 'project_test', 4 * MEMORY_GIB);
-      const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-      try {
-        beside(directory);
-        standInLock(directory, 1, started, {});
-        writeFileSync(join(directory, '2.lock'), '');
-        const slots = new EngineSlots(
-          directory,
-          4,
-          { pid: process.pid, started },
-          undefined,
-          () => 'other',
-          project,
-          { memory: 16 * MEMORY_GIB },
-        );
-        assert.equal(slots.memoryBudget, 6 * MEMORY_GIB, 'four slots stand for 6 GiB on 16 GiB');
-        const lock = await slots.takeFree();
-        assert.equal(lock === null ? null : basename(lock), '3.lock', JSON.stringify(slots.drawn));
-        assert.equal(await slots.takeFree(), null, 'a second 4 GiB engine passes 6 GiB');
-        assert.deepEqual(
-          slots.drawn.short,
-          { budget: 6 * MEMORY_GIB, held: 5.5 * MEMORY_GIB, ahead: 0, need: 4 * MEMORY_GIB },
-          'held is slot 1 and the take, with the empty lock and those past the count counting nothing',
-        );
-        slots.releaseAll();
-      } finally {
-        rmSync(directory, { recursive: true, force: true });
-      }
-      for (const machine of [16, 64]) {
-        const every = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-        try {
-          beside(every);
-          const slots = new EngineSlots(
-            every,
-            4,
-            { pid: process.pid, started },
-            undefined,
-            () => 'other',
-            undefined,
-            { memory: machine * MEMORY_GIB },
-          );
-          const taken: (string | null)[] = [];
-          for (let take = 0; take < 4; take += 1) {
-            const lock = await slots.takeFree();
-            taken.push(lock === null ? null : basename(lock));
-          }
-          assert.deepEqual(taken, ['3.lock', '2.lock', '1.lock', '0.lock'], `${String(machine)} GiB`);
-          slots.releaseAll();
-        } finally {
-          rmSync(every, { recursive: true, force: true });
-        }
-      }
-    });
-  } finally {
-    rmSync(project, { recursive: true, force: true });
-  }
-}
-
-/**
- * A take that waits for a slot and then finds one free with the memory short rewrites its mark as a
- * wait for memory, begun when it began. A smaller take behind it waits past the yield, and takes
- * after it.
- */
-async function testASlotWaiterThatComesToWaitForMemoryKeepsItsPlace(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  const big = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-big-'));
-  const small = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-small-'));
-  const stop = new AbortController();
-  try {
-    await withNoCeilingSet(async () => {
-      await recordEnginePeak(big, 'project_test', 7 * MEMORY_GIB);
-      for (let slot = 0; slot < 12; slot += 1) {
-        standInLock(directory, slot, started, { memory: 4 * MEMORY_GIB });
-      }
-      const slots = new EngineSlots(
-        directory,
-        12,
-        { pid: process.pid, started },
-        undefined,
-        () => 'other',
-        undefined,
-        { memory: 64 * MEMORY_GIB },
-      );
-      const order: string[] = [];
-      const takeFor = (name: string, project: string): Promise<void> =>
-        slots.take(stop.signal, undefined, undefined, false, project).then(() => {
-          order.push(name);
-        });
-      const first = takeFor('big', big);
-      assert.ok(await untilTrue(() => slotWaiters(directory).length === 1, 5000), 'the big take waits');
-      const asASlotWait = slotWaiters(directory)[0];
-      assert.deepEqual([asASlotWait?.taker, asASlotWait?.memory], ['other', 0], 'for a slot at first');
-      rmSync(join(directory, '11.lock'));
-      assert.ok(
-        await untilTrue(() => slotWaiters(directory)[0]?.memory === 7 * MEMORY_GIB, 5000),
-        `then for memory, at 44 GiB live: ${JSON.stringify(slotWaiters(directory))}`,
-      );
-      const asAMemoryWait = slotWaiters(directory)[0];
-      assert.deepEqual(
-        [asAMemoryWait?.mark, asAMemoryWait?.taker, asAMemoryWait?.sinceSeconds],
-        [asASlotWait?.mark, 'other', asASlotWait?.sinceSeconds],
-        'in the same mark, begun when it began',
-      );
-      const second = takeFor('small', small);
-      await delay(SLOT_YIELD_MS + 2000);
-      assert.deepEqual(order, [], 'the 1.5 GiB take stays behind the 7 GiB one past the yield');
-      rmSync(join(directory, '10.lock'));
-      rmSync(join(directory, '9.lock'));
-      await Promise.all([first, second]);
-      assert.deepEqual(order, ['big', 'small'], 'and takes once the earlier has its lock');
-      slots.releaseAll();
-    });
-  } finally {
-    stop.abort();
-    for (const folder of [directory, big, small]) {
-      rmSync(folder, { recursive: true, force: true });
-    }
-  }
-}
-
-/**
- * Two takes waiting for memory with slots free make no lock and give none back while they wait: a
- * take that counted no room takes nothing, and the lock it would churn wakes every other waiter.
- */
-async function testMemoryWaitersMakeNoLocksWhileTheyWait(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  const big = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-big-'));
-  const stop = new AbortController();
-  try {
-    await withNoCeilingSet(async () => {
-      await recordEnginePeak(big, 'project_test', 7 * MEMORY_GIB);
-      for (let slot = 0; slot < 6; slot += 1) {
-        standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
-      }
-      let made = 0;
-      const takers = [0, 1].map(() => {
-        const slots = new EngineSlots(
-          directory,
-          12,
-          { pid: process.pid, started },
-          undefined,
-          () => 'other',
-          big,
-          { memory: 64 * MEMORY_GIB },
-        );
-        const lockOneOf: unknown = Reflect.get(slots, 'lockOneOf');
-        if (typeof lockOneOf !== 'function') {
-          throw new TypeError('the lock a take makes is there to watch');
-        }
-        Reflect.set(slots, 'lockOneOf', async (...args: unknown[]): Promise<unknown> => {
-          const lock: unknown = await Reflect.apply(lockOneOf, slots, args);
-          made += lock === null ? 0 : 1;
-          return lock;
-        });
-        return slots;
-      });
-      const waits = takers.map((slots) => slots.take(stop.signal).catch(() => undefined));
-      await delay(4000);
-      assert.equal(made, 0, 'no lock is made and given back while 42 GiB live leaves no room');
-      assert.equal(slotWaiters(directory).length, 2, 'and both wait in line');
-      stop.abort();
-      await Promise.all(waits);
-    });
-  } finally {
-    stop.abort();
-    for (const folder of [directory, big]) {
-      rmSync(folder, { recursive: true, force: true });
-    }
-  }
-}
-
 /** A game's lock handed to the process that runs it keeps the memory it counts, and the game mark. */
 async function testAGamesLockHandedOnKeepsItsMemory(): Promise<void> {
   const started = await ownStart();
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
   try {
     const lock = join(directory, '0.lock');
-    writeFileSync(lock, JSON.stringify({ pid: process.pid, started, game: true, memory: 7 * MEMORY_GIB }));
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, started, memory: 7 * MEMORY_GIB }));
     assert.equal(await handSlot(lock, process.pid, { pid: 4242, started: 1 }), true, 'handed');
     assert.deepEqual(
       JSON.parse(readFileSync(lock, 'utf8')),
-      { pid: 4242, started: 1, game: true, memory: 7 * MEMORY_GIB },
+      { pid: 4242, started: 1, memory: 7 * MEMORY_GIB },
       'the keeper holds the 7 GiB the take counted',
     );
     assert.equal(await handSlot(lock, 4242, { pid: 4343, started: 2, memory: 2 * MEMORY_GIB }), true);
     assert.deepEqual(
       JSON.parse(readFileSync(lock, 'utf8')),
-      { pid: 4343, started: 2, memory: 2 * MEMORY_GIB, game: true },
+      { pid: 4343, started: 2, memory: 2 * MEMORY_GIB },
       'a holder that names its own figure counts that one',
     );
   } finally {
@@ -79209,7 +75327,6 @@ function testACallsEngineWithNoToolCountsTheHeadlessPeak(): void {
       'const held = await slots.slotForCall(false, project);',
       "process.stdout.write(readFileSync(held.lock, 'utf8') + '\\n');",
       'held.release();',
-      'await held.settled();',
       "const named = await slots.slotForCall(false, project, 'project_test');",
       "process.stdout.write(readFileSync(named.lock, 'utf8'));",
       'named.release();',
@@ -79283,41 +75400,6 @@ async function testACommandLineLaneCountsItsOwnPeak(): Promise<void> {
     ['test', 'test_lane'],
   ] as const) {
     await oneCommandLineLaneCountsItsOwnPeak(command, tool);
-  }
-  const started = await ownStart();
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  try {
-    await withNoCeilingSet(async () => {
-      await recordEnginePeak(project, 'editor_run', 7.3e9);
-      await recordEnginePeak(project, 'project_test', 6.7e9);
-      await recordEnginePeak(project, 'test_lane', 2e9);
-      const slotsOf = (tool: PeakTool): EngineSlots =>
-        new EngineSlots(directory, 12, { pid: process.pid, started }, undefined, () => 'other', project, {
-          memory: 64 * MEMORY_GIB,
-          tool,
-        });
-      const calls = slotsOf('headless');
-      const lanes = slotsOf('test_lane');
-      const kinds = ['game', 'game', 'call', 'call', 'call', ...Array.from({ length: 7 }, () => 'lane')];
-      const taken: (string | null)[] = [];
-      for (const kind of kinds) {
-        if (kind === 'game') {
-          taken.push(await calls.takeFree(true));
-        } else if (kind === 'call') {
-          const stop = AbortSignal.timeout(5000);
-          taken.push(await calls.take(stop, undefined, undefined, false, project, undefined, 'project_test'));
-        } else {
-          taken.push(await lanes.takeFree());
-        }
-      }
-      assert.equal(taken.filter((lock) => lock !== null).length, 12, JSON.stringify(slotLocksIn(directory)));
-      calls.releaseAll();
-      lanes.releaseAll();
-    });
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-    rmSync(project, { recursive: true, force: true });
   }
 }
 
@@ -79630,7 +75712,6 @@ async function guardedAt(lock: string, readings: readonly number[]): Promise<Slo
 async function testASlotsFigureRisesToWhatItsEngineHolds(): Promise<void> {
   const started = await ownStart();
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
   try {
     await withNoCeilingSet(async () => {
       const lock = join(directory, '0.lock');
@@ -79642,27 +75723,21 @@ async function testASlotsFigureRisesToWhatItsEngineHolds(): Promise<void> {
         { pid: process.pid, started, memory: 5 * MEMORY_GIB },
         'the lock counts the 5 GiB its engine holds',
       );
-      await recordEnginePeak(project, 'project_test', 7 * MEMORY_GIB);
       for (const slot of [1, 2, 3, 4, 5]) {
         standInLock(directory, slot, started, { memory: 7 * MEMORY_GIB });
       }
       standInLock(directory, 6, started, { memory: 3 * MEMORY_GIB });
-      const slots = new EngineSlots(
-        directory,
-        12,
-        { pid: process.pid, started },
-        undefined,
-        () => 'other',
-        project,
-        { memory: 64 * MEMORY_GIB },
-      );
-      // At the 2 GiB the take counted, 37 GiB live and 7 more fit the 48 GiB budget. At 5 GiB they do not.
-      assert.equal(await slots.takeFree(), null, 'a 7 GiB take beside 43 GiB live waits');
-      assert.equal(slots.drawn.short?.held, 43 * MEMORY_GIB, 'the raised lock counts 5 GiB');
+      const slots = new EngineSlots(directory, 12, { pid: process.pid, started }, undefined, undefined, {
+        need: 7 * MEMORY_GIB,
+        available: () => Promise.resolve(52 * MEMORY_GIB),
+        held: () => Promise.resolve(new Map()),
+      });
+      // At the 2 GiB the take counted, 40 GiB are owed and 7 more fit the 48 GiB the machine can give. At 5 GiB they do not.
+      assert.equal(await slots.takeFree(), null, 'a 7 GiB take beside 43 GiB owed waits');
+      assert.equal(slots.drawn.short?.owed, 43 * MEMORY_GIB, 'the raised lock counts 5 GiB');
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });
-    rmSync(project, { recursive: true, force: true });
   }
 }
 
@@ -79723,12 +75798,12 @@ async function testAGamesRaisedLockHandedOnKeepsTheRaisedFigure(): Promise<void>
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
   try {
     const lock = join(directory, '0.lock');
-    writeFileSync(lock, JSON.stringify({ pid: process.pid, started, game: true, memory: 2 * MEMORY_GIB }));
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, started, memory: 2 * MEMORY_GIB }));
     await guardedAt(lock, [5 * MEMORY_GIB]);
     assert.equal(await handSlot(lock, process.pid, { pid: 4242, started: 1 }), true, 'handed');
     assert.deepEqual(
       JSON.parse(readFileSync(lock, 'utf8')),
-      { pid: 4242, started: 1, game: true, memory: 5 * MEMORY_GIB },
+      { pid: 4242, started: 1, memory: 5 * MEMORY_GIB },
       'the keeper holds the 5 GiB the game grew to',
     );
   } finally {
@@ -79763,27 +75838,21 @@ function readingEach(pids: readonly number[], bytes: number): MemoryWatch {
 /**
  * A game's keeper raises the lock it holds as the game grows. On a 64 GiB machine of twelve slots,
  * games taken at their recorded 2 GiB that each grow to 7 GiB start seven of twelve inside the
- * 48 GiB budget, where locks left at 2 GiB let eleven start.
+ * 46 GiB the machine can give, where locks left at 2 GiB let eleven start.
  */
 async function testAGamesKeeperRaisesItsLockAsTheGameGrows(): Promise<void> {
   const started = await ownStart();
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-'));
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-together-project-'));
   const games = Array.from({ length: 12 }, (_, game) => 200_000 + game);
   const watch = readingEach(games, 7 * MEMORY_GIB);
   const stops: (() => void)[] = [];
   try {
     await withNoCeilingSet(async () => {
-      await recordEnginePeak(project, 'editor_run', 2 * MEMORY_GIB);
-      const slots = new EngineSlots(
-        directory,
-        12,
-        { pid: process.pid, started },
-        undefined,
-        () => 'other',
-        project,
-        { memory: 64 * MEMORY_GIB, tool: 'editor_run' },
-      );
+      const slots = new EngineSlots(directory, 12, { pid: process.pid, started }, undefined, undefined, {
+        need: 2 * MEMORY_GIB,
+        available: () => Promise.resolve(50 * MEMORY_GIB),
+        held: () => Promise.resolve(new Map()),
+      });
       const taken: (number | null)[] = [];
       for (const game of games) {
         const lock = await slots.takeFree(true);
@@ -79801,11 +75870,11 @@ async function testAGamesKeeperRaisesItsLockAsTheGameGrows(): Promise<void> {
         );
       }
       assert.deepEqual(taken, Array(7).fill(2 * MEMORY_GIB), 'seven games start, each taken at 2 GiB');
-      const { held, budget } = slots.drawn.short ?? {};
+      const { owed, free } = slots.drawn.short ?? {};
       assert.deepEqual(
-        { held, budget },
-        { held: 49 * MEMORY_GIB, budget: 48 * MEMORY_GIB },
-        'the eighth waits beside 49 GiB live, past the 48 GiB budget',
+        { owed, free },
+        { owed: 49 * MEMORY_GIB, free: 50 * MEMORY_GIB },
+        'the eighth waits beside 49 GiB owed, past the 46 GiB the machine can give',
       );
     });
   } finally {
@@ -79813,7 +75882,6 @@ async function testAGamesKeeperRaisesItsLockAsTheGameGrows(): Promise<void> {
       stop();
     }
     rmSync(directory, { recursive: true, force: true });
-    rmSync(project, { recursive: true, force: true });
   }
 }
 
@@ -79867,7 +75935,7 @@ async function testAKeeperRaisingTheGameSlotItTookLosesNoHand(): Promise<void> {
   const lost: string[] = [];
   try {
     for (let round = 1; round <= rounds; round++) {
-      writeFileSync(lock, JSON.stringify({ pid: process.pid, started, game: true, memory: 2 * MEMORY_GIB }));
+      writeFileSync(lock, JSON.stringify({ pid: process.pid, started, memory: 2 * MEMORY_GIB }));
       writeFileSync(`${lock}.round`, String(round));
       const said = `${lock}.k-${String(round)}`;
       assert.ok(
@@ -79878,14 +75946,12 @@ async function testAKeeperRaisingTheGameSlotItTookLosesNoHand(): Promise<void> {
       const kept = {
         handed: readFileSync(said, 'utf8'),
         holder: held?.pid === keeper.pid,
-        game: held?.game,
         memory: held?.memory,
         engine: held?.engine?.pid,
       };
       const wanted = {
         handed: 'true',
         holder: true,
-        game: true,
         memory: 2 * MEMORY_GIB + round * 256 * 1024 ** 2,
         engine: 300_000 + round,
       };
@@ -80183,7 +76249,7 @@ async function testAGamesKeeperRaisesTheSlotItHolds(): Promise<void> {
   const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
   const lock = join(slots, '0.lock');
   const started = await ownStart();
-  writeFileSync(lock, JSON.stringify({ pid: process.pid, started, game: true, memory: 256 * 1024 ** 2 }));
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, started, memory: 256 * 1024 ** 2 }));
   let game = 0;
   try {
     await withNoCeilingSet(async () => {
@@ -80304,135 +76370,6 @@ async function testAFollowedEnginePastItsCapRaisesItsSlotToTheCap(): Promise<voi
   }
 }
 
-/** A count of one spare gate slot, as a live queue process writes it half a second ago. */
-function oneSpareSlot(directory: string, started: number): void {
-  writeFileSync(
-    join(directory, SPARE_FILE),
-    `{"spare": 1, "pid": ${String(process.pid)}, "started": ${String(started)}, "written": ${String(Date.now() - 500)}}`,
-  );
-}
-
-/**
- * One take counts the share and names its slots from one read of the folder. A slot taken between
- * the take's first look and its tries is one it names and finds held, where a second read would
- * name the next free slot, which a seated gate is owed.
- */
-async function testASideTakeReadsTheFreeSlotsOnce(): Promise<void> {
-  const started = await ownStart();
-  const directory = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
-  try {
-    oneSpareSlot(directory, started);
-    // The gate has just started an engine, so it lends nothing and the count alone decides.
-    utimesSync(join(directory, '0.lock'), new Date(Date.now() - 2000), new Date(Date.now() - 2000));
-    const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
-    const looks = afterTheFirstLook(side, () => {
-      writeFileSync(join(directory, '5.lock'), JSON.stringify({ pid: process.pid, started }));
-    });
-    assert.equal(
-      await side.takeFree(),
-      null,
-      'the slot another took after the look is not replaced by the next',
-    );
-    assert.equal(looks(), 1, 'and the folder was read once');
-    assert.deepEqual(side.drawn.numbers, [7, 6, 5], JSON.stringify(side.drawn));
-    assert.equal(existsSync(join(directory, '4.lock')), false, 'the gate keeps the slot it is owed');
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * Two takers that counted one spare gate slot from different reads of the folder take different
- * slots: the second names slot 5 from a read before the first made slot 4. The second counts the
- * folder again, finds two gate slots written since the count against a count of one, and gives back
- * the newer. The first keeps its slot.
- */
-async function testTheNewerOfTwoSideTakesPastTheShareGivesItsGateSlotBack(): Promise<void> {
-  const started = await ownStart();
-  const directory = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
-  try {
-    oneSpareSlot(directory, started);
-    // The gate has just started an engine, so it lends nothing and the count alone decides.
-    utimesSync(join(directory, '0.lock'), new Date(Date.now() - 2000), new Date(Date.now() - 2000));
-    const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
-    afterTheFirstLook(side, () => {
-      writeFileSync(join(directory, '4.lock'), JSON.stringify({ pid: process.pid, started }));
-    });
-    assert.equal(await side.takeFree(), null, 'the newer take gives its slot back and waits');
-    assert.equal(existsSync(join(directory, '5.lock')), false, 'so slot 5 is free');
-    assert.equal(existsSync(join(directory, '4.lock')), true, 'and the first keeps slot 4');
-    assert.equal(side.drawn.limit, 'kept', JSON.stringify(side.drawn));
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * Eight slots with a gate seated and slots 0 to 3 held (4 and 5 free), and the time the seat file
- * carries as the clock reports it.
- */
-function aSeatedGateWithTwoGateSlotsFree(started: number): { directory: string; seatedAt: number } {
-  const directory = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
-  const at = new Date(Date.now() - 1000);
-  utimesSync(join(directory, QUEUED_FOLDER, 'gate-1.json.seated'), at, at);
-  return { directory, seatedAt: statSync(join(directory, QUEUED_FOLDER, 'gate-1.json.seated')).mtimeMs };
-}
-
-/** A count of [param spare] written at [param written], by this live process. */
-function countOf(spare: number, started: number, written: number): string {
-  return `{"spare": ${String(spare)}, "pid": ${String(process.pid)}, "started": ${String(started)}, "written": ${String(written)}}`;
-}
-
-/**
- * A count that began in the very tick a gate was seated may or may not hold that seat, since the
- * queue stamps its count by the folder's clock. It reads as stale, as one from before the seat does,
- * and a count from after the seat is fresh.
- */
-async function testACountBegunInTheTickOfASeatIsStaleForSideWork(): Promise<void> {
-  const started = await ownStart();
-  const { directory, seatedAt } = aSeatedGateWithTwoGateSlotsFree(started);
-  try {
-    const taken = async (delta: number): Promise<string | null> => {
-      writeFileSync(join(directory, SPARE_FILE), countOf(2, started, seatedAt + delta));
-      const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
-      const lock = await side.takeFree();
-      side.releaseAll();
-      return lock === null ? null : basename(lock);
-    };
-    assert.equal(await taken(-0.5), null, 'a count from just before the seat is stale');
-    assert.equal(await taken(0), null, 'and one stamped with the seat time is');
-    assert.equal(await taken(0.5), '5.lock', 'one just after the seat is fresh');
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A gate slot taken in the tick the count began is one the count may not have seen, so it comes off
- * the count as one taken later does, and one taken before the count does not.
- */
-async function testATakeInTheTickOfTheCountComesOffIt(): Promise<void> {
-  const started = await ownStart();
-  const directory = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3, 4]);
-  try {
-    const at = new Date(Date.now() - 1000);
-    utimesSync(join(directory, '4.lock'), at, at);
-    const lockedAt = statSync(join(directory, '4.lock')).mtimeMs;
-    const taken = async (delta: number): Promise<string | null> => {
-      writeFileSync(join(directory, SPARE_FILE), countOf(1, started, lockedAt + delta));
-      const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
-      const lock = await side.takeFree();
-      side.releaseAll();
-      return lock === null ? null : basename(lock);
-    };
-    assert.equal(await taken(-5), null, 'a take after the count comes off it');
-    assert.equal(await taken(0), null, 'and one in the count tick does');
-    assert.equal(await taken(5), '5.lock', 'one before the count does not, so the free slot is spare');
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
 /**
  * A slot taken over from a holder that has gone is made as a fresh take makes it, so its time is
  * the take's own and the spare count sees it. With a staged name taken by a folder, a lock put
@@ -80448,7 +76385,14 @@ async function testASlotTakenOverIsMadeInPlace(): Promise<void> {
   try {
     writeFileSync(join(directory, '0.lock'), dead);
     mkdirSync(join(directory, `.0.lock.${String(process.pid)}-0.writing`));
-    const slots = new EngineSlots(directory, 1, { pid: process.pid, started }, undefined, () => 'other');
+    const slots = new EngineSlots(
+      directory,
+      1,
+      { pid: process.pid, started },
+      undefined,
+      undefined,
+      plentyOfMemory,
+    );
     const lock = await slots.takeFree();
     assert.equal(lock === null ? null : basename(lock), '0.lock', 'the slot is taken over');
     assert.equal(
@@ -80466,97 +76410,6 @@ async function testASlotTakenOverIsMadeInPlace(): Promise<void> {
     );
   } finally {
     rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A take reads the count once, for its text, its time and its writer's life. A count file made
- * anew by a writer that has since gone, in the moment after it was read, does not turn the count
- * it read into a gone writer's.
- */
-async function testATakeJudgesTheCountItReadOnce(): Promise<void> {
-  const started = await ownStart();
-  const gone = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
-  assert.equal(typeof gone.pid, 'number', 'a process to have gone');
-  const { directory } = aSeatedGateWithTwoGateSlotsFree(started);
-  try {
-    writeFileSync(join(directory, SPARE_FILE), countOf(1, started, Date.now() - 500));
-    const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
-    const free: unknown = Reflect.get(side, 'free');
-    if (typeof free !== 'function') {
-      throw new TypeError('the lock rule is there to watch');
-    }
-    Reflect.set(side, 'free', (lock: string): unknown => {
-      if (basename(lock) === SPARE_FILE) {
-        writeFileSync(lock, countOf(1, started, Date.now()).replace(String(process.pid), String(gone.pid)));
-      }
-      const judged: unknown = Reflect.apply(free, side, [lock]);
-      return judged;
-    });
-    const lock = await side.takeFree();
-    assert.equal(lock === null ? null : basename(lock), '5.lock', 'the count it read stands');
-    side.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** A count with a whole-millisecond `written` (an older writer's) and one with a fraction both read as fresh. */
-async function testACountWrittenWholeOrWithAFractionIsRead(): Promise<void> {
-  const started = await ownStart();
-  const { directory } = aSeatedGateWithTwoGateSlotsFree(started);
-  try {
-    for (const written of [Math.floor(Date.now() - 500), Date.now() - 500.25]) {
-      writeFileSync(join(directory, SPARE_FILE), countOf(1, started, written));
-      const side = new EngineSlots(directory, 8, { pid: process.pid, started }, undefined, () => 'other');
-      const lock = await side.takeFree();
-      assert.equal(lock === null ? null : basename(lock), '5.lock', `a count written at ${String(written)}`);
-      side.releaseAll();
-    }
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * With a gate seated and no fresh count, no queue process says what the gate is owed, so side work
- * leaves it every free slot. A seated gate with a spare count of 1, as `slots.shares` publishes it
- * with one free slot owed and one not, gives the first side take a gate slot and the second none.
- */
-async function testTwoSideTakesInARowGetOneSpareGateSlotBetweenThem(): Promise<void> {
-  const started = await ownStart();
-  const pid = String(process.pid);
-  const bare = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
-  const counted = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
-  try {
-    const alone = new EngineSlots(bare, 8, { pid: process.pid, started }, undefined, () => 'other');
-    assert.equal(await alone.takeFree(), null, 'a seated gate with no count keeps its free slots');
-    assert.equal(alone.drawn.limit, 'kept', JSON.stringify(alone.drawn));
-    writeFileSync(
-      join(counted, SPARE_FILE),
-      `{"spare": 1, "pid": ${pid}, "started": ${String(started)}, "written": ${String(Date.now() - 500)}}`,
-    );
-    const first = new EngineSlots(counted, 8, { pid: process.pid, started }, undefined, () => 'other');
-    const second = new EngineSlots(counted, 8, { pid: process.pid, started }, undefined, () => 'other');
-    const one = await first.takeFree();
-    assert.equal(
-      one === null ? null : basename(one),
-      '5.lock',
-      'the first side take gets the spare gate slot',
-    );
-    assert.equal(await second.takeFree(), null, 'the second gets none, though a gate slot stands free');
-    assert.deepEqual(second.drawn.numbers, [7, 6], JSON.stringify(second.drawn));
-    first.releaseAll();
-    const again = await second.takeFree();
-    assert.equal(
-      again === null ? null : basename(again),
-      '5.lock',
-      'and one once the first has given its slot back, as the count stands',
-    );
-    second.releaseAll();
-  } finally {
-    rmSync(bare, { recursive: true, force: true });
-    rmSync(counted, { recursive: true, force: true });
   }
 }
 
@@ -80687,7 +76540,14 @@ async function testASlotLockIsCreatedWithoutAStagedFile(): Promise<void> {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-created-lock-'));
   try {
     mkdirSync(join(directory, `.0.lock.${String(process.pid)}-0.writing`));
-    const slots = new EngineSlots(directory, 1, { pid: process.pid, started }, undefined, () => 'other');
+    const slots = new EngineSlots(
+      directory,
+      1,
+      { pid: process.pid, started },
+      undefined,
+      undefined,
+      plentyOfMemory,
+    );
     const lock = await slots.takeFree();
     assert.equal(lock === null ? null : basename(lock), '0.lock', 'the slot is taken with no staged file');
     assert.equal(
@@ -80702,71 +76562,6 @@ async function testASlotLockIsCreatedWithoutAStagedFile(): Promise<void> {
 }
 
 /**
- * A slot lock made by `slots.created` is empty until its text is written, and every reader that
- * takes, steals, sweeps or removes holds an empty one as held: the lock rule, the take of a slot, a
- * take over, the sweep of a lock past the count, the gates' free slots a side take names and the
- * removal of a slot another process holds. One empty past {@link UNWRITTEN_MS} belongs to a taker
- * that died.
- */
-async function testEveryReaderHoldsAnEmptySlotLockAsHeld(): Promise<void> {
-  const started = await ownStart();
-  const now = Date.now();
-  assert.equal(
-    lockIsFree(
-      '',
-      now,
-      now,
-      () => true,
-      () => undefined,
-    ),
-    false,
-    'the lock rule',
-  );
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-empty-lock-'));
-  try {
-    const slots = new EngineSlots(directory, 2, { pid: process.pid, started }, undefined, () => 'other');
-    const empty = (slot: number): string => {
-      const lock = join(directory, `${String(slot)}.lock`);
-      writeFileSync(lock, '');
-      return lock;
-    };
-    empty(0);
-    empty(1);
-    const beyond = empty(5);
-    assert.equal(await slots.takeFree(), null, 'a take finds both slots held, and takes none over');
-    assert.deepEqual(
-      [0, 1, 5].map((slot) => readFileSync(join(directory, `${String(slot)}.lock`), 'utf8')),
-      ['', '', ''],
-      'the sweep leaves the lock past the count, and the empty locks are not removed',
-    );
-    giveBackSlot(beyond, process.pid);
-    assert.equal(existsSync(beyond), true, 'and a give-back leaves an empty lock to its maker');
-    const old = new Date(Date.now() - UNWRITTEN_MS - 1000);
-    utimesSync(join(directory, '0.lock'), old, old);
-    const lock = await slots.takeFree();
-    assert.equal(lock === null ? null : basename(lock), '0.lock', 'one past the limit is its dead taker');
-    slots.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-  const eight = eightSlotsWithTheKeptOnesHeld(started, true, [0, 1, 2, 3]);
-  try {
-    writeFileSync(
-      join(eight, SPARE_FILE),
-      `{"spare": 2, "pid": ${String(process.pid)}, "started": ${String(started)}, "written": ${String(Date.now() - 500)}}`,
-    );
-    writeFileSync(join(eight, '5.lock'), '');
-    const side = new EngineSlots(eight, 8, { pid: process.pid, started }, undefined, () => 'other');
-    const lock = await side.takeFree();
-    assert.equal(lock === null ? null : basename(lock), '4.lock', 'a side take names it no free gate slot');
-    assert.deepEqual(side.drawn.numbers, [7, 6, 4], JSON.stringify(side.drawn));
-    side.releaseAll();
-  } finally {
-    rmSync(eight, { recursive: true, force: true });
-  }
-}
-
-/**
  * A file the slots take for marks and steal files, never raced for, is made through a staged file
  * and linked into place, so a reader never finds it empty. With the staged name taken by a folder
  * the file is not made, and with the name free it is made holding its holder.
@@ -80777,7 +76572,14 @@ async function testAFileTakenBesideTheSlotsIsMadeThroughItsStagedFile(): Promise
   try {
     const staged = join(directory, `.mark.json.${String(process.pid)}-0.writing`);
     mkdirSync(staged);
-    const slots = new EngineSlots(directory, 1, { pid: process.pid, started }, undefined, () => 'other');
+    const slots = new EngineSlots(
+      directory,
+      1,
+      { pid: process.pid, started },
+      undefined,
+      undefined,
+      plentyOfMemory,
+    );
     assert.equal(
       await slots.takeFile(join(directory, 'mark.json')),
       false,
@@ -80792,83 +76594,6 @@ async function testAFileTakenBesideTheSlotsIsMadeThroughItsStagedFile(): Promise
       'holding its holder',
     );
     assert.deepEqual(readdirSync(directory), ['mark.json'], 'and no staged file is left');
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A taker waiting ahead is left the free slots its own kind may take, the gates' ones included while
- * no gate is queued and the spare ones while a count gives some. A newcomer finds none of them.
- */
-async function testATakerAheadClaimsTheGateSlotsItsKindMayTake(): Promise<void> {
-  const started = await ownStart();
-  const me = { pid: process.pid, started };
-  const waiting = (directory: string): void => {
-    mkdirSync(join(directory, WAITING_FOLDER), { recursive: true });
-    writeFileSync(
-      join(directory, WAITING_FOLDER, '1-1.json'),
-      JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 60_000) / 1000 }),
-    );
-  };
-  const open = slotsWithGatesQueued({}, [12, 13, 14, 15], started);
-  const spare = eightSlotsWithTheKeptOnesHeld(
-    started,
-    true,
-    [0, 1, 2, 3],
-    `{"spare": 1, "pid": ${String(process.pid)}, "started": ${String(started)}, "written": ${String(Date.now() - 500)}}`,
-  );
-  try {
-    waiting(open);
-    waiting(spare);
-    // The gate has just started an engine, so it lends nothing and the count alone decides.
-    utimesSync(join(spare, '0.lock'), new Date(Date.now() - 2000), new Date(Date.now() - 2000));
-    const free = new EngineSlots(open, 16, me, undefined, () => 'other');
-    const lock = await free.takeFree();
-    assert.equal(
-      lock === null ? null : basename(lock),
-      '10.lock',
-      'the highest gate slot is left to the one ahead',
-    );
-    const counted = new EngineSlots(spare, 8, me, undefined, () => 'other');
-    assert.equal(await counted.takeFree(), null, 'and so is the one spare gate slot');
-    assert.deepEqual(counted.drawn.left, [5], JSON.stringify(counted.drawn));
-    free.releaseAll();
-    counted.releaseAll();
-  } finally {
-    rmSync(open, { recursive: true, force: true });
-    rmSync(spare, { recursive: true, force: true });
-  }
-}
-
-/**
- * An empty lock among the kept slots, which a taker is still writing, counts toward the slots games
- * hold: with a game on one of the three it may take and two such locks, a further game finds none
- * to take.
- */
-async function testAnEmptySlotLockAmongTheKeptSlotsStopsAFurtherGame(): Promise<void> {
-  const started = await ownStart();
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-empty-kept-'));
-  try {
-    mkdirSync(join(directory, QUEUED_FOLDER));
-    writeFileSync(
-      join(directory, QUEUED_FOLDER, 'ticket.json'),
-      JSON.stringify({ pid: process.pid, started }),
-    );
-    publishesNothingSpare(directory, started);
-    const sessions = new EngineSlots(directory, 16, { pid: process.pid, started }, undefined, () => 'other');
-    const game = await sessions.takeFree(true);
-    assert.equal(game === null ? null : basename(game), '15.lock', 'a game takes the highest kept slot');
-    writeFileSync(join(directory, '14.lock'), '');
-    const second = await sessions.takeFree(true);
-    assert.equal(second === null ? null : basename(second), '13.lock', 'one empty lock leaves a game a slot');
-    if (second !== null) {
-      sessions.release(second);
-    }
-    writeFileSync(join(directory, '13.lock'), '');
-    assert.equal(await sessions.takeFree(true), null, 'a further game finds the kept slots it may take held');
-    assert.deepEqual(sessions.drawn, { numbers: [13, 14, 15], limit: 'games' }, 'held by the games limit');
-    sessions.releaseAll();
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -80897,7 +76622,14 @@ async function testTheSlotSweepJudgesStagedFilesByTheirWritersName(): Promise<vo
     writeFileSync(join(directory, `.9.lock.${String(gone.pid)}-1.writing`), live);
     writeFileSync(join(directory, `.8.lock.${String(process.ppid)}-1.writing`), dead);
     assert.deepEqual(slotWaiters(directory), [], 'a staged file is no mark');
-    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, () => 'other');
+    const slots = new EngineSlots(
+      directory,
+      4,
+      { pid: process.pid, started },
+      undefined,
+      undefined,
+      plentyOfMemory,
+    );
     const lock = await slots.takeFree();
     assert.notEqual(lock, null, 'a take beside staged files finds a slot');
     assert.deepEqual(
@@ -80906,61 +76638,6 @@ async function testTheSlotSweepJudgesStagedFilesByTheirWritersName(): Promise<vo
       "a dead writer's staged files go and a live writer's stay, as their names say",
     );
     slots.releaseAll();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * One slot folder as the gates' Python queue writes it, with its gate seated and waiting for an
- * engine slot, read by a gdharness side taker. Each file is the text the named `slots` function
- * writes, as `json.dumps` spaces it.
- */
-async function testAPythonQueueGateQueuedFirstGoesBeforeAGdharnessSideTaker(): Promise<void> {
-  const started = await ownStart();
-  const pid = String(process.pid);
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cross-'));
-  // `slots.own()`: a lock, and the queued mark `slots.queued_mark` makes of it.
-  const own = `{"pid": ${pid}, "started": ${String(started)}}`;
-  // `slots.Line.content()`: `own()`, the taker's kind and when it began to wait in seconds.
-  const waitingMark = (since: number): string =>
-    `${own.slice(0, -1)}, "taker": "gate", "since": ${String(since)}}`;
-  // `slots.published(machine, found)`, the file `slots.shares` writes through it.
-  const published = (spare: number): string =>
-    `{"spare": ${String(spare)}, "pid": ${pid}, "started": ${String(started)}, "written": ${String(Date.now())}}`;
-  try {
-    mkdirSync(join(directory, QUEUED_FOLDER));
-    mkdirSync(join(directory, WAITING_FOLDER));
-    writeFileSync(join(directory, QUEUED_FOLDER, 'gate-1.json'), own);
-    // `slots.seated_mark(name)` touches the empty seat.
-    writeFileSync(join(directory, QUEUED_FOLDER, 'gate-1.json.seated'), '');
-    writeFileSync(join(directory, '1.lock'), own);
-    writeFileSync(join(directory, '2.lock'), own);
-    writeFileSync(join(directory, '3.lock'), own);
-    const since = (Date.now() - 60_000) / 1000;
-    writeFileSync(join(directory, WAITING_FOLDER, `${pid}-1.json`), waitingMark(since));
-    writeFileSync(join(directory, SPARE_FILE), published(0));
-    assert.deepEqual(
-      slotWaiters(directory).map((one) => [one.taker, one.since]),
-      [['gate', Math.floor(since * 1000)]],
-      "the gate's waiting mark reads as gate work with its wait",
-    );
-    const side = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, () => 'other');
-    assert.equal(await side.takeFree(), null, 'side work leaves the free gate slot to the gate');
-    assert.equal(side.drawn.limit, 'kept', JSON.stringify(side.drawn));
-    await agedTakeWhileAGateIsQueued(directory, started, (_aged, taken) => {
-      assert.equal(taken(), null, 'and so does side work that has waited past two minutes');
-      return Promise.resolve();
-    });
-    rmSync(join(directory, WAITING_FOLDER, `${pid}-1.json`));
-    writeFileSync(join(directory, SPARE_FILE), published(1));
-    const spare = await side.takeFree();
-    assert.equal(
-      spare === null ? null : basename(spare),
-      '0.lock',
-      'a spare slot goes to side work once the gate holds what it needs',
-    );
-    side.releaseAll();
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -81021,489 +76698,13 @@ function testSuitePassesKeyAlikeInEveryCheckout(): void {
   }
 }
 
-/**
- * Takers are served in the order they began to wait. A one-off waited 38 to 80 minutes for one slot
- * while runs of seconds took turns on it, each the first to look as a lock went. A take leaves a free
- * slot to a taker waiting longer that may take it, for {@link SLOT_YIELD_MS} at most, and reads the
- * marks the games' tools write, which name `since` in seconds, or nothing beside the file's time.
- */
-async function testTakersWaitTheirTurn(): Promise<void> {
-  assert.deepEqual(
-    [...slotsClaimed([[3, 2], [3]], [2, 3])],
-    [[3, 0]],
-    'the second wants only what the first took',
-  );
-  assert.deepEqual(
-    [...slotsClaimed([[3], [3, 2]], [2, 3])].toSorted(([a], [b]) => a - b),
-    [
-      [2, 1],
-      [3, 0],
-    ],
-    'each takes the first left to it',
-  );
-  assert.deepEqual([...slotsClaimed([[1]], [0])], [], 'one finding none of its own free takes none');
-
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-line-'));
-  const marks = join(directory, WAITING_FOLDER);
-  mkdirSync(marks, { recursive: true });
-  try {
-    const me = { pid: process.pid, started: await ownStart() };
-    // Live, since it names this process, and another taker's by its name.
-    const ahead = join(marks, '1-1.json');
-    writeFileSync(ahead, JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 60_000) / 1000 }));
-    assert.deepEqual(
-      slotWaiters(directory).map((one) => [one.mark, one.taker, Math.round((Date.now() - one.since) / 1000)]),
-      [['1-1.json', 'other', 60]],
-      'a mark names its kind and since when, in seconds',
-    );
-    const began = Date.now() - 60_000;
-    writeFileSync(ahead, JSON.stringify({ ...me, taker: 'other', since: (began + 0.4) / 1000 }));
-    assert.deepEqual(
-      slotWaiters(directory).map((one) => one.since),
-      [began],
-      'read in whole milliseconds, as a take reads its own clock',
-    );
-    utimesSync(ahead, (began + 0.4) / 1000, (began + 0.4) / 1000);
-    assert.deepEqual(
-      slotWaiters(directory).map((one) => one.seen),
-      [began],
-      'and so is when its taker last looked, which the file time gives with a fraction',
-    );
-    // A file time 100 ns short of a millisecond, which no runtime here can set on a file, and which
-    // a double of milliseconds rounds up to the next.
-    const hair = 1_795_122_271_037_999_900n;
-    assert.equal(
-      Math.floor(1_795_122_271 * 1000 + 37_999_900 / 1e6),
-      1_795_122_271_038,
-      'the time is one a double of milliseconds, made as a file time is, rounds up',
-    );
-    assert.equal(
-      fileTimeMs({ mtimeNs: hair }),
-      1_795_122_271_037,
-      'and a time 100 ns short of a millisecond is read as the millisecond it is in',
-    );
-    const tied = new SlotLine('other', false, () => began);
-    const waiter = {
-      mark: '1-1.json',
-      taker: 'other',
-      since: began,
-      sinceSeconds: began / 1000,
-      game: false,
-      high: false,
-      wants: 1,
-      seen: began,
-    } as const;
-    assert.deepEqual(
-      tied.ahead([waiter]).map((one) => one.mark),
-      ['1-1.json'],
-      'a mark begun in the millisecond a take began was there at its first look',
-    );
-    tied.mark = '1-0.json';
-    assert.deepEqual(tied.ahead([waiter]), [], 'and once the take has a mark, a tie goes by name');
-    // Gate work goes before younger side work whenever each began, and side work that has waited two
-    // minutes with it, a game as any other one-off. Uploads waited behind side work begun before them.
-    const sideWork = {
-      mark: 'a.json',
-      taker: 'other',
-      since: began - 10_000,
-      sinceSeconds: (began - 10_000) / 1000,
-      game: false,
-      high: false,
-      wants: 1,
-      seen: began,
-    } as const;
-    const gateWork = {
-      mark: 'b.json',
-      taker: 'tier',
-      since: began,
-      sinceSeconds: began / 1000,
-      game: false,
-      high: false,
-      wants: 1,
-      seen: began,
-    } as const;
-    const agedSide = {
-      mark: 'c.json',
-      taker: 'other',
-      since: began - 121_000,
-      sinceSeconds: (began - 121_000) / 1000,
-      game: false,
-      high: false,
-      wants: 1,
-      seen: began,
-    } as const;
-    const agedGame = {
-      mark: 'd.json',
-      taker: 'other',
-      since: began - 1_200_000,
-      sinceSeconds: (began - 1_200_000) / 1000,
-      game: true,
-      high: false,
-      wants: 1,
-      seen: began,
-    } as const;
-    assert.deepEqual(
-      new SlotLine('other', false, () => began)
-        .ahead([sideWork, gateWork, agedSide, agedGame])
-        .map((one) => one.mark),
-      ['d.json', 'c.json', 'b.json', 'a.json'],
-      'an aged game and aged side work, then gate work, then the rest, each in the order it began',
-    );
-    assert.deepEqual(
-      new SlotLine('tier', false, () => began).ahead([sideWork, agedGame]).map((one) => one.mark),
-      ['d.json'],
-      'and gate work has the aged game ahead of it and no younger side work',
-    );
-    writeFileSync(ahead, JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 60_000) / 1000 }));
-
-    const late = new EngineSlots(directory, 2, me, undefined, () => 'other');
-    // Before the take, which notes when it first left the slot as it answers.
-    const leftBy = Date.now();
-    const first = await late.takeFree();
-    // Read after the take, which notes when it first left the slot before it answers.
-    const firstLeft = Date.now();
-    assert.equal(first, join(directory, '0.lock'), 'a newcomer leaves slot 1, the one ahead takes first');
-    assert.equal(await late.takeFree(), null, 'and waits rather than take it');
-    assert.deepEqual(late.drawn.left, [1], 'saying which it leaves');
-    const holder = `this process (pid ${String(process.pid)})`;
-    assert.equal(
-      slotWaitSaid(3000, 2, directory, late.holders(), late.drawn),
-      `Waiting 3 s so far for an engine: slot 0 of the 2 engine slots on this machine (${directory}) is in use, by ${holder}, and the engine starts when it is given back. It leaves free slot 1 to takers ahead of it in line, which go first.`,
-      'its wait names the slot in use, never the free one among them',
-    );
-    assert.equal(
-      slotWaitedSaid(3000, 2, directory, late.holders(), late.drawn),
-      `This call waited 3 s for an engine slot in all. When it first waited, slot 0 of the 2 engine slots on this machine (${directory}) was in use, by ${holder}. It left free slot 1 to takers ahead of it in line.`,
-      'and its answer says what it left, never that those takers went first',
-    );
-    // With a gate queued and some gate slots spare, a one-off may take three of eight slots.
-    const spare = { numbers: [7, 6, 5], left: [5, 6, 7] };
-    assert.equal(
-      slotWaitSaid(3000, 8, 'slots', [], spare),
-      'Waiting 3 s so far for an engine: the 3 slots it may take on this machine (slots), slots 5, 6 and 7, are free and left to takers ahead of it in line, which go first.',
-      'a wait that leaves every slot it may take says they are free, however many the machine has',
-    );
-    assert.equal(
-      slotWaitSaid(3000, 4, 'slots', [], { numbers: [3, 2], limit: 'kept', left: [2] }),
-      'Waiting 3 s so far for an engine: slot 3 of the 2 engine slots of the 4 on this machine (slots) kept for engines outside a gate while a gate is queued is in use, by a gate or another tool, and the engine starts when it is given back or no gate is queued. It leaves free slot 2 to takers ahead of it in line, which go first.',
-      'and one held to the kept slots names the one in use',
-    );
-
-    const line = new SlotLine('other');
-    assert.equal(await late.takeFree(false, line), null, 'a take with its place in line leaves it too');
-    const realNow = Date.now;
-    try {
-      Date.now = () => leftBy + SLOT_YIELD_MS - 1;
-      assert.equal(await late.takeFree(false, line), null, 'until it has left it for the yield');
-      Date.now = () => leftBy + SLOT_YIELD_MS + 100;
-      assert.equal(await late.takeFree(false, line), join(directory, '1.lock'), 'then takes it itself');
-    } finally {
-      Date.now = realNow;
-    }
-    // A mark that let a slot left to it stand, as a wait for memory under an older release does.
-    late.release(join(directory, '1.lock'));
-    // A clock set to the yield's end, since a timer may wake before the wall clock reaches it.
-    try {
-      Date.now = () => firstLeft + SLOT_YIELD_MS;
-      const stood = await late.takeFree();
-      assert.equal(
-        stood,
-        join(directory, '1.lock'),
-        `and the process leaves a waiter that let a slot stand no other: drew ${JSON.stringify(late.drawn)}, at ${String(Date.now())} with the first left by ${String(firstLeft)}, waiters ${JSON.stringify(slotWaiters(directory))}, files ${JSON.stringify(readdirSync(directory, { recursive: true }))}`,
-      );
-    } finally {
-      Date.now = realNow;
-    }
-    late.releaseAll();
-
-    const timing = new EngineSlots(directory, 2, me, undefined, () => 'timing');
-    assert.equal(await timing.takeFree(), join(directory, '1.lock'), 'a timing leaves nothing');
-    timing.releaseAll();
-
-    writeFileSync(ahead, JSON.stringify({ ...me, taker: 'other', since: (Date.now() + 60_000) / 1000 }));
-    const earlier = new EngineSlots(directory, 2, me, undefined, () => 'other');
-    assert.equal(
-      await earlier.takeFree(),
-      join(directory, '1.lock'),
-      'one that came later is not let go first',
-    );
-    earlier.releaseAll();
-
-    writeFileSync(ahead, JSON.stringify(me));
-    const anHourAgo = new Date(Date.now() - 3_600_000);
-    utimesSync(ahead, anHourAgo, anHourAgo);
-    assert.deepEqual(
-      slotWaiters(directory).map((one) => [one.taker, Math.round((Date.now() - one.since) / 60_000)]),
-      [['other', 60]],
-      'a mark naming neither is a one-off waiting since its file was made',
-    );
-    rmSync(ahead);
-
-    const memory = new EngineSlots(directory, 2, me);
-    const unmark = memory.markWaiting();
-    assert.equal(readdirSync(marks).length, 1, 'a wait for memory keeps a mark');
-    assert.deepEqual(slotWaiters(directory), [], 'which waits for no slot, so no take lets it go first');
-    const beside = new EngineSlots(directory, 2, me, undefined, () => 'other');
-    assert.equal(await beside.takeFree(), join(directory, '1.lock'), 'and a take beside it takes the slot');
-    beside.releaseAll();
-    unmark();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** A waiter of [param taker] for [param line]'s look, which began [param waited] ms before [param now]. */
-function lineWaiter(
-  mark: string,
-  taker: 'gate' | 'tier' | 'other',
-  now: number,
-  waited: number,
-  options: { readonly game?: boolean; readonly high?: boolean } = {},
-): ReturnType<typeof slotWaiters>[number] {
-  return {
-    mark,
-    taker,
-    since: now - waited,
-    sinceSeconds: (now - waited) / 1000,
-    game: options.game === true,
-    high: options.high === true,
-    wants: 1,
-    seen: now,
-  };
-}
-
-/**
- * A one-off of high priority goes before every other one-off younger than 600 s, and stands with
- * gate work once it has waited 120 s. With no high-priority taker waiting, an ordinary one-off past
- * 120 s stands with gate work. A game is placed as any other one-off is.
- */
-function testAHighPriorityTakerGoesBeforeEarlierYoungSideWork(): void {
-  const now = Date.now();
-  const marksOf = (line: SlotLine, waiters: ReturnType<typeof slotWaiters>): string[] =>
-    line.ahead(waiters).map((one) => one.mark);
-
-  const young = lineWaiter('young.json', 'other', now, 30_000);
-  const highLine = new SlotLine('other', false, () => now, true);
-  assert.deepEqual(
-    marksOf(highLine, [young]),
-    [],
-    'a high-priority waiter has an earlier young one-off behind it',
-  );
-  const plain = new SlotLine('other', false, () => now);
-  assert.deepEqual(
-    marksOf(plain, [lineWaiter('high.json', 'other', now, 5000, { high: true })]),
-    ['high.json'],
-    'and a later high-priority waiter is ahead of an earlier young one-off',
-  );
-  assert.deepEqual(
-    marksOf(new SlotLine('other', false, () => now, true), [
-      lineWaiter('later.json', 'other', now, 5000, { high: true }),
-      lineWaiter('earlier.json', 'other', now, 9000, { high: true }),
-    ]),
-    ['earlier.json', 'later.json'],
-    'high-priority waiters keep the order they began to wait',
-  );
-
-  const gate = lineWaiter('gate.json', 'gate', now, 1000);
-  const tier = lineWaiter('tier.json', 'tier', now, 1000);
-  assert.deepEqual(
-    marksOf(highLine, [gate, tier]),
-    ['gate.json', 'tier.json'],
-    'a gate or a tier waiter still goes before a high-priority one',
-  );
-  assert.deepEqual(
-    marksOf(new SlotLine('gate', false, () => now), [
-      lineWaiter('s.json', 'other', now, 1000, { high: true }),
-    ]),
-    [],
-    'and has no high-priority waiter ahead of it',
-  );
-
-  // A line that began waiting [param waited] ms before now and looks now.
-  const begunBefore = (taker: 'gate' | 'other', waited: number): SlotLine => {
-    let at = now - waited;
-    const line = new SlotLine(taker, false, () => at);
-    at = now;
-    return line;
-  };
-  const aged = lineWaiter('aged.json', 'other', now, 121_000);
-  const nearlyHeld = lineWaiter('nearly.json', 'other', now, 599_999);
-  const held = lineWaiter('held.json', 'other', now, 600_000);
-  assert.deepEqual(
-    marksOf(highLine, [aged, nearlyHeld]),
-    [],
-    'no ordinary one-off younger than 600 s goes before a high-priority waiter',
-  );
-  assert.deepEqual(
-    marksOf(highLine, [held, nearlyHeld]),
-    ['held.json'],
-    'and one that has waited 600 s stands with gate work again',
-  );
-  // A stream of high-priority work, one arriving a second before each look, holds an ordinary one-off
-  // back until it has waited 600 s and not a look longer.
-  const heldFor = (waited: number): string[] =>
-    marksOf(begunBefore('other', waited), [lineWaiter('s.json', 'other', now, 1000, { high: true })]);
-  for (const waited of [0, 121_000, 300_000, 599_999]) {
-    assert.deepEqual(heldFor(waited), ['s.json'], `held behind high-priority work after ${waited} ms`);
-  }
-  assert.deepEqual(heldFor(600_000), [], 'and let go of it at 600 s');
-  assert.deepEqual(heldFor(3_600_000), [], 'and at an hour');
-  // A high-priority waiter holds a one-off of 300 s back while its last look is under 5 s old.
-  const lookedAgo = (ago: number): string[] =>
-    marksOf(begunBefore('other', 300_000), [
-      { ...lineWaiter('s.json', 'other', now, 1000, { high: true }), seen: now - ago },
-    ]);
-  assert.deepEqual(lookedAgo(SLOT_YIELD_MS - 1), ['s.json'], 'a look 4,999 ms old still holds it back');
-  assert.deepEqual(lookedAgo(SLOT_YIELD_MS), [], 'and one exactly 5,000 ms old holds nothing');
-  const agedGame = lineWaiter('game.json', 'other', now, 130_000, { game: true });
-  assert.deepEqual(
-    marksOf(highLine, [agedGame]),
-    [],
-    'a game waiter past 120 s goes after a later high-priority arrival',
-  );
-  const agedHigh = lineWaiter('aged-high.json', 'other', now, 121_000, { high: true });
-  assert.deepEqual(
-    marksOf(new SlotLine('gate', false, () => now), [agedHigh]),
-    ['aged-high.json'],
-    'a high-priority waiter past 120 s stands with gate work that came later',
-  );
-  assert.deepEqual(
-    marksOf(begunBefore('gate', 200_000), [agedHigh]),
-    [],
-    'and after gate work that came earlier',
-  );
-  assert.deepEqual(
-    marksOf(begunBefore('other', 200_000), [gate]),
-    [],
-    'with no high-priority waiter, an ordinary one-off past 120 s stands with later gate work',
-  );
-  assert.deepEqual(
-    marksOf(new SlotLine('other', false, () => now), [agedGame, aged, gate]),
-    ['game.json', 'aged.json', 'gate.json'],
-    'a game past 120 s stands with gate work, in the order each began to wait',
-  );
-  // A game is passed by no call that asked after it, however long each has waited, and passes none
-  // that asked before it.
-  let began = now - 300_000;
-  const gameLine = new SlotLine('other', true, () => began);
-  began = now;
-  assert.deepEqual(
-    marksOf(gameLine, [
-      lineWaiter('before.json', 'other', now, 400_000),
-      lineWaiter('after.json', 'other', now, 200_000),
-      lineWaiter('gate-after.json', 'gate', now, 100_000),
-    ]),
-    ['before.json'],
-    'a game past 120 s has only the call that asked before it ahead',
-  );
-  assert.deepEqual(
-    marksOf(new SlotLine('other', true, () => now), [aged]),
-    ['aged.json'],
-    'and a young game stands behind a call past 120 s',
-  );
-  assert.deepEqual(
-    marksOf(begunBefore('other', 121_000), [
-      lineWaiter('young-game.json', 'other', now, 119_999, { game: true }),
-    ]),
-    [],
-    'as a game one millisecond short of 120 s stands behind that call',
-  );
-  // While a high-priority taker waits, a game of another class is held back 600 s, as a call is.
-  const heldGame = (waited: number): ReturnType<typeof lineWaiter> =>
-    lineWaiter('held-game.json', 'other', now, waited, { game: true });
-  assert.deepEqual(
-    marksOf(highLine, [heldGame(599_999)]),
-    [],
-    'a game short of 600 s goes after high-priority work',
-  );
-  assert.deepEqual(marksOf(highLine, [heldGame(600_000)]), ['held-game.json'], 'and one at 600 s before it');
-  // A mark that says it is a game's has the place of one that does not, whatever its age and class.
-  for (const waited of [30_000, 119_999, 120_000, 700_000]) {
-    for (const ofHigh of [false, true]) {
-      for (const line of [
-        new SlotLine('gate', false, () => now),
-        plain,
-        highLine,
-        begunBefore('other', 300_000),
-      ]) {
-        assert.deepEqual(
-          marksOf(line, [lineWaiter('one.json', 'other', now, waited, { game: true, high: ofHigh })]),
-          marksOf(line, [lineWaiter('one.json', 'other', now, waited, { high: ofHigh })]),
-          `a game ${waited} ms old, high priority ${ofHigh}, is placed as a call is`,
-        );
-      }
-    }
-  }
-  // Ahead of a gate in line, a game still claims none of the slots kept for gates, and none of the
-  // last kept slot.
-  const forAGame = slotsDrawnOn(12, 'other', 'queued', undefined, true).numbers;
-  const gated = 12 - keptSlotsOf(12);
-  assert.deepEqual(
-    marksOf(new SlotLine('gate', false, () => now), [agedGame]),
-    ['game.json'],
-    'an aged game is placed ahead of a gate that asked after it',
-  );
-  assert.deepEqual(forAGame, [11, 10], 'and draws the kept slots but the last');
-  assert.deepEqual(
-    [...slotsClaimed([forAGame], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]).keys()],
-    [11],
-    'so a game ahead of a gate leaves it every gate slot and the last kept slot',
-  );
-  assert.deepEqual(
-    slotsDrawnOn(12, 'other', 'queued', undefined, true).numbers.filter((slot) => slot < gated),
-    [],
-    'and none of its slots is a gate slot',
-  );
-  assert.deepEqual(
-    marksOf(new SlotLine('other', true, () => now), [
-      lineWaiter('s.json', 'other', now, 1000, { high: true }),
-    ]),
-    ['s.json'],
-    'a young game stands behind a high-priority waiter',
-  );
-  assert.deepEqual(
-    marksOf(new SlotLine('other', false, () => now), [
-      lineWaiter('late-high.json', 'other', now, 10_000, { high: true }),
-      lineWaiter('aged-game.json', 'other', now, 200_000, { game: true }),
-    ]),
-    ['late-high.json', 'aged-game.json'],
-    'a game past 120 s goes after a high-priority waiter that came later',
-  );
-  const highGame = lineWaiter('high-game.json', 'other', now, 3_600_000, { game: true, high: true });
-  assert.deepEqual(
-    marksOf(new SlotLine('gate', false, () => now), [highGame]),
-    ['high-game.json'],
-    'a high-priority game past 120 s stands with later gate work',
-  );
-  assert.deepEqual(
-    marksOf(new SlotLine('gate', false, () => now), [
-      lineWaiter('young-high-game.json', 'other', now, 119_999, { game: true, high: true }),
-    ]),
-    [],
-    'and one short of 120 s behind it',
-  );
-  let at = now - 3_600_000;
-  const highGameLine = new SlotLine('other', true, () => at, true);
-  at = now;
-  assert.deepEqual(
-    marksOf(highGameLine, [lineWaiter('gate.json', 'gate', now, 10_000)]),
-    [],
-    'and has that gate work behind it',
-  );
-}
-
-/** A slots folder of [param count] slots with a gate queued, unless [param gateQueued] is false, and no lock. */
-async function gameLineFolder(count: number, gateQueued = true): Promise<GameLineFolder> {
+/** A slots folder of [param count] slots with no lock. */
+async function gameLineFolder(count: number): Promise<GameLineFolder> {
   const started = await ownStart();
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-game-line-'));
   mkdirSync(join(directory, WAITING_FOLDER));
-  mkdirSync(join(directory, QUEUED_FOLDER));
   const me = { pid: process.pid, started, by: 'gdharness test of /p' };
-  const folder = { directory, count, me, started };
-  if (gateQueued) {
-    gateQueuedIn(folder);
-  }
-  return folder;
+  return { directory, count, me, started };
 }
 
 interface GameLineFolder {
@@ -81511,15 +76712,6 @@ interface GameLineFolder {
   readonly count: number;
   readonly me: { readonly pid: number; readonly started: number; readonly by: string };
   readonly started: number;
-}
-
-/** Queues a gate in [param folder], with nothing of the gates' free slots spare. */
-function gateQueuedIn(folder: GameLineFolder): void {
-  writeFileSync(
-    join(folder.directory, QUEUED_FOLDER, 'ticket.json'),
-    JSON.stringify({ pid: process.pid, started: folder.started }),
-  );
-  publishesNothingSpare(folder.directory, folder.started);
 }
 
 /** Holds [param slots] with locks of this process, a game's where [param game] is set. */
@@ -81532,27 +76724,10 @@ function slotsHeld(folder: GameLineFolder, slots: readonly number[], game = fals
   }
 }
 
-/** A line of a take that began [param waited] ms ago and looks now, on whatever clock the test sets. */
-function lineBegunAgo(
-  game: boolean,
-  waited: number,
-  mark: string,
-  taker: 'gate' | 'other' = 'other',
-): SlotLine {
-  let offset = -waited;
-  const line = new SlotLine(taker, game, () => Date.now() + offset);
-  offset = 0;
-  line.mark = mark;
-  return line;
-}
-
-/** Writes the waiting mark of [param line], for a taker waiting for [param wants] slots, and its look at [param at]. */
-function waitingMarked(folder: GameLineFolder, line: SlotLine, at: number, wants = 1): void {
+/** Writes the waiting mark of [param line] and its look at [param at]. */
+function waitingMarked(folder: GameLineFolder, line: SlotLine, at: number): void {
   const mark = line.mark ?? '';
-  writeFileSync(
-    join(folder.directory, WAITING_FOLDER, mark),
-    JSON.stringify({ ...line.marked(folder.me), ...(wants > 1 ? { wants } : {}) }),
-  );
+  writeFileSync(join(folder.directory, WAITING_FOLDER, mark), JSON.stringify(line.marked(folder.me)));
   lookedAt(folder, mark, at);
 }
 
@@ -81569,123 +76744,6 @@ function lockNumber(lock: string | null): number | null {
   return slot === undefined ? null : Number(slot);
 }
 
-/** Takes slots at [param count] by [param taker] while it can, a game's where [param game] is set. */
-async function slotsTakenWhileFree(slots: EngineSlots, game: boolean): Promise<number[]> {
-  const taken: number[] = [];
-  for (let lock = await slots.takeFree(game); lock !== null; lock = await slots.takeFree(game)) {
-    taken.push(lockNumber(lock) ?? -1);
-  }
-  return taken;
-}
-
-/**
- * Waiting games that the games limit holds back claim no kept slot, so a call that asked after them
- * takes the last kept slot at its first look, whatever its age and however many games wait.
- */
-async function testAGameHeldBackByTheGamesLimitClaimsNoSlotAheadOfACall(): Promise<void> {
-  for (const [count, gamesHeld, last] of [
-    [12, [11, 10], 9],
-    [12, [11, 9], 10],
-    [16, [15, 14, 13], 12],
-    [16, [15, 14, 12], 13],
-  ] as const) {
-    for (const waitingGames of [1, 2, 5]) {
-      for (const callWaited of [200_000, 100_000]) {
-        const folder = await gameLineFolder(count);
-        try {
-          slotsHeld(
-            folder,
-            Array.from({ length: count - keptSlotsOf(count) }, (_, slot) => slot),
-          );
-          slotsHeld(folder, gamesHeld, true);
-          const now = Date.now();
-          for (let at = 0; at < waitingGames; at += 1) {
-            waitingMarked(folder, lineBegunAgo(true, 300_000 - at * 1000, `game-${String(at)}.json`), now);
-          }
-          const call = new EngineSlots(folder.directory, count, folder.me, undefined, () => 'other');
-          const took = await call.takeFree(false, lineBegunAgo(false, callWaited, 'call.json'));
-          assert.equal(
-            lockNumber(took),
-            last,
-            `${count} slots, ${waitingGames} capped games ahead, a call of ${callWaited} ms: ${JSON.stringify(call.drawn)}`,
-          );
-          call.releaseAll();
-        } finally {
-          rmSync(folder.directory, { recursive: true, force: true });
-        }
-      }
-    }
-  }
-}
-
-/**
- * Two slots, a gate queued with one spare slot, a game of 300 s, a gate's engine of 100 s and a call
- * of 200 s: no game can run there, so the gate's engine keeps slot 0 and the call has slot 1, whichever
- * of them looks first.
- */
-async function testAGameThatCanNeverRunLeavesTheGatesEngineItsOnlySlot(): Promise<void> {
-  for (const order of ['gate first', 'call first'] as const) {
-    const folder = await gameLineFolder(2);
-    try {
-      writeFileSync(
-        join(folder.directory, SPARE_FILE),
-        JSON.stringify({ spare: 1, pid: process.pid, started: folder.started, written: Date.now() }),
-      );
-      waitingMarked(folder, lineBegunAgo(true, 300_000, 'game.json'), Date.now());
-      const gate = new EngineSlots(folder.directory, 2, folder.me, undefined, () => 'gate');
-      const call = new EngineSlots(folder.directory, 2, folder.me, undefined, () => 'other');
-      const takes = {
-        gate: async () =>
-          lockNumber(await gate.takeFree(false, lineBegunAgo(false, 100_000, 'gate.json', 'gate'))),
-        call: async () => lockNumber(await call.takeFree(false, lineBegunAgo(false, 200_000, 'call.json'))),
-      };
-      const taken: Record<string, number | null> = {};
-      for (const who of order === 'gate first' ? (['gate', 'call'] as const) : (['call', 'gate'] as const)) {
-        taken[who] = await takes[who]();
-      }
-      assert.deepEqual(
-        taken,
-        { gate: 0, call: 1 },
-        `the gate's engine takes slot 0 and the call slot 1 (${order})`,
-      );
-      gate.releaseAll();
-      call.releaseAll();
-    } finally {
-      rmSync(folder.directory, { recursive: true, force: true });
-    }
-  }
-}
-
-/**
- * A call that finds the last kept slot free leaves it to no capped game ahead of it, so its line
- * names no taker it leaves a slot to.
- */
-async function testACallBehindACappedGameDoesNotSayItLeavesTheSlotToIt(): Promise<void> {
-  const folder = await gameLineFolder(12);
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
-    slotsHeld(folder, [11, 10], true);
-    waitingMarked(folder, lineBegunAgo(true, 300_000, 'game.json'), Date.now());
-    const call = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
-    assert.equal(
-      lockNumber(await call.takeFree(false, lineBegunAgo(false, 200_000, 'call.json'))),
-      9,
-      'the call takes slot 9',
-    );
-    assert.equal(call.drawn.left, undefined, 'and leaves no slot to a taker ahead');
-    const said = slotWaitSaid(3000, 12, folder.directory, call.holders(), call.drawn);
-    assert.doesNotMatch(said, /go first|takers ahead/u, said);
-    assert.doesNotMatch(
-      slotWaitedSaid(3000, 12, folder.directory, call.holders(), call.drawn),
-      /takers ahead/u,
-      'nor does its answer',
-    );
-    call.releaseAll();
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
 /** A line that places every other taker ahead of it, as a build whose order differs from this one's would. */
 class EveryoneAheadLine extends SlotLine {
   override ahead(waiters: Parameters<SlotLine['ahead']>[0]): ReturnType<SlotLine['ahead']> {
@@ -81694,7 +76752,7 @@ class EveryoneAheadLine extends SlotLine {
 }
 
 /**
- * Two takers that each place the other ahead, both looking, on one free kept slot. Neither is gone, so
+ * Two takers that each place the other ahead, both looking, on one free slot. Neither is gone, so
  * neither is dropped as gone: each leaves the slot to the other until it has stood free for
  * {@link SLOT_YIELD_MS}, and then one of them takes it.
  */
@@ -81704,13 +76762,13 @@ async function testTwoTakersThatPlaceEachOtherAheadDoNotLeaveTheSlotToEachOtherF
   try {
     slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
     const t0 = Date.now();
-    const first = new EveryoneAheadLine('other', false, () => Date.now());
+    const first = new EveryoneAheadLine(process.pid);
     first.mark = 'first.json';
-    const second = lineBegunAgo(false, 200_000, 'second.json');
-    waitingMarked(folder, lineBegunAgo(false, 300_000, 'first.json'), t0);
+    const second = lineBegunAgo(200_000, 'second.json');
+    waitingMarked(folder, lineBegunAgo(300_000, 'first.json'), t0);
     waitingMarked(folder, second, t0);
-    const a = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
-    const b = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
+    const a = new EngineSlots(folder.directory, 12, folder.me, undefined, undefined, plentyOfMemory);
+    const b = new EngineSlots(folder.directory, 12, folder.me, undefined, undefined, plentyOfMemory);
     const look = async (taker: EngineSlots, line: SlotLine, at: number): Promise<number | null> => {
       Date.now = () => at;
       lookedAt(folder, 'first.json', at);
@@ -81739,241 +76797,6 @@ async function testTwoTakersThatPlaceEachOtherAheadDoNotLeaveTheSlotToEachOtherF
   }
 }
 
-/**
- * A taker ahead that wants two slots while one is free is waited for past the yield, since it waits for
- * a second to come free, and takes both once it does. One that wants one slot is waited for no longer
- * than the yield.
- */
-async function testATakerAheadThatWantsMoreSlotsThanAreFreeIsStillWaitedFor(): Promise<void> {
-  const folder = await gameLineFolder(12);
-  const realNow = Date.now;
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
-    const t0 = Date.now();
-    const wanting = lineBegunAgo(false, 200_000, 'wants.json');
-    waitingMarked(folder, wanting, t0, 2);
-    const call = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
-    const behind = lineBegunAgo(false, 100_000, 'call.json');
-    const look = async (at: number): Promise<number | null> => {
-      Date.now = () => at;
-      lookedAt(folder, 'wants.json', at);
-      return lockNumber(await call.takeFree(false, behind));
-    };
-    for (const after of [0, SLOT_YIELD_MS - 1, SLOT_YIELD_MS, SLOT_YIELD_MS * 3]) {
-      assert.equal(await look(t0 + after), null, `slot 9 is left to the taker wanting two ${after} ms in`);
-      assert.deepEqual(call.drawn.left, [9], `and only that one is free ${after} ms in`);
-    }
-    rmSync(join(folder.directory, '10.lock'));
-    assert.equal(
-      await look(t0 + SLOT_YIELD_MS * 3 + 1000),
-      null,
-      'a second slot freeing leaves the call nothing',
-    );
-    assert.deepEqual(call.drawn.left, [9, 10], 'both are left to the taker that takes both');
-    slotsHeld(folder, [9, 10]);
-    assert.equal(await look(t0 + SLOT_YIELD_MS * 3 + 2000), null, 'and it has them');
-    call.releaseAll();
-  } finally {
-    Date.now = realNow;
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** A taker ahead that stops looking holds nothing back past the yield, counted from its last look. */
-async function testATakerAheadThatStoppedLookingIsDroppedAfterTheYield(): Promise<void> {
-  const folder = await gameLineFolder(12);
-  const realNow = Date.now;
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
-    const t0 = Date.now();
-    waitingMarked(folder, lineBegunAgo(false, 200_000, 'gone.json'), t0);
-    const call = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
-    const behind = lineBegunAgo(false, 100_000, 'call.json');
-    const look = async (at: number): Promise<number | null> => {
-      Date.now = () => at;
-      return lockNumber(await call.takeFree(false, behind));
-    };
-    assert.equal(await look(t0), null, 'a taker ahead that has just looked is waited for');
-    assert.equal(await look(t0 + SLOT_YIELD_MS - 100), null, 'until it has left the slot for the yield');
-    assert.equal(await look(t0 + SLOT_YIELD_MS + 100), 9, 'and then the call takes it');
-    call.releaseAll();
-  } finally {
-    Date.now = realNow;
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** With no gate queued games take every slot but the last kept one, and with a gate queued the call has it. */
-async function testGamesTakeEverySlotButTheLastKeptOneWithNoGateQueued(): Promise<void> {
-  const folder = await gameLineFolder(12, false);
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7]);
-    const newGame = (): EngineSlots =>
-      new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
-    const games = [newGame(), newGame(), newGame(), newGame()];
-    const taken: (number | null)[] = [];
-    for (const game of games) {
-      taken.push(lockNumber(await game.takeFree(true)));
-    }
-    assert.deepEqual(
-      taken,
-      [11, 10, 8, null],
-      'three games take 11, 10 and 8, never 9, and a fourth takes none',
-    );
-    gateQueuedIn(folder);
-    const call = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
-    assert.equal(lockNumber(await call.takeFree()), 9, 'and once a gate queues a headless call takes slot 9');
-    for (const game of games) {
-      game.releaseAll();
-    }
-    call.releaseAll();
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * With a gate queued a game that finds fewer kept slots held by games than the limit still never takes
- * the last kept one, so a headless call has it.
- */
-async function testAGameNeverTakesTheLastKeptSlotWithAGateQueued(): Promise<void> {
-  for (const [count, gameHeld, otherHeld, last] of [
-    [12, [11], [10], 9],
-    [16, [15], [14, 13], 12],
-  ] as const) {
-    const folder = await gameLineFolder(count);
-    try {
-      slotsHeld(
-        folder,
-        Array.from({ length: count - keptSlotsOf(count) }, (_, slot) => slot),
-      );
-      slotsHeld(folder, gameHeld, true);
-      slotsHeld(folder, otherHeld);
-      const game = new EngineSlots(folder.directory, count, folder.me, undefined, () => 'other');
-      assert.equal(await game.takeFree(true), null, `${count} slots: a game takes none, not slot ${last}`);
-      const call = new EngineSlots(folder.directory, count, folder.me, undefined, () => 'other');
-      assert.equal(lockNumber(await call.takeFree()), last, 'and the call has it');
-      call.releaseAll();
-    } finally {
-      rmSync(folder.directory, { recursive: true, force: true });
-    }
-  }
-}
-
-/** Every slot free and no gate queued: games take every slot but the last kept one, which is 9 of 12. */
-async function testGamesTakeEverySlotButTheLastKeptOneOnTwelveSlots(): Promise<void> {
-  const folder = await gameLineFolder(12, false);
-  try {
-    const game = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
-    assert.deepEqual(
-      await slotsTakenWhileFree(game, true),
-      [11, 10, 8, 7, 6, 5, 4, 3, 2, 1, 0],
-      'games take every slot but 9',
-    );
-    game.releaseAll();
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** The same on sixteen slots, where the last kept slot is 12. */
-async function testGamesTakeEverySlotButTheLastKeptOneOnSixteenSlots(): Promise<void> {
-  const folder = await gameLineFolder(16, false);
-  try {
-    const game = new EngineSlots(folder.directory, 16, folder.me, undefined, () => 'other');
-    assert.deepEqual(
-      await slotsTakenWhileFree(game, true),
-      [15, 14, 13, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
-      'games take every slot but 12',
-    );
-    game.releaseAll();
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * The line of a game held back by the games limit names how many slots games may hold, never how many
- * they do, also when they hold more than that.
- */
-async function testTheGamesLimitLineNamesTheLimitAndNotTheGamesHoldingSlots(): Promise<void> {
-  for (const [count, held, may] of [
-    [12, [11, 10], 2],
-    [12, [11, 10, 9], 2],
-    [16, [15, 14, 13], 3],
-    [16, [15, 14, 13, 12], 3],
-  ] as const) {
-    const folder = await gameLineFolder(count);
-    try {
-      const gated = count - keptSlotsOf(count);
-      slotsHeld(
-        folder,
-        Array.from({ length: gated }, (_, slot) => slot),
-      );
-      slotsHeld(folder, held, true);
-      const game = new EngineSlots(folder.directory, count, folder.me, undefined, () => 'other');
-      assert.equal(await game.takeFree(true), null, `${count} slots, games on ${held.join(', ')}`);
-      assert.equal(game.drawn.limit, 'games');
-      assert.equal(
-        slotWaitSaid(3000, count, 'slots', game.holders(), game.drawn),
-        `Waiting 3 s so far for an engine: the ${String(may)} engine slots of the ${String(count)} on this machine (slots) that games editor_run started may hold while a gate is queued, the rest kept for short calls, are in use: ${String(may)} by this process (pid ${String(process.pid)}). The engine starts when one is given back or no gate is queued.`,
-      );
-      game.releaseAll();
-    } finally {
-      rmSync(folder.directory, { recursive: true, force: true });
-    }
-  }
-}
-
-/** On two slots no game runs while a gate is queued, and the game starts once none is. */
-async function testNoGameRunsOnTwoSlotsWhileAGateIsQueued(): Promise<void> {
-  const folder = await gameLineFolder(2);
-  try {
-    const game = new EngineSlots(folder.directory, 2, folder.me, undefined, () => 'other');
-    assert.equal(await game.takeFree(true), null, 'a game finds no slot to take');
-    assert.equal(
-      slotWaitSaid(3000, 2, 'slots', game.holders(), game.drawn),
-      'Waiting 3 s so far for an engine: no game may run on this machine (slots) while a gate is queued, and the engine starts once no gate is queued.',
-    );
-    assert.equal(
-      slotWaitedSaid(3000, 2, 'slots', game.holders(), game.drawn),
-      'This call waited 3 s for an engine slot in all. When it first waited, no game could run on this machine (slots) while a gate was queued.',
-    );
-    rmSync(join(folder.directory, QUEUED_FOLDER, 'ticket.json'));
-    assert.equal(
-      lockNumber(await game.takeFree(true)),
-      0,
-      'with no gate queued it takes slot 0, never the last kept slot 1',
-    );
-    game.releaseAll();
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** A game ahead of a gate in line draws only kept slots, so it claims none of the gates' slots. */
-async function testAGameAheadOfAGateTakesNoSlotOfTheGates(): Promise<void> {
-  const gated = 12 - keptSlotsOf(12);
-  const folder = await gameLineFolder(12);
-  try {
-    writeFileSync(
-      join(folder.directory, SPARE_FILE),
-      JSON.stringify({ spare: 3, pid: process.pid, started: folder.started, written: Date.now() }),
-    );
-    const game = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
-    const taken = await slotsTakenWhileFree(game, true);
-    assert.deepEqual(taken, [11, 10], 'a game takes no gate slot however many are spare');
-    assert.deepEqual(
-      taken.filter((slot) => slot < gated),
-      [],
-      'none of them a gate slot',
-    );
-    game.releaseAll();
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
 /** A line that places ahead of it the takers [param names] gives at the look at the time it is given, in that order. */
 class NamedAheadLine extends SlotLine {
   names: (now: number) => readonly string[] = () => [];
@@ -81986,9 +76809,6 @@ class NamedAheadLine extends SlotLine {
 interface TakerInTurn {
   readonly mark: string;
   readonly waited: number;
-  readonly game?: boolean;
-  readonly taker?: 'gate' | 'tier' | 'other';
-  readonly wants?: number;
   /** The marks it places ahead at the look at [param after] ms in, where it does not use this build's order. */
   readonly ahead?: (after: number) => readonly string[];
   /** Whether it only looks, as a taker on a build that leaves the slot to the others does. */
@@ -82026,7 +76846,7 @@ async function takesInTurn(
         for (const other of marked) {
           lookedAt(folder, other.mark, t0 + after);
         }
-        const lock = await slots.takeFree(one.game ?? false, line);
+        const lock = await slots.takeFree(false, line);
         if (lock !== null) {
           took.push(`${one.mark} took ${String(lockNumber(lock))} at ${String(after)}`);
         }
@@ -82047,22 +76867,21 @@ function takerInTurn(
   one: TakerInTurn,
   t0: number,
 ): { readonly line: SlotLine; readonly slots: EngineSlots } {
-  const taker = one.taker ?? 'other';
-  let offset = -one.waited;
-  const clock = (): number => Date.now() + offset;
   const { ahead } = one;
   let line: SlotLine;
   if (ahead === undefined) {
-    line = new SlotLine(taker, one.game ?? false, clock);
+    line = new SlotLine(folder.me.pid, t0 - one.waited);
   } else {
-    const named = new NamedAheadLine(taker, one.game ?? false, clock);
+    const named = new NamedAheadLine(folder.me.pid, t0 - one.waited);
     named.names = (now) => ahead(now - t0);
     line = named;
   }
-  offset = 0;
   line.mark = one.mark;
-  waitingMarked(folder, line, t0, one.wants);
-  return { line, slots: new EngineSlots(folder.directory, folder.count, folder.me, undefined, () => taker) };
+  waitingMarked(folder, line, t0);
+  return {
+    line,
+    slots: new EngineSlots(folder.directory, folder.count, folder.me, undefined, undefined, plentyOfMemory),
+  };
 }
 
 /** Every 1000 ms from 0 to [param last] ms, with [param also] among them. */
@@ -82072,7 +76891,7 @@ function looksEvery(last: number, ...also: number[]): number[] {
 }
 
 /**
- * A ring of three, each placing both others ahead, on one free kept slot, all looking: one takes it
+ * A ring of three, each placing both others ahead, on one free slot, all looking: one takes it
  * at the look {@link SLOT_YIELD_MS} after the first that left it, and the others take nothing.
  */
 async function testARingOfThreeTakesTheFreeSlotAtTheYield(): Promise<void> {
@@ -82084,7 +76903,7 @@ async function testARingOfThreeTakesTheFreeSlotAtTheYield(): Promise<void> {
       [
         { mark: 'a.json', waited: 200_000, ahead: () => ['b.json', 'game.json'] },
         { mark: 'b.json', waited: 190_000, ahead: () => ['game.json', 'a.json'] },
-        { mark: 'game.json', waited: 300_000, game: true, ahead: () => ['a.json', 'b.json'] },
+        { mark: 'game.json', waited: 300_000, ahead: () => ['a.json', 'b.json'] },
       ],
       looksEvery(SLOT_YIELD_MS + 3000, SLOT_YIELD_MS - 1),
     );
@@ -82096,7 +76915,7 @@ async function testARingOfThreeTakesTheFreeSlotAtTheYield(): Promise<void> {
 
 /**
  * Two games of a build that places a game behind an aged call and never yields, of 300 s and 280 s,
- * and a call of 260 s on this build, which places both games ahead: the call takes the kept slot
+ * and a call of 260 s on this build, which places both games ahead: the call takes the slot
  * freed at the look {@link SLOT_YIELD_MS} after it was first left.
  */
 async function testACallBehindTwoGamesThatLeaveItTheSlotTakesItAtTheYield(): Promise<void> {
@@ -82106,8 +76925,8 @@ async function testACallBehindTwoGamesThatLeaveItTheSlotTakesItAtTheYield(): Pro
     const took = await takesInTurn(
       folder,
       [
-        { mark: 'game300.json', waited: 300_000, game: true, looksOnly: true },
-        { mark: 'game280.json', waited: 280_000, game: true, looksOnly: true },
+        { mark: 'game300.json', waited: 300_000, looksOnly: true },
+        { mark: 'game280.json', waited: 280_000, looksOnly: true },
         { mark: 'call.json', waited: 260_000 },
       ],
       looksEvery(SLOT_YIELD_MS + 4000),
@@ -82139,7 +76958,7 @@ async function testARingTakesTheFreeSlotAtTheYieldWhoeverItIsLeftTo(): Promise<v
         { mark: 'a.json', waited: 200_000, ahead: () => ['b.json', 'c.json', 'game.json'] },
         { mark: 'b.json', waited: 190_000, ahead: () => ['c.json', 'game.json', 'a.json'] },
         { mark: 'c.json', waited: 180_000, ahead: () => ['game.json', 'a.json', 'b.json'] },
-        { mark: 'game.json', waited: 300_000, game: true, ahead: () => ['a.json', 'b.json', 'c.json'] },
+        { mark: 'game.json', waited: 300_000, ahead: () => ['a.json', 'b.json', 'c.json'] },
       ],
     ],
     [
@@ -82147,7 +76966,7 @@ async function testARingTakesTheFreeSlotAtTheYieldWhoeverItIsLeftTo(): Promise<v
       [
         { mark: 'a.json', waited: 200_000, ahead: turning('b.json', 'game.json') },
         { mark: 'b.json', waited: 190_000, ahead: turning('game.json', 'a.json') },
-        { mark: 'game.json', waited: 300_000, game: true, ahead: turning('a.json', 'b.json') },
+        { mark: 'game.json', waited: 300_000, ahead: turning('a.json', 'b.json') },
       ],
     ],
   ] as const) {
@@ -82217,311 +77036,12 @@ async function testASlowTakerAheadThatTakesInsideTheYieldIsNeverPassed(): Promis
   }
 }
 
-/** A taker ahead wanting two while one is free is waited for through its first 300 s, and passed after. */
-async function testATakerAheadWantingTwoIsWaitedForThroughItsDrain(): Promise<void> {
-  const folder = await gameLineFolder(12);
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
-    const took = await takesInTurn(
-      folder,
-      [
-        { mark: 'wants.json', waited: 100_000, wants: 2, looksOnly: true },
-        { mark: 'call.json', waited: 50_000 },
-      ],
-      [0, SLOT_YIELD_MS, 100_000, 199_999, 200_000],
-    );
-    assert.deepEqual(took, ['call.json took 9 at 200000']);
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** While a gate is queued side work never passes a gate's engine for a gate slot, however long it waits. */
-async function testSideWorkNeverPassesAGatesEngineWhileAGateIsQueued(): Promise<void> {
-  for (const taker of ['other', 'tier'] as const) {
-    const folder = await gameLineFolder(12);
-    try {
-      slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11]);
-      const took = await takesInTurn(
-        folder,
-        [
-          { mark: 'gate.json', waited: 100_000, taker: 'gate', looksOnly: true },
-          { mark: 'side.json', waited: 10_000, taker },
-        ],
-        looksEvery(SLOT_YIELD_MS * 2),
-        () => {
-          writeFileSync(
-            join(folder.directory, SPARE_FILE),
-            JSON.stringify({ spare: 1, pid: process.pid, started: folder.started, written: Date.now() }),
-          );
-        },
-      );
-      assert.deepEqual(took, [], `${taker} side work takes nothing`);
-    } finally {
-      rmSync(folder.directory, { recursive: true, force: true });
-    }
-  }
-}
-
-/** A game's wait line and answer with a gate queued and every slot held by calls, on [param count] slots. */
-async function gameLinesWithAGateQueued(count: number): Promise<[string, string]> {
-  const folder = await gameLineFolder(count);
-  try {
-    slotsHeld(
-      folder,
-      Array.from({ length: count }, (_, slot) => slot),
-    );
-    const game = new EngineSlots(folder.directory, count, folder.me, undefined, () => 'other');
-    assert.equal(await game.takeFree(true), null);
-    return [
-      slotWaitSaid(3000, count, 'slots', game.holders(), game.drawn),
-      slotWaitedSaid(3000, count, 'slots', game.holders(), game.drawn),
-    ];
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A game's wait line with a gate queued and every slot held by calls names the kept slots games may
- * take, every kept one but the last, and their holders.
- */
-async function testAGamesWaitLineNamesTheKeptSlotsGamesMayTake(): Promise<void> {
-  const pid = String(process.pid);
-  const many = (taking: number, count: number): string =>
-    `Waiting 3 s so far for an engine: the ${String(taking)} engine slots of the ${String(count)} on this machine (slots) kept for engines outside a gate that a game editor_run started may take while a gate is queued are in use: ${String(taking)} by this process (pid ${pid}). The engine starts when one is given back or no gate is queued.`;
-  const one = (count: number): string =>
-    `Waiting 3 s so far for an engine: the one engine slot of the ${String(count)} on this machine (slots) kept for engines outside a gate that a game editor_run started may take while a gate is queued is in use, by this process (pid ${pid}), and the engine starts when it is given back or no gate is queued.`;
-  for (const [count, said] of [
-    [12, many(2, 12)],
-    [3, one(3)],
-    [4, one(4)],
-    [16, many(3, 16)],
-  ] as const) {
-    assert.equal((await gameLinesWithAGateQueued(count))[0], said, `${String(count)} slots`);
-  }
-}
-
-/**
- * With no gate queued and every slot but the last kept one held, a game's wait line and answer name
- * the 11 slots a game may take and their holders, and the last kept one left for a short call.
- */
-async function testAGamesWaitLineWithNoGateQueuedNamesTheSlotLeftForACall(): Promise<void> {
-  const folder = await gameLineFolder(12, false);
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
-    const game = new EngineSlots(folder.directory, 12, folder.me, undefined, () => 'other');
-    assert.equal(await game.takeFree(true), null);
-    assert.equal(
-      slotWaitSaid(3000, 12, 'slots', game.holders(), game.drawn),
-      `Waiting 3 s so far for an engine: the 11 engine slots of the 12 on this machine (slots) a game editor_run started may take, all but slot 9, which stays for a short headless call, are in use: 11 by this process (pid ${String(process.pid)}). The engine starts when one is given back.`,
-    );
-    assert.equal(
-      slotWaitedSaid(3000, 12, 'slots', game.holders(), game.drawn),
-      `This call waited 3 s for an engine slot in all. When it first waited, the 11 engine slots of the 12 on this machine (slots) a game editor_run started may take, all but slot 9, which stays for a short headless call, were in use: 11 by this process (pid ${String(process.pid)}).`,
-    );
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** A game's answer with a gate queued names the same kept slots and holders as its wait line. */
-async function testAGamesAnswerNamesTheKeptSlotsGamesMayTake(): Promise<void> {
-  assert.equal(
-    (await gameLinesWithAGateQueued(12))[1],
-    `This call waited 3 s for an engine slot in all. When it first waited, the 2 engine slots of the 12 on this machine (slots) kept for engines outside a gate that a game editor_run started may take while a gate is queued were in use: 2 by this process (pid ${String(process.pid)}).`,
-  );
-}
-
-/** Every taker but a game says its wait on 12 held slots as before, gate queued or not. */
-async function testEveryOtherTakersWaitLinesStayAsTheyWere(): Promise<void> {
-  const pid = String(process.pid);
-  const all = [
-    `Waiting 3 s so far for an engine: all 12 engine slots on this machine (slots) are in use: 12 by this process (pid ${pid}). The engine starts when one is given back.`,
-    `This call waited 3 s for an engine slot in all. When it first waited, all 12 engine slots on this machine (slots) were in use: 12 by this process (pid ${pid}).`,
-  ];
-  const gate = [
-    `Waiting 3 s so far for an engine: the 9 engine slots of the 12 on this machine (slots) a gate's engines draw on are in use: 9 by this process (pid ${pid}). The engine starts when one is given back.`,
-    `This call waited 3 s for an engine slot in all. When it first waited, the 9 engine slots of the 12 on this machine (slots) a gate's engines draw on were in use: 9 by this process (pid ${pid}).`,
-  ];
-  const kept = [
-    `Waiting 3 s so far for an engine: the 3 engine slots of the 12 on this machine (slots) kept for engines outside a gate while a gate is queued are in use: 3 by this process (pid ${pid}). The engine starts when one is given back or no gate is queued.`,
-    `This call waited 3 s for an engine slot in all. When it first waited, the 3 engine slots of the 12 on this machine (slots) kept for engines outside a gate while a gate is queued were in use: 3 by this process (pid ${pid}).`,
-  ];
-  for (const [queued, taker, said] of [
-    [true, 'other', kept],
-    [true, 'gate', gate],
-    [true, 'tier', all],
-    [true, 'timing', all],
-    [false, 'other', all],
-    [false, 'gate', gate],
-    [false, 'tier', all],
-    [false, 'timing', all],
-  ] as const) {
-    const folder = await gameLineFolder(12, queued);
-    try {
-      slotsHeld(
-        folder,
-        Array.from({ length: 12 }, (_, slot) => slot),
-      );
-      const slots = new EngineSlots(folder.directory, 12, folder.me, undefined, () => taker);
-      assert.equal(await slots.takeFree(), null);
-      assert.deepEqual(
-        [
-          slotWaitSaid(3000, 12, 'slots', slots.holders(), slots.drawn),
-          slotWaitedSaid(3000, 12, 'slots', slots.holders(), slots.drawn),
-        ],
-        said,
-        `${taker}, gate ${queued ? 'queued' : 'none'}`,
-      );
-    } finally {
-      rmSync(folder.directory, { recursive: true, force: true });
-    }
-  }
-}
-
-/**
- * On 2 and 3 slots a game never takes the last kept slot, gate or none. On one slot, which is no
- * kept slot apart from the rest, a game takes it while no gate is queued, and nothing while one is.
- */
-async function testAGameRunsOnOneTwoAndThreeSlots(): Promise<void> {
-  for (const [count, queued, taken] of [
-    [1, false, [0]],
-    [2, false, [0]],
-    [3, false, [2, 0]],
-    [1, true, []],
-    [2, true, []],
-    [3, true, [2]],
-  ] as const) {
-    const folder = await gameLineFolder(count, queued);
-    try {
-      const game = new EngineSlots(folder.directory, count, folder.me, undefined, () => 'other');
-      assert.deepEqual(
-        await slotsTakenWhileFree(game, true),
-        taken,
-        `${String(count)} slots, gate ${queued ? 'queued' : 'none'}`,
-      );
-      game.releaseAll();
-    } finally {
-      rmSync(folder.directory, { recursive: true, force: true });
-    }
-  }
-}
-
-/**
- * A game with no gate queued behind a waiter for three slots past its drain, which looks and never
- * takes, on [param count] slots with every one held but the last kept slot, which a game never takes.
- * [param freed] is freed at 10000 ms. The takes of the looks at [param steps].
- */
-async function gameBehindAPassedWaiter(
-  count: number,
-  freed: number,
-  steps: readonly number[],
-): Promise<string[]> {
-  const last = count - keptSlotsOf(count);
-  const folder = await gameLineFolder(count, false);
-  try {
-    slotsHeld(
-      folder,
-      Array.from({ length: count }, (_, slot) => slot).filter((slot) => slot !== last),
-    );
-    return await takesInTurn(
-      folder,
-      [
-        { mark: 'wants.json', waited: 310_000, wants: 3, looksOnly: true },
-        { mark: 'game.json', waited: 200_000, game: true },
-      ],
-      steps,
-      (after) => {
-        if (after === 10_000) {
-          rmSync(join(folder.directory, `${String(freed)}.lock`));
-        }
-      },
-    );
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A waiter ahead passed for the last kept slot is given the slot freed next, which a game behind it
- * then takes at the look {@link SLOT_YIELD_MS} after it was freed, on 12 slots and on 16.
- */
-async function testAGameTakesTheSlotAWaiterPassedForTheLastKeptSlotIsGiven(): Promise<void> {
-  for (const [count, freed] of [
-    [12, 8],
-    [16, 11],
-  ] as const) {
-    assert.deepEqual(
-      await gameBehindAPassedWaiter(count, freed, looksEvery(10_000 + SLOT_YIELD_MS * 3)),
-      [`game.json took ${String(freed)} at ${String(10_000 + SLOT_YIELD_MS)}`],
-      `${String(count)} slots`,
-    );
-  }
-}
-
-/**
- * With a gate queued, side work wanting three past its drain is passed for a free gate slot a call
- * may not take, and given the kept slot freed next: the call takes that one at its yield.
- */
-async function testACallTakesTheKeptSlotSideWorkPassedForAGateSlotIsGiven(): Promise<void> {
-  const folder = await gameLineFolder(12);
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11]);
-    const took = await takesInTurn(
-      folder,
-      [
-        { mark: 'side.json', waited: 310_000, taker: 'tier', wants: 3, looksOnly: true },
-        { mark: 'call.json', waited: 200_000 },
-      ],
-      looksEvery(10_000 + SLOT_YIELD_MS * 3),
-      (after) => {
-        if (after === 10_000) {
-          rmSync(join(folder.directory, '10.lock'));
-        }
-      },
-    );
-    assert.deepEqual(took, [`call.json took 10 at ${String(10_000 + SLOT_YIELD_MS)}`]);
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * Two takers of side work ahead, passed for the two gate slots they stand on, and the kept slot freed
- * next: it falls to the first of them only after both are passed for their own, and to the second
- * once the first is passed for it too. The call behind them takes it at its yield.
- */
-async function testASlotGivenToEachTakerAheadInTurnIsTakenAtItsYield(): Promise<void> {
-  const folder = await gameLineFolder(12);
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 9, 10, 11]);
-    const took = await takesInTurn(
-      folder,
-      [
-        { mark: 'first.json', waited: 320_000, taker: 'tier', wants: 3, looksOnly: true },
-        { mark: 'second.json', waited: 310_000, taker: 'tier', wants: 3, looksOnly: true },
-        { mark: 'call.json', waited: 200_000 },
-      ],
-      looksEvery(10_000 + SLOT_YIELD_MS * 3),
-      (after) => {
-        if (after === 10_000) {
-          rmSync(join(folder.directory, '10.lock'));
-        }
-      },
-    );
-    assert.deepEqual(took, [`call.json took 10 at ${String(10_000 + SLOT_YIELD_MS)}`]);
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
 /**
  * Each free slot counts its own yield: a slot left 4 s before another is freed is taken at its own
  * {@link SLOT_YIELD_MS}, and the other only at the end of its own.
  */
 async function testEachFreeSlotCountsItsOwnYield(): Promise<void> {
-  const folder = await gameLineFolder(12, false);
+  const folder = await gameLineFolder(12);
   try {
     slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]);
     const took = await takesInTurn(
@@ -82544,322 +77064,6 @@ async function testEachFreeSlotCountsItsOwnYield(): Promise<void> {
     ]);
   } finally {
     rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * The game behind a waiter passed for the last kept slot takes the slot freed next at the look
- * {@link SLOT_YIELD_MS} after it was freed, and not at a look 1 ms before.
- */
-async function testTheSlotAPassedWaiterIsGivenIsTakenAtItsYieldAndNotBefore(): Promise<void> {
-  const due = 10_000 + SLOT_YIELD_MS;
-  assert.deepEqual(await gameBehindAPassedWaiter(12, 8, looksEvery(due + 3000, due - 1)), [
-    `game.json took 8 at ${String(due)}`,
-  ]);
-}
-
-/**
- * On a machine of one slot a game takes it with no gate queued. While a gate is queued it takes
- * nothing, and says so as a game on two slots does.
- */
-async function testAGameOnOneSlotTakesNothingWhileAGateIsQueued(): Promise<void> {
-  const folder = await gameLineFolder(1);
-  try {
-    const game = new EngineSlots(folder.directory, 1, folder.me, undefined, () => 'other');
-    assert.equal(await game.takeFree(true), null, 'a game finds no slot to take');
-    assert.equal(
-      slotWaitSaid(3000, 1, 'slots', game.holders(), game.drawn),
-      'Waiting 3 s so far for an engine: no game may run on this machine (slots) while a gate is queued, and the engine starts once no gate is queued.',
-    );
-    assert.equal(
-      slotWaitedSaid(3000, 1, 'slots', game.holders(), game.drawn),
-      'This call waited 3 s for an engine slot in all. When it first waited, no game could run on this machine (slots) while a gate was queued.',
-    );
-    rmSync(join(folder.directory, QUEUED_FOLDER, 'ticket.json'));
-    assert.equal(lockNumber(await game.takeFree(true)), 0, 'with no gate queued it takes slot 0');
-    game.releaseAll();
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * With a gate queued on 12 slots and only gate slot 8 free, side work behind a waiter for three slots
- * past its drain, which looks and never takes, and a gate's engine whose last look is at
- * [param lastLook], or which looks at every step without it. The takes of the looks at [param steps].
- */
-async function sideWorkBehindAGatesEngine(
-  lastLook: number | undefined,
-  steps: readonly number[],
-): Promise<string[]> {
-  const folder = await gameLineFolder(12);
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11]);
-    return await takesInTurn(
-      folder,
-      [
-        { mark: 'wants.json', waited: 400_000, taker: 'tier', wants: 3, looksOnly: true },
-        {
-          mark: 'gate.json',
-          waited: 350_000,
-          taker: 'gate',
-          looksOnly: true,
-          ...(lastLook === undefined ? {} : { lastLook }),
-        },
-        { mark: 'side.json', waited: 10_000, taker: 'tier' },
-      ],
-      steps,
-    );
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * With a gate queued on 12 slots and only kept slot 10 free, a call behind a waiter for three slots
- * past its drain, which looks and never takes, and a waiter for two 100 s into its drain whose last
- * look is at [param lastLook], or which looks at every step without it. The takes at [param steps].
- */
-async function aCallBehindAWaiterInItsDrain(
-  lastLook: number | undefined,
-  steps: readonly number[],
-): Promise<string[]> {
-  const folder = await gameLineFolder(12);
-  try {
-    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]);
-    return await takesInTurn(
-      folder,
-      [
-        { mark: 'wants3.json', waited: 400_000, wants: 3, looksOnly: true },
-        {
-          mark: 'wants2.json',
-          waited: 100_000,
-          wants: 2,
-          looksOnly: true,
-          ...(lastLook === undefined ? {} : { lastLook }),
-        },
-        { mark: 'call.json', waited: 50_000, ahead: () => ['wants3.json', 'wants2.json'] },
-      ],
-      steps,
-    );
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * A gate's engine that stopped looking, given gate slot 8 only once the waiter ahead of it is passed
- * for it, is dropped {@link SLOT_YIELD_MS} after it was given the slot: side work takes the slot then.
- */
-async function testAGatesEngineGivenASlotInALaterPassIsDroppedOnceItStopsLooking(): Promise<void> {
-  assert.deepEqual(await sideWorkBehindAGatesEngine(0, looksEvery(SLOT_YIELD_MS * 6)), [
-    `side.json took 8 at ${String(SLOT_YIELD_MS * 2)}`,
-  ]);
-}
-
-/**
- * A waiter for two in its drain that stopped looking, given kept slot 10 only once the waiter ahead
- * of it is passed for it, is dropped {@link SLOT_YIELD_MS} after it was given the slot: the call
- * behind takes the slot then, long before the drain ends.
- */
-async function testAWaiterInItsDrainGivenASlotInALaterPassIsDroppedOnceItStopsLooking(): Promise<void> {
-  assert.deepEqual(await aCallBehindAWaiterInItsDrain(0, looksEvery(SLOT_YIELD_MS * 6)), [
-    `call.json took 10 at ${String(SLOT_YIELD_MS * 2)}`,
-  ]);
-}
-
-/**
- * The same gate's engine and waiter in its drain, still looking, are never passed or dropped: the
- * taker behind each takes nothing.
- */
-async function testATakerWaitedForAndGivenASlotInALaterPassIsKeptWhileItLooks(): Promise<void> {
-  assert.deepEqual(
-    await sideWorkBehindAGatesEngine(undefined, looksEvery(SLOT_YIELD_MS * 6)),
-    [],
-    'side work',
-  );
-  assert.deepEqual(
-    await aCallBehindAWaiterInItsDrain(undefined, looksEvery(SLOT_YIELD_MS * 6)),
-    [],
-    'the call',
-  );
-}
-
-/**
- * A gate's engine, or a waiter for two in its drain, alone ahead and given the slot at the first pass,
- * is dropped {@link SLOT_YIELD_MS} after it stopped looking.
- */
-async function testATakerGivenASlotInTheFirstPassIsDroppedOnceItStopsLooking(): Promise<void> {
-  const gateFolder = await gameLineFolder(12);
-  try {
-    slotsHeld(gateFolder, [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11]);
-    assert.deepEqual(
-      await takesInTurn(
-        gateFolder,
-        [
-          { mark: 'gate.json', waited: 350_000, taker: 'gate', looksOnly: true, lastLook: 0 },
-          { mark: 'side.json', waited: 10_000, taker: 'tier' },
-        ],
-        looksEvery(SLOT_YIELD_MS * 3),
-      ),
-      [`side.json took 8 at ${String(SLOT_YIELD_MS)}`],
-      "a gate's engine",
-    );
-  } finally {
-    rmSync(gateFolder.directory, { recursive: true, force: true });
-  }
-  const drainFolder = await gameLineFolder(12);
-  try {
-    slotsHeld(drainFolder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]);
-    assert.deepEqual(
-      await takesInTurn(
-        drainFolder,
-        [
-          { mark: 'wants2.json', waited: 100_000, wants: 2, looksOnly: true, lastLook: 0 },
-          { mark: 'call.json', waited: 50_000 },
-        ],
-        looksEvery(SLOT_YIELD_MS * 3),
-      ),
-      [`call.json took 10 at ${String(SLOT_YIELD_MS)}`],
-      'a waiter in its drain',
-    );
-  } finally {
-    rmSync(drainFolder.directory, { recursive: true, force: true });
-  }
-}
-
-/**
- * Side work behind the gate's engine given gate slot 8 in a later pass takes it at the look
- * {@link SLOT_YIELD_MS} after the engine was given it, and not at a look 1 ms before.
- */
-async function testAGatesEngineGivenASlotInALaterPassIsDroppedAtItsYieldAndNotBefore(): Promise<void> {
-  const due = SLOT_YIELD_MS * 2;
-  assert.deepEqual(await sideWorkBehindAGatesEngine(0, looksEvery(due + 3000, due - 1)), [
-    `side.json took 8 at ${String(due)}`,
-  ]);
-}
-
-/**
- * A high-priority waiter holds other one-offs back only while it looks. Once its look is older than
- * {@link SLOT_YIELD_MS}, every looker reads the line without it alike, whatever each has left it,
- * as the games' tools read the same marks. Two lookers then never both go first.
- */
-async function testAHighPriorityWaiterThatStoppedLookingHoldsNoOtherOneOffBack(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-passed-'));
-  const marks = join(directory, WAITING_FOLDER);
-  mkdirSync(marks, { recursive: true });
-  const realNow = Date.now;
-  const marked = (name: string, body: object, looked: number): string => {
-    writeFileSync(join(marks, `${name}.json`), JSON.stringify(body));
-    const seen = join(marks, `${name}.seen`);
-    writeFileSync(seen, '');
-    utimesSync(seen, looked / 1000, looked / 1000);
-    return seen;
-  };
-  try {
-    const me = { pid: process.pid, started: await ownStart() };
-    const now = Date.now();
-    writeFileSync(join(directory, 'priority.json'), JSON.stringify({ high: ['high-game'] }));
-    marked('s-30', { ...me, taker: 'other', repository: 'high-game', since: (now - 30_000) / 1000 }, now);
-    const gateSeen = marked('g-10', { ...me, taker: 'gate', since: (now - 10_000) / 1000 }, now);
-    const ownSeen = marked('o-300', { ...me, taker: 'other', since: (now - 300_000) / 1000 }, now);
-    const lineOf = (taker: 'gate' | 'other', waited: number, mark: string): SlotLine => {
-      let offset = -waited;
-      const line = new SlotLine(taker, false, () => Date.now() + offset);
-      offset = 0;
-      line.mark = mark;
-      return line;
-    };
-    const ordinary = new EngineSlots(directory, 1, me, undefined, () => 'other');
-    const own = lineOf('other', 300_000, 'o-300.json');
-    assert.equal(
-      await ordinary.takeFree(false, own),
-      null,
-      'a one-off of 300 s waits behind a high-priority taker that looks',
-    );
-    assert.deepEqual(ordinary.drawn.left, [0], 'leaving it the slot');
-    assert.equal(
-      slotWaitSaid(300_000, 1, directory, ordinary.holders(), ordinary.drawn),
-      `Waiting 300 s so far for an engine: the one slot it may take on this machine (${directory}), slot 0, is free and left to takers ahead of it in line, which go first.`,
-      'and its wait says the slot is free, never that it is in use or that the taker ahead began first',
-    );
-    assert.equal(
-      slotWaitedSaid(300_000, 1, directory, ordinary.holders(), ordinary.drawn),
-      `This call waited 300 s for an engine slot in all. When it first waited, the one slot it could take on this machine (${directory}), slot 0, was free and left to takers ahead of it in line.`,
-      'and so does its answer, which never says those takers went first',
-    );
-    // The high-priority taker stops looking. The gate's and the one-off's takers go on.
-    const later = Date.now() + SLOT_YIELD_MS + 100;
-    utimesSync(gateSeen, later / 1000, later / 1000);
-    utimesSync(ownSeen, later / 1000, later / 1000);
-    Date.now = () => later;
-    const gate = new EngineSlots(directory, 1, me, undefined, () => 'gate');
-    assert.equal(
-      await gate.takeFree(false, lineOf('gate', 10_000, 'g-10.json')),
-      null,
-      `gate work that never left the high-priority taker a slot sees the one-off it began after ahead: drew ${JSON.stringify(gate.drawn)}`,
-    );
-    assert.equal(
-      await ordinary.takeFree(false, own),
-      join(directory, '0.lock'),
-      `and the one-off stands with gate work and takes the slot: drew ${JSON.stringify(ordinary.drawn)}`,
-    );
-    ordinary.releaseAll();
-  } finally {
-    Date.now = realNow;
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** What a waiting mark of a take names, and what a reader makes of the marks beside the priority list. */
-async function testAWaitingMarkNamesItsRepository(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-repository-'));
-  const marks = join(directory, WAITING_FOLDER);
-  mkdirSync(marks, { recursive: true });
-  try {
-    const me = { pid: process.pid, started: await ownStart() };
-    const marked = (line: SlotLine): Record<string, unknown> => ({ ...line.marked(me) });
-    const named = new SlotLine('other', false, Date.now, false, 'listed-game');
-    assert.equal(marked(named)['repository'], 'listed-game', 'a one-off names its repository');
-    assert.equal(
-      marked(new SlotLine('other', true, Date.now, false, 'listed-game'))['repository'],
-      'listed-game',
-      'a game included',
-    );
-    assert.equal(
-      marked(new SlotLine('gate', false, Date.now, false, 'listed-game'))['repository'],
-      'listed-game',
-    );
-    assert.ok(!('repository' in marked(new SlotLine('other'))), 'a take with none leaves the field out');
-    assert.ok(
-      !('class' in marked(new SlotLine('other', false, Date.now, true, 'listed-game'))),
-      'and no class',
-    );
-
-    const stamp = (Date.now() - 1000) / 1000;
-    const write = (name: string, extra: Record<string, unknown>): void => {
-      writeFileSync(join(marks, name), JSON.stringify({ ...me, taker: 'other', since: stamp, ...extra }));
-    };
-    write('1-1.json', { repository: 'listed-game' });
-    write('1-2.json', { repository: 'unlisted-game' });
-    write('1-3.json', {});
-    write('1-4.json', { class: 'store' });
-    write('1-5.json', { repository: 7 });
-    writeFileSync(join(directory, 'priority.json'), JSON.stringify({ high: ['listed-game'] }));
-    writeFileSync(join(directory, 'store.json'), JSON.stringify({ games: ['unlisted-game'] }));
-    assert.deepEqual(
-      slotWaiters(directory).map((one) => [one.mark, one.repository, one.high]),
-      [
-        ['1-1.json', 'listed-game', true],
-        ['1-2.json', 'unlisted-game', false],
-        ['1-3.json', undefined, false],
-        ['1-4.json', undefined, false],
-        ['1-5.json', undefined, false],
-      ],
-      'only a mark naming a listed repository is high, a class and store.json change nothing',
-    );
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
   }
 }
 
@@ -82897,258 +77101,6 @@ function testARepositoryIsNamedByTheFolderHoldingItsSharedGitFolder(): void {
     const loose = join(root, 'loose', 'project');
     mkdirSync(loose, { recursive: true });
     assert.equal(repositoryNameOf(loose), null, 'a project in no repository has none');
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
-/**
- * What the mark of a take of a one-off for [param project] says, with [param priority] as the slot
- * folder's `priority.json` (written as given, or none when null): its repository, and whether a
- * reader ranks it high.
- */
-async function markOfATake(
-  project: string,
-  priority: string | null,
-): Promise<{ repository: string | undefined; high: boolean } | null> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-priority-'));
-  const me = { pid: process.pid, started: await ownStart() };
-  const holder = new EngineSlots(directory, 1, me, undefined, () => 'tier');
-  const taker = new EngineSlots(directory, 1, me, undefined, () => 'other', project);
-  const stop = new AbortController();
-  try {
-    if (priority !== null) {
-      writeFileSync(join(directory, 'priority.json'), priority);
-    }
-    assert.equal(await holder.takeFree(), join(directory, '0.lock'), 'the one slot is held');
-    const waiting = taker.take(stop.signal).then(
-      () => 'took',
-      () => 'stopped',
-    );
-    const until = Date.now() + 5000;
-    while (slotWaiters(directory).length === 0 && Date.now() < until) {
-      await delay(20);
-    }
-    const waiter = slotWaiters(directory)[0];
-    stop.abort();
-    assert.equal(await waiting, 'stopped', 'the wait ended with the abort');
-    return waiter === undefined ? null : { repository: waiter.repository, high: waiter.high };
-  } finally {
-    stop.abort();
-    holder.releaseAll();
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** A take for a project in a git work tree marks its wait with the repository, high where listed. */
-async function testATakeForAListedRepositoryMarksItsWaitWithTheRepository(): Promise<void> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-store-repository-'));
-  try {
-    const listed = join(root, 'listed-game');
-    mkdirSync(join(listed, '.git'), { recursive: true });
-    mkdirSync(join(listed, 'game'), { recursive: true });
-    const other = join(root, 'other-game');
-    mkdirSync(join(other, '.git'), { recursive: true });
-    const names = JSON.stringify({ high: ['listed-game'] });
-    assert.deepEqual(
-      await markOfATake(join(listed, 'game'), names),
-      { repository: 'listed-game', high: true },
-      'a listed repository is named and high',
-    );
-    assert.deepEqual(
-      await markOfATake(other, names),
-      { repository: 'other-game', high: false },
-      'an unlisted one is named and normal',
-    );
-    assert.deepEqual(
-      await markOfATake(root, names),
-      { repository: undefined, high: false },
-      'and a project in no repository names none',
-    );
-    const worktree = join(root, 'tree');
-    const entry = join(listed, '.git', 'worktrees', 'tree');
-    mkdirSync(entry, { recursive: true });
-    mkdirSync(worktree, { recursive: true });
-    writeFileSync(join(entry, 'commondir'), '../..\n');
-    writeFileSync(join(worktree, '.git'), `gitdir: ${entry.replaceAll('\\', '/')}\n`);
-    assert.deepEqual(
-      await markOfATake(worktree, names),
-      { repository: 'listed-game', high: true },
-      'a worktree has its repository name',
-    );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
-/** A `priority.json` that is missing, unreadable or malformed names no repository and throws nothing. */
-async function testAPriorityFileThatCannotBeReadNamesNoRepository(): Promise<void> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-bad-'));
-  try {
-    const project = join(root, 'listed-game');
-    mkdirSync(join(project, '.git'), { recursive: true });
-    const cases: [string, string | null][] = [
-      ['a missing file', null],
-      ['empty text', ''],
-      ['broken JSON', '{"high": ['],
-      ['a list', '["listed-game"]'],
-      ['no high', '{}'],
-      ['the retired key', '{"games": ["listed-game"]}'],
-      ['high that is no array', '{"high": "listed-game"}'],
-      ['a number among the names', '{"high": ["listed-game", 3]}'],
-      ['null among the names', '{"high": [null, "listed-game"]}'],
-    ];
-    for (const [what, content] of cases) {
-      assert.deepEqual(
-        await markOfATake(project, content),
-        { repository: 'listed-game', high: false },
-        `${what} gives normal priority`,
-      );
-    }
-    assert.deepEqual(
-      await markOfATake(project, '{"high": ["listed-game"], "more": 1}'),
-      { repository: 'listed-game', high: true },
-      'and a good file with another key still names it',
-    );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
-/**
- * What a program that takes a slot the way the server and the commands do leaves as its waiting
- * mark. [param body] is the program's text after its import of the slot functions as `slots`.
- * Its one slot is held, in a folder of its own, so the take waits.
- */
-async function repositoryOfAProgramsTake(
-  project: string,
-  body: string,
-  priority: string,
-): Promise<string | undefined | null> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-program-'));
-  const directory = join(root, 'slots');
-  mkdirSync(directory);
-  writeFileSync(join(directory, 'priority.json'), priority);
-  const script = join(root, 'take.ts');
-  writeFileSync(
-    script,
-    [
-      `import * as slots from ${JSON.stringify(pathToFileURL(resolve('src', 'engine-slots.ts')).href)};`,
-      `const project = ${JSON.stringify(project)};`,
-      body,
-    ].join('\n'),
-  );
-  const me = { pid: process.pid, started: await ownStart() };
-  const holder = new EngineSlots(directory, 1, me, undefined, () => 'tier');
-  const env = { ...process.env };
-  for (const name of SLOT_VARIABLES) {
-    delete env[name];
-  }
-  env[SLOTS_VARIABLE] = directory;
-  env[SLOT_COUNT_VARIABLE] = '1';
-  let child: ReturnType<typeof spawnHidden> | undefined;
-  try {
-    assert.equal(await holder.takeFree(), join(directory, '0.lock'), 'the one slot is held');
-    child = spawnHidden(process.execPath, [script], { env, stdio: ['ignore', 'ignore', 'pipe'] });
-    let said = '';
-    child.stderr?.on('data', (chunk: Buffer) => {
-      said += chunk.toString();
-    });
-    const until = Date.now() + 15_000;
-    while (slotWaiters(directory).length === 0 && Date.now() < until) {
-      await delay(50);
-    }
-    const waiter = slotWaiters(directory)[0];
-    assert.ok(waiter !== undefined, `the program's take made no mark: ${said}`);
-    return waiter.repository;
-  } finally {
-    child?.kill();
-    holder.releaseAll();
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
-/**
- * The takes the server and the commands make for a project carry the project's repository: a call's
- * slot (a game a tool starts) and an engine run for a call. A
- * take with no project carries none.
- */
-async function testATakeForAProjectCarriesItsRepositoryWhateverTakesIt(): Promise<void> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-projects-'));
-  try {
-    const listed = join(root, 'listed-game');
-    mkdirSync(join(listed, '.git'), { recursive: true });
-    const names = '{"high": ["listed-game"]}';
-    const held = 'new Promise(() => undefined)';
-    assert.equal(
-      await repositoryOfAProgramsTake(listed, `slots.slotForCall(false, project); await ${held};`, names),
-      'listed-game',
-      "a call's slot for a project carries its repository",
-    );
-    assert.equal(
-      await repositoryOfAProgramsTake(listed, `slots.slotForCall(false); await ${held};`, names),
-      undefined,
-      'and one with no project carries none',
-    );
-    assert.equal(
-      await repositoryOfAProgramsTake(listed, `slots.inASlot(() => ${held}, project); await ${held};`, names),
-      'listed-game',
-      'an engine run for a project carries it',
-    );
-    assert.equal(
-      await repositoryOfAProgramsTake(listed, `slots.inASlot(() => ${held}); await ${held};`, names),
-      undefined,
-      'and one for none carries none',
-    );
-    const run = `import { runEngine } from ${JSON.stringify(pathToFileURL(resolve('src', 'engine-run.ts')).href)};`;
-    const idle = `[process.execPath, ['-e', 'setTimeout(() => undefined, 60000)']] as const`;
-    const engine = (options: string): string =>
-      `${run}\nconst [exe, args] = ${idle};\nvoid runEngine(exe, args, ${options});\nawait ${held};`;
-    assert.equal(
-      await repositoryOfAProgramsTake(listed, engine('{ project }'), names),
-      'listed-game',
-      'an engine run for a project, through runEngine, carries it',
-    );
-    assert.equal(
-      await repositoryOfAProgramsTake(listed, engine('{}'), names),
-      undefined,
-      'and one given no project carries none',
-    );
-    // Steps that run their engine on a folder of their own, for the project's sake: the export
-    // options of a preset edit, and the empty script reference the project's hidden editor needs.
-    const headless = pathToFileURL(resolve('src', 'headless.ts')).href;
-    const docs = pathToFileURL(resolve('src', 'doc-cache.ts')).href;
-    assert.equal(
-      await repositoryOfAProgramsTake(
-        listed,
-        [
-          `import { runOperation } from ${JSON.stringify(headless)};`,
-          `import { mkdtempSync } from 'node:fs';`,
-          `import { tmpdir } from 'node:os';`,
-          `const scratch = mkdtempSync(tmpdir() + '/export-');`,
-          `void runOperation({ godotPath: process.execPath, script: 'none', debug: false, editor: true, project }, 'export_options', {}, scratch);`,
-          `await ${held};`,
-        ].join('\n'),
-        names,
-      ),
-      'listed-game',
-      "the export options step, which runs on an empty folder, takes its slot for the preset's project",
-    );
-    assert.equal(
-      await repositoryOfAProgramsTake(
-        listed,
-        [
-          `import { placeEmptyScriptDocs } from ${JSON.stringify(docs)};`,
-          `import { mkdtempSync } from 'node:fs';`,
-          `import { tmpdir } from 'node:os';`,
-          `void placeEmptyScriptDocs(process.execPath, project, mkdtempSync(tmpdir() + '/docs-'));`,
-          `await ${held};`,
-        ].join('\n'),
-        names,
-      ),
-      'listed-game',
-      "the empty script reference of a hidden editor takes its slot for the editor's project",
-    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -83247,57 +77199,6 @@ function testAnUnreadableWorktreeGitFileListsNoWorktrees(): void {
   }
 }
 
-/** Two marks begun in one millisecond are ranked the way the other side of the scheme ranks them. */
-async function testAMarkBegunInTheSameMillisecondIsRankedByItsExactSince(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-tie-'));
-  const marks = join(directory, WAITING_FOLDER);
-  mkdirSync(marks, { recursive: true });
-  try {
-    const me = { pid: process.pid, started: await ownStart() };
-    const began = Date.now() - 1000;
-    const own = new SlotLine('other', false, () => began);
-    own.mark = 'z-own.json';
-    writeFileSync(
-      join(marks, 'a-later.json'),
-      JSON.stringify({ ...me, taker: 'other', since: (began + 0.4) / 1000 }),
-    );
-    writeFileSync(
-      join(marks, 'a-earlier.json'),
-      JSON.stringify({ ...me, taker: 'other', since: (began - 0.4) / 1000 }),
-    );
-    assert.deepEqual(
-      own.ahead(slotWaiters(directory)).map((one) => one.mark),
-      ['a-earlier.json'],
-      'a mark begun a fraction of a millisecond later is behind it, whatever its name, and an earlier one ahead',
-    );
-    // Both ages read the exact seconds too. A mark half a millisecond short of one is young and
-    // stands behind the looker, and one half a millisecond past it is ahead of it.
-    rmSync(join(marks, 'a-later.json'));
-    rmSync(join(marks, 'a-earlier.json'));
-    const atAge = (line: SlotLine, ms: number): string[] => {
-      writeFileSync(
-        join(marks, 'short.json'),
-        JSON.stringify({ ...me, taker: 'other', since: (began - ms) / 1000 }),
-      );
-      return line.ahead(slotWaiters(directory)).map((one) => one.mark);
-    };
-    const gate = new SlotLine('gate', false, () => began);
-    gate.mark = 'z-gate.json';
-    assert.deepEqual(atAge(gate, 119_999.5), [], 'half a millisecond short of 120 s is young');
-    assert.deepEqual(atAge(gate, 120_000.5), ['short.json'], 'and half a millisecond past it is aged');
-    const high = new SlotLine('other', false, () => began, true);
-    high.mark = 'z-high.json';
-    assert.deepEqual(
-      atAge(high, 599_999.5),
-      [],
-      'half a millisecond short of 600 s is held by high-priority work',
-    );
-    assert.deepEqual(atAge(high, 600_000.5), ['short.json'], 'and half a millisecond past it is let go');
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
 /**
  * A game the server starts for a project, a test run among them, takes its slot for that project,
  * so its wait carries the project's repository. The server's start needs an engine to run, so the
@@ -83334,240 +77235,6 @@ function testEveryGameTheServerStartsTakesItsSlotForItsProject(): void {
   );
 }
 
-/** A look made with no line of its own still ranks the project's priority: the one free slot is its. */
-async function testALookWithNoLineOfItsOwnHasTheProjectsPriority(): Promise<void> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-look-'));
-  try {
-    const listed = join(root, 'listed-game');
-    mkdirSync(join(listed, '.git'), { recursive: true });
-    const unlisted = join(root, 'unlisted-game');
-    mkdirSync(join(unlisted, '.git'), { recursive: true });
-    const directory = join(root, 'slots');
-    mkdirSync(join(directory, WAITING_FOLDER), { recursive: true });
-    writeFileSync(join(directory, 'priority.json'), '{"high": ["listed-game"]}');
-    const me = { pid: process.pid, started: await ownStart() };
-    writeFileSync(
-      join(directory, WAITING_FOLDER, '1-1.json'),
-      JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 30_000) / 1000 }),
-    );
-    const plain = new EngineSlots(directory, 1, me, undefined, () => 'other', unlisted);
-    assert.equal(await plain.takeFree(), null, 'an unlisted project leaves the slot to the earlier waiter');
-    const high = new EngineSlots(directory, 1, me, undefined, () => 'other', listed);
-    assert.equal(await high.takeFree(), join(directory, '0.lock'), 'a listed one goes before it');
-    high.releaseAll();
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
-/** The slot folder's `priority.json` is read and never written, whatever it holds. */
-async function testThePriorityFileIsOnlyRead(): Promise<void> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-read-'));
-  try {
-    const project = join(root, 'listed-game');
-    mkdirSync(join(project, '.git'), { recursive: true });
-    const written = '{"high": ["listed-game"]}';
-    const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-priority-only-'));
-    try {
-      writeFileSync(join(directory, 'priority.json'), written);
-      const me = { pid: process.pid, started: await ownStart() };
-      const taker = new EngineSlots(directory, 2, me, undefined, () => 'other', project);
-      const lock = await taker.take();
-      taker.release(lock);
-      assert.equal(readFileSync(join(directory, 'priority.json'), 'utf8'), written, 'the file is as it was');
-      assert.deepEqual(
-        readdirSync(directory).filter((name) => name.includes('priority')),
-        ['priority.json'],
-        'and nothing beside it was made',
-      );
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
-/**
- * Waiting marks written in a temporary slot folder, and the order a one-off of a normal repository
- * that began waiting now sees them in, whole, as the priority file in the folder lists the repositories.
- */
-async function priorityFolder(
-  marks: readonly { readonly name: string; readonly secondsAgo: number; readonly body: object }[],
-  priority: string | null,
-): Promise<{ directory: string; order: (observer?: SlotLine) => string[]; clock: number }> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-order-'));
-  mkdirSync(join(directory, WAITING_FOLDER), { recursive: true });
-  const me = { pid: process.pid, started: await ownStart() };
-  const clock = Date.now();
-  for (const { name, secondsAgo, body } of marks) {
-    writeFileSync(
-      join(directory, WAITING_FOLDER, `${name}.json`),
-      JSON.stringify({ ...me, since: clock / 1000 - secondsAgo, ...body }),
-    );
-  }
-  if (priority !== null) {
-    writeFileSync(join(directory, 'priority.json'), priority);
-  }
-  return {
-    directory,
-    clock,
-    order: (observer = new SlotLine('other', false, () => clock)) =>
-      observer.ahead(slotWaiters(directory)).map((one) => one.mark.replace(/\.json$/u, '')),
-  };
-}
-
-/**
- * Among one-offs a mark of a listed repository goes before every other whatever its `since`, listed
- * ones in `since` order and the rest after them in `since` order. Gate work stays before all of them. A
- * mark naming a repository that is not listed, naming none or naming a retired class is normal.
- */
-async function testAListedRepositoryGoesBeforeEveryOtherOneOffAndAfterGateWork(): Promise<void> {
-  const one = (
-    name: string,
-    secondsAgo: number,
-    body: object,
-  ): { name: string; secondsAgo: number; body: object } => ({
-    name,
-    secondsAgo,
-    body,
-  });
-  const normal = one('1-normal', 50, { taker: 'other', repository: 'normal-game' });
-  const high = one('2-high', 10, { taker: 'other', repository: 'high-game' });
-  const highEarlier = one('3-high-earlier', 20, { taker: 'other', repository: 'high-game' });
-  const gate = one('4-gate', 5, { taker: 'gate', repository: 'high-game' });
-  const classOnly = one('5-class', 40, { taker: 'other', class: 'store' });
-  const unlisted = one('6-unlisted', 45, { taker: 'other', repository: 'unlisted-game' });
-  const list = JSON.stringify({ high: ['high-game'] });
-  const folders: string[] = [];
-  try {
-    const two = await priorityFolder([normal, high], list);
-    folders.push(two.directory);
-    assert.deepEqual(two.order(), ['2-high', '1-normal'], 'a listed mark goes first whatever its since');
-    const three = await priorityFolder([normal, high, highEarlier], list);
-    folders.push(three.directory);
-    assert.deepEqual(
-      three.order(),
-      ['3-high-earlier', '2-high', '1-normal'],
-      'two listed marks go in since order, ahead of the normal one',
-    );
-    const gated = await priorityFolder([normal, high, highEarlier, gate], list);
-    folders.push(gated.directory);
-    assert.deepEqual(
-      gated.order(),
-      ['4-gate', '3-high-earlier', '2-high', '1-normal'],
-      'a gate mark still goes before a listed one, whatever repository it names',
-    );
-    const unmatched = await priorityFolder([normal, high, classOnly, unlisted], list);
-    folders.push(unmatched.directory);
-    writeFileSync(join(unmatched.directory, 'store.json'), JSON.stringify({ games: ['normal-game'] }));
-    assert.deepEqual(
-      unmatched.order(),
-      ['2-high', '1-normal', '6-unlisted', '5-class'],
-      'a mark with an unlisted repository, or a class and none, is normal, and store.json changes nothing',
-    );
-  } finally {
-    for (const directory of folders) {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  }
-}
-
-/** A list changed while two takers wait reorders them at the next look of the same take. */
-async function testAPriorityListChangedWhileTakersWaitReordersThemAtTheNextLook(): Promise<void> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-change-'));
-  try {
-    const mine = join(root, 'mine-game');
-    mkdirSync(join(mine, '.git'), { recursive: true });
-    const directory = join(root, 'slots');
-    mkdirSync(join(directory, WAITING_FOLDER), { recursive: true });
-    const me = { pid: process.pid, started: await ownStart() };
-    writeFileSync(
-      join(directory, WAITING_FOLDER, '1-1.json'),
-      JSON.stringify({
-        ...me,
-        taker: 'other',
-        repository: 'ahead-game',
-        since: (Date.now() - 30_000) / 1000,
-      }),
-    );
-    writeFileSync(join(directory, 'priority.json'), '{"high": ["ahead-game"]}');
-    const taker = new EngineSlots(directory, 1, me, undefined, () => 'other');
-    const line = new SlotLine('other', false, Date.now, false, 'mine-game');
-    assert.equal(await taker.takeFree(false, line), null, 'the listed waiter stays ahead of it');
-    writeFileSync(join(directory, 'priority.json'), '{"high": ["mine-game"]}');
-    assert.equal(
-      await taker.takeFree(false, line),
-      join(directory, '0.lock'),
-      'and once the list names it instead, the same take at its next look goes first',
-    );
-    taker.releaseAll();
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
-/** A missing, empty, mistyped or non-JSON priority file gives normal order, and a bad one is said once. */
-async function testABadPriorityFileGivesNormalOrderAndIsSaidOnce(): Promise<void> {
-  const normal = { name: '1-normal', secondsAgo: 50, body: { taker: 'other', repository: 'normal-game' } };
-  const listed = { name: '2-listed', secondsAgo: 10, body: { taker: 'other', repository: 'high-game' } };
-  const cases: [string, string | null][] = [
-    ['a missing file', null],
-    ['an empty file', ''],
-    ['high that is no array', '{"high": "x"}'],
-    ['a file that is not JSON', 'high: [high-game'],
-  ];
-  const said: string[] = [];
-  for (const [what, content] of cases) {
-    const folder = await priorityFolder([normal, listed], content);
-    try {
-      assert.deepEqual(folder.order(), ['1-normal', '2-listed'], `${what} gives normal order`);
-      const me = { pid: process.pid, started: await ownStart() };
-      const taker = new EngineSlots(
-        folder.directory,
-        1,
-        me,
-        (line) => said.push(line),
-        () => 'tier',
-      );
-      const before = said.length;
-      for (let look = 0; look < 3; look += 1) {
-        const lock = await taker.takeFree();
-        assert.ok(lock !== null, `${what}: the slot is free`);
-        taker.releaseAll();
-      }
-      assert.equal(said.length - before, content === null || content === '' ? 0 : 1, `${what}: said once`);
-    } finally {
-      rmSync(folder.directory, { recursive: true, force: true });
-    }
-  }
-}
-
-/** A normal one-off stands behind listed work until it has waited 600 s, then stands with gate work. */
-async function testANormalOneOffPast600SecondsStandsWithGateWorkBesideAListedWaiter(): Promise<void> {
-  const listed = { name: '1-listed', secondsAgo: 30, body: { taker: 'other', repository: 'high-game' } };
-  const held = { name: '2-held', secondsAgo: 599, body: { taker: 'other', repository: 'normal-game' } };
-  const past = { name: '3-past', secondsAgo: 601, body: { taker: 'other', repository: 'normal-game' } };
-  const named = await priorityFolder([listed, held, past], '{"high": ["high-game"]}');
-  const unnamed = await priorityFolder([listed, held, past], null);
-  try {
-    const gate = (clock: number): SlotLine => new SlotLine('gate', false, () => clock);
-    assert.deepEqual(
-      named.order(gate(named.clock)),
-      ['3-past'],
-      'with a listed waiter, only the one-off past 600 s stands before a gate',
-    );
-    assert.deepEqual(
-      unnamed.order(gate(unnamed.clock)),
-      ['3-past', '2-held'],
-      'with no list, both one-offs past 120 s stand before it, and the young one does not',
-    );
-  } finally {
-    rmSync(named.directory, { recursive: true, force: true });
-    rmSync(unnamed.directory, { recursive: true, force: true });
-  }
-}
-
 /** A take for a project in a git work tree writes its lock as a take for none does. */
 async function testALockOfATakeForAProjectInGitIsAsThatOfATakeForNone(): Promise<void> {
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-lock-'));
@@ -83579,7 +77246,7 @@ async function testALockOfATakeForAProjectInGitIsAsThatOfATakeForNone(): Promise
     for (const forProject of [project, undefined]) {
       const directory = join(root, forProject === undefined ? 'none' : 'git');
       mkdirSync(directory);
-      const taker = new EngineSlots(directory, 1, me, undefined, () => 'other', forProject);
+      const taker = new EngineSlots(directory, 1, me, undefined, forProject, plentyOfMemory);
       const lock = await taker.take();
       locks.push(readFileSync(lock, 'utf8'));
       taker.release(lock);
@@ -83588,185 +77255,6 @@ async function testALockOfATakeForAProjectInGitIsAsThatOfATakeForNone(): Promise
     assert.ok(!locks[0]?.includes('repository'), 'and name no repository');
   } finally {
     rmSync(root, { recursive: true, force: true });
-  }
-}
-
-/** The memory mark a run puts down carries the repository of its project in git, and none outside git. */
-async function testARunsMemoryMarkNamesTheRepositoryOfItsProject(): Promise<void> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-memory-'));
-  try {
-    const project = join(root, 'listed-game');
-    mkdirSync(join(project, '.git'), { recursive: true });
-    const loose = join(root, 'loose');
-    mkdirSync(loose);
-    const me = { pid: process.pid, started: await ownStart() };
-    const markOf = (forProject: string, folder: string): unknown => {
-      const directory = join(root, folder);
-      const slots = new EngineSlots(directory, 1, me, undefined, () => 'gate', forProject);
-      const unmark = slots.markWaiting();
-      try {
-        const marks = readdirSync(join(directory, WAITING_FOLDER)).filter((name) => name.endsWith('.json'));
-        assert.equal(marks.length, 1, 'the run puts down one mark');
-        return JSON.parse(readFileSync(join(directory, WAITING_FOLDER, marks[0] ?? ''), 'utf8'));
-      } finally {
-        unmark();
-      }
-    };
-    assert.deepEqual(
-      markOf(project, 'git'),
-      { ...me, repository: 'listed-game', taker: 'memory' },
-      'a run for a project in git names its repository',
-    );
-    assert.deepEqual(markOf(loose, 'none'), { ...me, taker: 'memory' }, 'and one outside git names none');
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
-/**
- * What a program taking slots as the server does, with no way of saying lines of its own, puts in the
- * answers of two calls that each wait for a slot, with [param priority] as the slots folder's list.
- */
-async function answersOfTwoWaitingCalls(priority: string): Promise<{ directory: string; answers: string[] }> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-priority-answers-'));
-  const directory = join(root, 'slots');
-  mkdirSync(directory);
-  writeFileSync(join(directory, 'priority.json'), priority);
-  const project = join(root, 'listed-game');
-  mkdirSync(join(project, '.git'), { recursive: true });
-  const script = join(root, 'calls.ts');
-  const source = (file: string): string => JSON.stringify(pathToFileURL(resolve('src', file)).href);
-  writeFileSync(
-    script,
-    [
-      `import * as slots from ${source('engine-slots.ts')};`,
-      `import { callNotesSaid, newCallNotes, withCallSignal } from ${source('call-signal.ts')};`,
-      `const directory = ${JSON.stringify(directory)};`,
-      `const project = ${JSON.stringify(project)};`,
-      'for (let call = 0; call < 2; call += 1) {',
-      '  const stop = new AbortController();',
-      '  const notes = newCallNotes();',
-      '  const before = slots.slotWaiters(directory).length;',
-      '  const answered = withCallSignal(stop.signal, () => slots.slotForCall(false, project),',
-      '    undefined, undefined, undefined, notes).then(() => "took", () => "stopped");',
-      '  const until = Date.now() + 10000;',
-      '  while (slots.slotWaiters(directory).length === before && Date.now() < until) {',
-      '    await new Promise((done) => setTimeout(done, 20));',
-      '  }',
-      '  stop.abort();',
-      '  await answered;',
-      '  console.log(JSON.stringify(callNotesSaid(notes)));',
-      '}',
-      'process.exit(0);',
-    ].join('\n'),
-  );
-  const me = { pid: process.pid, started: await ownStart() };
-  const holder = new EngineSlots(directory, 1, me, undefined, () => 'tier');
-  const env = { ...process.env };
-  for (const name of SLOT_VARIABLES) {
-    delete env[name];
-  }
-  env[SLOTS_VARIABLE] = directory;
-  env[SLOT_COUNT_VARIABLE] = '1';
-  try {
-    assert.equal(await holder.takeFree(), join(directory, '0.lock'), 'the one slot is held');
-    const child = spawnHidden(process.execPath, [script], { env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '';
-    let err = '';
-    child.stdout.on('data', (chunk: Buffer) => {
-      out += chunk.toString();
-    });
-    child.stderr.on('data', (chunk: Buffer) => {
-      err += chunk.toString();
-    });
-    // Its output is whole only once its streams close, which can come after it exits.
-    await once(child, 'close');
-    assert.equal(child.exitCode, 0, `the program ended: ${err}`);
-    return { directory, answers: out.split('\n').filter((line) => line !== '') };
-  } finally {
-    holder.releaseAll();
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
-/** A server says a malformed priority list once, in the answer of the first call that waited, and a good one never. */
-async function testAServerSaysAMalformedPriorityListOnceInItsAnswers(): Promise<void> {
-  const bad = await answersOfTwoWaitingCalls('{"high": "listed-game"}');
-  assert.deepEqual(
-    bad.answers,
-    [
-      JSON.stringify({
-        engineSlotNote: `priority.json has no "high" array of strings in ${bad.directory}, so no repository has high priority.`,
-      }),
-      '{}',
-    ],
-    'the first call says it and the second does not',
-  );
-  const good = await answersOfTwoWaitingCalls('{"high": ["listed-game"]}');
-  assert.deepEqual(good.answers, ['{}', '{}'], 'a well-formed list is not said');
-}
-
-/** A gate mark naming a listed repository holds no ordinary one-off back, as gate work stays out of high priority. */
-async function testAGateMarkOfAListedRepositoryIsNotHighPriority(): Promise<void> {
-  const gate = { name: '1-gate', secondsAgo: 5, body: { taker: 'gate', repository: 'high-game' } };
-  const ordinary = {
-    name: '2-ordinary',
-    secondsAgo: 300,
-    body: { taker: 'other', repository: 'normal-game' },
-  };
-  const folder = await priorityFolder([gate, ordinary], '{"high": ["high-game"]}');
-  try {
-    assert.deepEqual(
-      slotWaiters(folder.directory).map((one) => [one.mark, one.repository, one.high]),
-      [
-        ['1-gate.json', 'high-game', false],
-        ['2-ordinary.json', 'normal-game', false],
-      ],
-      'the gate mark names its repository and is not high',
-    );
-    assert.deepEqual(
-      folder.order(new SlotLine('gate', false, () => folder.clock)),
-      ['2-ordinary', '1-gate'],
-      'so the one-off of 300 s stands with gate work, in since order',
-    );
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** A gate's own line of a listed repository is never judged high, so it holds ordinary one-offs to 120 s. */
-async function testAGatesOwnLineOfAListedRepositoryIsNotHighPriority(): Promise<void> {
-  const ordinary = {
-    name: '1-ordinary',
-    secondsAgo: 300,
-    body: { taker: 'other', repository: 'normal-game' },
-  };
-  const folder = await priorityFolder([ordinary], '{"high": ["high-game"]}');
-  try {
-    const line = new SlotLine('gate', false, () => folder.clock, false, 'high-game');
-    line.judge(new Set(['high-game']));
-    assert.equal(line.high, false, 'the gate line is not high');
-    assert.deepEqual(folder.order(line), ['1-ordinary'], 'and the one-off of 300 s stands before it');
-    const own = new SlotLine('other', false, () => folder.clock, false, 'high-game');
-    own.judge(new Set(['high-game']));
-    assert.equal(own.high, true, 'where a one-off line of the same repository is high');
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
-  }
-}
-
-/** A mark whose `repository` is an empty string names no repository, even beside a list naming one. */
-async function testAnEmptyRepositoryInAMarkReadsAsNone(): Promise<void> {
-  const empty = { name: '1-empty', secondsAgo: 10, body: { taker: 'other', repository: '' } };
-  const folder = await priorityFolder([empty], '{"high": ["", "listed-game"]}');
-  try {
-    assert.deepEqual(
-      slotWaiters(folder.directory).map((one) => [one.mark, one.repository, one.high]),
-      [['1-empty.json', undefined, false]],
-      'the empty name is no repository and not high',
-    );
-  } finally {
-    rmSync(folder.directory, { recursive: true, force: true });
   }
 }
 
@@ -83800,7 +77288,7 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
   const pending: Promise<unknown>[] = [];
   try {
     const holder = { pid: process.pid, started: await ownStart() };
-    const slots = new EngineSlots(directory, 1, holder);
+    const slots = new EngineSlots(directory, 1, holder, undefined, undefined, plentyOfMemory);
     const waitFor = (signal?: AbortSignal): Promise<string> => {
       const taken = slots.take(signal === undefined ? stop.signal : AbortSignal.any([stop.signal, signal]));
       pending.push(taken.catch(() => undefined));
@@ -83816,13 +77304,13 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
     const said = asObject(JSON.parse(readFileSync(join(marks, one[0] ?? ''), 'utf8')), 'the wait mark');
     assert.deepEqual(
       { ...said, since: 0 },
-      { ...holder, taker: slotTaker(), since: 0 },
-      'holding what its lock will and its kind',
+      { ...holder, since: 0 },
+      'holding what its lock will and when it began',
     );
     const since = said['since'];
     assert.ok(
-      typeof since === 'number' && Math.abs(since * 1000 - Date.now()) < 10_000,
-      `and when it began to wait, in seconds: ${String(since)}`,
+      typeof since === 'number' && Math.abs(since - Date.now()) < 10_000,
+      `and when it began to wait, in milliseconds: ${String(since)}`,
     );
     const firstMark = join(marks, one[0] ?? '');
     const firstBegan = markBegan(firstMark);
@@ -86454,11 +79942,11 @@ function testASuiteDependsOnEveryFileItsScriptsAndResourcesNameInAnySpelling(): 
         `${settings} read at start is an input`,
       );
     }
-    const base = join(project, 'oneCaseprobe');
-    writeTree(project, { 'oneCaseprobe/low.gd': script('const T = preload("res://data/t.tres")') });
+    const base = join(project, 'case_probe');
+    writeTree(project, { 'case_probe/low.gd': script('const T = preload("res://data/t.tres")') });
     if (existsSync(join(base, 'LOW.gd'))) {
       assert.equal(
-        moves('res://oneCaseprobe/LOW.gd', 'data/t.tres', 'cased\n'),
+        moves('res://case_probe/LOW.gd', 'data/t.tres', 'cased\n'),
         true,
         'a script named in another letter case still names what it preloads',
       );
@@ -88173,7 +81661,7 @@ async function checksTheMachineSlotsAndTheirWaitMessages(): Promise<void> {
   assert.deepEqual(machineSlots().directory, join(tmpdir(), 'gdharness-test-slots'));
   assert.equal(
     slotWaitSaid(41_400, 6, 'slots'),
-    'Waiting 41 s so far for an engine: all 6 engine slots on this machine (slots) are in use, by a gate or another tool, and the engine starts when one is given back.',
+    'Waiting 41 s so far for an engine: all 6 engine slots on this machine (slots) are in use, by other programs, and the engine starts when one is given back.',
   );
   // Who holds them, one entry a slot: grouped by process, named by what took them where the lock
   // says, and by pid where a lock written without it does not.
@@ -88196,7 +81684,7 @@ async function checksTheMachineSlotsAndTheirWaitMessages(): Promise<void> {
       slotWaitedSaid(1_200, 1, 'slots', [gate]),
     ],
     [
-      'This call waited 62 s for an engine slot in all. When it first waited, all 6 engine slots on this machine (slots) were in use, by a gate or another tool.',
+      'This call waited 62 s for an engine slot in all. When it first waited, all 6 engine slots on this machine (slots) were in use, by other programs.',
       'This call waited 62 s for an engine slot in all. When it first waited, all 6 engine slots on this machine (slots) were in use: 3 by gdharness test of /games/one (pid 1) and 3 by pid 2.',
       'This call waited 1 s for an engine slot in all. When it first waited, all 3 engine slots on this machine (slots) were in use: 1 by pid 2, 1 by gdharness setup (pid 3) and 1 by gdharness test of /games/one (pid 1).',
       'This call waited 1 s for an engine slot in all. When it first waited, the one engine slot on this machine (slots) was in use, by gdharness test of /games/one (pid 1).',
@@ -88232,13 +81720,27 @@ async function checksALongWaitIsHeardOnce(): Promise<void> {
   try {
     writeFileSync(lineHeld, JSON.stringify(me));
     const lines: string[] = [];
-    const lanes = new EngineSlots(lined, 1, me, (line) => {
-      lines.push(line);
-    });
+    const lanes = new EngineSlots(
+      lined,
+      1,
+      me,
+      (line) => {
+        lines.push(line);
+      },
+      undefined,
+      plentyOfMemory,
+    );
     const unheard: string[] = [];
-    const listened = new EngineSlots(lined, 1, me, (line) => {
-      unheard.push(line);
-    });
+    const listened = new EngineSlots(
+      lined,
+      1,
+      me,
+      (line) => {
+        unheard.push(line);
+      },
+      undefined,
+      plentyOfMemory,
+    );
     const told: number[] = [];
     const takes = [
       { slots: lanes, taking: lanes.take() },
@@ -88269,9 +81771,16 @@ async function checksALongWaitIsHeardOnce(): Promise<void> {
 
     writeFileSync(lineHeld, JSON.stringify(me));
     const brief: string[] = [];
-    const briefly = new EngineSlots(lined, 1, me, (line) => {
-      brief.push(line);
-    });
+    const briefly = new EngineSlots(
+      lined,
+      1,
+      me,
+      (line) => {
+        brief.push(line);
+      },
+      undefined,
+      plentyOfMemory,
+    );
     const shortTake = briefly.take();
     await delay(500);
     rmSync(lineHeld);
@@ -88280,9 +81789,16 @@ async function checksALongWaitIsHeardOnce(): Promise<void> {
     assert.deepEqual([shortLock, brief], [lineHeld, []], 'a wait of half a second takes the slot unsaid');
 
     const queued: string[] = [];
-    const run = new EngineSlots(lined, 1, me, (line) => {
-      queued.push(line);
-    });
+    const run = new EngineSlots(
+      lined,
+      1,
+      me,
+      (line) => {
+        queued.push(line);
+      },
+      undefined,
+      plentyOfMemory,
+    );
     const first = await run.take();
     const second = run.take();
     await delay(2600);
@@ -88558,11 +82074,6 @@ async function checksTheKeeperHoldsTheSlot(
   assert.ok(
     keeper.pid !== server.child.pid && keeper.pid !== game && alive(keeper.pid),
     `the lock names the game's keeper, not the server or the game: ${JSON.stringify(keeper)}`,
-  );
-  assert.equal(
-    keeper.game,
-    true,
-    `and says it is a game's, which games share a cap on: ${JSON.stringify(keeper)}`,
   );
   // And names the game as the engine on it, so what the game starts runs on its slot.
   assert.deepEqual(
@@ -90170,1183 +83681,6 @@ function testARunOutOfMemoryNamesEveryEngine(): void {
     outOfMemorySaid([{ index: 0 }, { index: 1, peakBytes: 3.3 * gib }]),
     `${first} The most each held in this run: engine 0 unread, engine 1 3.3 GB.`,
   );
-}
-
-/** Suites of one 40 s case each, which a share holds whole, each seen to hold [param peakGiB]. */
-function eightSuitesOf(
-  count: number,
-  peakGiB: number,
-): { units: ReturnType<typeof unitsOf>; declared: Map<string, string[]>; times: SuiteTimes } {
-  const paths = Array.from({ length: count }, (_, at) => `res://rise_${String(at)}_test.gd`);
-  const suites: DeclaredSuite[] = paths.map((path) => ({
-    path,
-    cases: ['test_one'],
-    windowed: false,
-    headless: false,
-    together: false,
-    accessible: false,
-  }));
-  const times: SuiteTimes = Object.fromEntries(
-    paths.map((path) => [path, { seconds: 40, cases: { test_one: 40 }, peak: peakGiB * 1024 ** 3 }]),
-  );
-  return {
-    units: unitsOf(suites, times),
-    declared: new Map(paths.map((path) => [path, ['test_one']])),
-    times,
-  };
-}
-
-/** The engines of a run that is raised, which wait until the case ends them. */
-interface RisingEngines {
-  readonly going: Array<{ readonly lane: number; readonly suites: string[]; end: () => void }>;
-  readonly started: () => number;
-  /** The most engines that were going at the same moment. */
-  readonly most: () => number;
-  readonly run: (plan: EnginePlan, index: number) => Promise<{ index: number; suites: string[] }>;
-}
-
-function risingEngines(): RisingEngines {
-  const going: RisingEngines['going'] = [];
-  let live = 0;
-  let most = 0;
-  return {
-    going,
-    started: () => going.length,
-    most: () => most,
-    run: (plan, index) =>
-      new Promise((finished) => {
-        const suites = plan.suites.map((one) => one.path);
-        live += 1;
-        most = Math.max(most, live);
-        going.push({
-          lane: plan.lane,
-          suites,
-          end: () => {
-            live -= 1;
-            finished({ index, suites });
-          },
-        });
-      }),
-  };
-}
-
-/** Waits until [param until] holds, or fails after [param ms]. */
-async function untilItHolds(what: string, until: () => boolean, ms = 10_000): Promise<void> {
-  const deadline = Date.now() + ms;
-  while (!until()) {
-    assert.ok(Date.now() < deadline, `waited ${String(ms)} ms for ${what}`);
-    await delay(2);
-  }
-}
-
-/**
- * A stand-in for the lanes a gate raises: answers [param said] once [param when] holds, then pends
- * until its signal aborts. With [param when] null it never answers, as a stale file's follower does.
- */
-function raisedTo(
-  ceiling: number,
-  when: (() => boolean) | null,
-  said: number,
-): {
-  readonly raised: { ceiling: number; past: (above: number, signal: AbortSignal) => Promise<number> };
-  readonly asks: Array<{ readonly above: number; readonly signal: AbortSignal }>;
-} {
-  const asks: Array<{ readonly above: number; readonly signal: AbortSignal }> = [];
-  return {
-    asks,
-    raised: {
-      ceiling,
-      past: async (above, signal) => {
-        asks.push({ above, signal });
-        if (asks.length === 1 && when !== null) {
-          await untilItHolds('the engines the rise waits for', when);
-          return said;
-        }
-        await new Promise<void>((_, refused) => {
-          signal.addEventListener('abort', () => {
-            refused(new Error('the asking was ended'));
-          });
-        });
-        return said;
-      },
-    },
-  };
-}
-
-/** A run's lanes rise as the number a gate names does: the shares are cut for them and each starts an engine. */
-async function testARunAddsALaneAsItsLanesRise(): Promise<void> {
-  const gib = 1024 ** 3;
-  // The shares are cut for the lanes there are now.
-  const eight = eightSuitesOf(8, 1);
-  const shares = new Shares(eight.units, eight.declared, 2);
-  assert.equal(
-    shares.next(0)?.suites.length,
-    3,
-    'two lanes are each handed half of what is left, up to 120 s',
-  );
-  shares.widen(4);
-  assert.equal(shares.next(1)?.suites.length, 1, 'a quarter of the 200 s left is one suite');
-  shares.widen(1);
-  assert.equal(shares.next(2)?.suites.length, 1, 'a number below the present one lowers nothing');
-
-  const six = eightSuitesOf(6, 1);
-  const slots = { take: () => Promise.resolve('lock'), release: () => undefined };
-  const taken = ['one', 'two'];
-  const startedRun = (
-    engines: RisingEngines,
-    raised: Parameters<typeof runShares>[9],
-    gate?: MemoryGate,
-    inputs = six,
-    slotsOf: Pick<EngineSlots, 'take' | 'release'> = slots,
-  ): Promise<Array<{ index: number; suites: string[] }>> => {
-    const run = runShares(
-      slotsOf,
-      inputs.units,
-      inputs.declared,
-      2,
-      taken,
-      inputs.times,
-      engines.run,
-      undefined,
-      gate,
-      raised,
-    );
-    run.catch(() => undefined);
-    return run;
-  };
-  const endsWithin = async <T>(pending: Promise<T>, what: string): Promise<T> => {
-    const ended = await Promise.race([pending.then((value) => ({ value })), delay(10_000).then(() => null)]);
-    assert.ok(ended !== null, `${what} ended`);
-    return ended.value;
-  };
-  const endAsTheyCome = async (engines: RisingEngines, pending: Promise<unknown>): Promise<void> => {
-    const over = pending.then(
-      () => true,
-      () => true,
-    );
-    const ended = new Set<number>();
-    while (!(await Promise.race([over, delay(2).then(() => false)]))) {
-      engines.going.forEach((engine, at) => {
-        if (!ended.has(at)) {
-          ended.add(at);
-          engine.end();
-        }
-      });
-    }
-  };
-
-  // Rising mid-run, then the last share's abort of the asking.
-  const rising = risingEngines();
-  const risen = raisedTo(6, () => rising.started() >= 2, 4);
-  const risingRun = startedRun(rising, risen.raised);
-  await untilItHolds('four engines', () => rising.started() >= 4);
-  assert.deepEqual(
-    rising.going.map((engine) => [engine.lane, engine.suites.length]),
-    [
-      [0, 3],
-      [1, 1],
-      [2, 1],
-      [3, 1],
-    ],
-    'four engines go at once, in lanes 0 to 3, the added ones on shares cut for four lanes',
-  );
-  await untilItHolds('the second asking', () => risen.asks.length >= 2);
-  assert.equal(
-    risen.asks[1]?.signal.aborted,
-    true,
-    'the asking ends once the last share is handed out, while its engines still go',
-  );
-  rising.going.forEach((engine) => {
-    engine.end();
-  });
-  const ran = await endsWithin(risingRun, 'the rising run');
-  assert.deepEqual(
-    ran.map((engine) => engine.index),
-    [0, 1, 2, 3],
-    'four engines in index order',
-  );
-  assert.deepEqual(
-    ran.flatMap((engine) => engine.suites).toSorted(),
-    six.units.map((unit) => unit.suite).toSorted(),
-    'every suite once',
-  );
-  assert.deepEqual(
-    risen.asks.map((ask) => ask.above),
-    [2, 4],
-    'asked again from the lanes it was raised to',
-  );
-
-  // At its ceiling a run asks no more.
-  const atCeiling = risingEngines();
-  const ceiling = raisedTo(4, () => atCeiling.started() >= 2, 4);
-  const ceilingRun = startedRun(atCeiling, ceiling.raised);
-  await untilItHolds('four engines at the ceiling', () => atCeiling.started() >= 4);
-  atCeiling.going.forEach((engine) => {
-    engine.end();
-  });
-  const ceilingRan = await endsWithin(ceilingRun, 'the run at its ceiling');
-  assert.deepEqual(
-    ceiling.asks.map((ask) => ask.above),
-    [2],
-    'asked once, at its ceiling no more',
-  );
-  assert.equal(ceilingRan.flatMap((engine) => engine.suites).length, 6, 'every suite once');
-
-  // A number that never rises adds no lane.
-  const unraised = risingEngines();
-  const never = raisedTo(6, null, 4);
-  const neverRun = startedRun(unraised, never.raised);
-  await untilItHolds('two engines', () => unraised.started() >= 2);
-  await endAsTheyCome(unraised, neverRun);
-  assert.equal(unraised.most(), 2, 'never more than two engines at once');
-  assert.deepEqual(
-    [...new Set(unraised.going.map((engine) => engine.lane))].toSorted((a, b) => a - b),
-    [0, 1],
-    'lanes 0 and 1 alone',
-  );
-  assert.equal(never.asks.length, 1, 'the asking went on with nothing to add');
-  assert.equal(never.asks[0]?.signal.aborted, true, 'and ended with the last share');
-
-  // Memory holds an added lane's engine.
-  const heavy = eightSuitesOf(6, 3);
-  const held = risingEngines();
-  const memoryRise = raisedTo(6, () => held.started() >= 2, 4);
-  const memoryRun = startedRun(
-    held,
-    memoryRise.raised,
-    new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(10 * gib), 5),
-    heavy,
-  );
-  await untilItHolds('the rise to be answered', () => memoryRise.asks.length >= 2);
-  await delay(100);
-  assert.equal(held.started(), 2, 'memory for two engines starts two, whatever the lanes');
-  await endAsTheyCome(held, memoryRun);
-  assert.equal(
-    (await memoryRun).flatMap((engine) => engine.suites).length,
-    6,
-    'and every suite is run in the end',
-  );
-
-  // No work left for an added lane: it takes no slot that never comes.
-  const little = eightSuitesOf(2, 1);
-  const idle = risingEngines();
-  const waitingForSlots = {
-    take: (signal?: AbortSignal): Promise<string> =>
-      new Promise((_, refused) => {
-        signal?.addEventListener('abort', () => {
-          refused(new Error('the wait for a slot was ended'));
-        });
-      }),
-    release: () => undefined,
-  };
-  const idleRun = startedRun(
-    idle,
-    { ceiling: 6, past: () => Promise.resolve(4) },
-    undefined,
-    little,
-    waitingForSlots,
-  );
-  await untilItHolds('two engines', () => idle.started() >= 2);
-  idle.going.forEach((engine) => {
-    engine.end();
-  });
-  const idleRan = await endsWithin(idleRun, 'the run with no work for an added lane');
-  assert.equal(idleRan.length, 2, 'two engines, with no bound of its own');
-
-  // The units are cut for the pool's count where the run follows a lanes file.
-  const following = (count: string | undefined, file: string | undefined): NodeJS.ProcessEnv => ({
-    ...(count === undefined ? {} : { [SHARE_COUNT_VARIABLE]: count }),
-    ...(file === undefined ? {} : { [LANES_VARIABLE]: file }),
-  });
-  assert.equal(enginesCutFor(2, 16, following('9', 'lanes.json')), 9, 'the pool count over the engines');
-  assert.equal(enginesCutFor(2, 4, following('9', 'lanes.json')), 4, 'within the processors');
-  assert.equal(enginesCutFor(2, 16, following('9', undefined)), 2, 'a run with no file follows nothing');
-  assert.equal(enginesCutFor(2, 16, following('9', '')), 2, 'an empty variable names no file');
-  assert.equal(enginesCutFor(2, 16, following(undefined, 'lanes.json')), 2, 'no count cuts for the engines');
-  assert.equal(
-    enginesCutFor(2, 16, following('1', 'lanes.json')),
-    2,
-    'a count below the engines lowers nothing',
-  );
-  assert.throws(
-    () => enginesCutFor(2, 16, following('x', 'lanes.json')),
-    (error: unknown) => error instanceof EngineUsageError && error.message.includes(SHARE_COUNT_VARIABLE),
-    'a wrong count is refused by name',
-  );
-  assert.equal(enginesCutFor(2, 16, following('x', undefined)), 2, 'and read by no run that follows nothing');
-
-  // A few long suites have the units to grow on only when cut for the pool's count.
-  const longPaths = ['res://long_a_test.gd', 'res://long_b_test.gd'];
-  const longCases = ['test_a', 'test_b', 'test_c', 'test_d'];
-  const longSuites: DeclaredSuite[] = longPaths.map((path) => ({
-    path,
-    cases: longCases,
-    windowed: false,
-    headless: false,
-    together: false,
-    accessible: false,
-  }));
-  const longTimes: SuiteTimes = Object.fromEntries(
-    longPaths.map((path) => [
-      path,
-      { seconds: 80, cases: Object.fromEntries(longCases.map((name) => [name, 20])), peak: gib },
-    ]),
-  );
-  const longDeclared = new Map(longPaths.map((path) => [path, [...longCases]]));
-  const cutFor = (engines: number): ReturnType<typeof unitsOf> =>
-    unitsOf(longSuites, longTimes, splitPastFor(longSuites, longTimes, engines));
-  const forCount = cutFor(enginesCutFor(2, 16, following('4', 'lanes.json')));
-  assert.equal(forCount.length, 8, 'cut for four lanes, eight units');
-  assert.equal(cutFor(enginesCutFor(2, 16, following('4', undefined))).length, 2, 'cut for two, two units');
-  const longRising = risingEngines();
-  const longRaised = raisedTo(4, () => longRising.started() >= 2, 4);
-  const longRun = startedRun(longRising, longRaised.raised, undefined, {
-    units: forCount,
-    declared: longDeclared,
-    times: longTimes,
-  });
-  await untilItHolds('four engines on a few long suites', () => longRising.started() >= 4);
-  assert.equal(longRising.most(), 4, 'four engines go at once');
-  longRising.going.forEach((engine) => {
-    engine.end();
-  });
-  await endAsTheyCome(longRising, longRun);
-}
-
-/** Suite engines and a stand-in compile check over two lanes, counted together. */
-interface CheckRig {
-  readonly four: ReturnType<typeof eightSuitesOf>;
-  readonly events: string[];
-  readonly released: string[];
-  readonly counted: { live: number; most: number };
-  readonly going: Array<{ readonly lock: string; ended: boolean; readonly end: () => void }>;
-  readonly ran: string[];
-  /** The two lanes over `one` and `two`, handing [param handed] on. */
-  readonly lanes: (handed: HandedSlot, memory?: MemoryGate) => Promise<Array<{ index: number }>>;
-  /** Ends each suite engine as it starts, until [param pending] settles. */
-  readonly endAsTheyCome: (pending: Promise<unknown>) => Promise<void>;
-}
-
-function checkRig(): CheckRig {
-  const four = eightSuitesOf(4, 1);
-  const events: string[] = [];
-  const released: string[] = [];
-  const counted = { live: 0, most: 0 };
-  const going: CheckRig['going'] = [];
-  const ran: string[] = [];
-  const given: string[] = [];
-  const run = (plan: EnginePlan, index: number, lock: string): Promise<{ index: number }> =>
-    new Promise((finished) => {
-      counted.live += 1;
-      counted.most = Math.max(counted.most, counted.live);
-      events.push(`start ${lock}`);
-      going.push({
-        lock,
-        ended: false,
-        end: () => {
-          counted.live -= 1;
-          ran.push(...plan.suites.map((one) => one.path));
-          finished({ index });
-        },
-      });
-    });
-  const lanes = (handed: HandedSlot, memory?: MemoryGate): Promise<Array<{ index: number }>> => {
-    const pending = runShares(
-      {
-        // A lane short of memory gives its slot back while it waits, and takes one once it has room.
-        take: () => {
-          const lock = given.shift();
-          return lock === undefined
-            ? Promise.reject(new Error('a lane takes only a slot it gave back'))
-            : Promise.resolve(lock);
-        },
-        release: (lock) => {
-          released.push(lock);
-          given.push(lock);
-        },
-      },
-      four.units,
-      four.declared,
-      2,
-      ['one', 'two'],
-      four.times,
-      run,
-      handed,
-      memory,
-    );
-    pending.catch(() => undefined);
-    return pending;
-  };
-  const endAsTheyCome = async (pending: Promise<unknown>): Promise<void> => {
-    const over = pending.then(
-      () => true,
-      () => true,
-    );
-    while (!(await Promise.race([over, delay(2).then(() => false)]))) {
-      for (const engine of going.filter((one) => !one.ended)) {
-        engine.ended = true;
-        engine.end();
-      }
-    }
-  };
-  return { four, events, released, counted, going, ran, lanes, endAsTheyCome };
-}
-
-/**
- * A stand-in compile check: it waits for [param handed]'s slot, counts as an engine, asks
- * [param memory] once it holds the slot, and ends when told, failing after with [param fails].
- */
-function standInCheck(
-  rig: CheckRig,
-  handed: HandedSlot,
-  memory?: Pick<MemoryGate, 'admit'>,
-  fails = false,
-): { lock: () => string | null; end: () => void; done: Promise<void> } {
-  let lock: string | null = null;
-  let tell: () => void = () => undefined;
-  const told = new Promise<void>((settled) => {
-    tell = settled;
-  });
-  const done = (async (): Promise<void> => {
-    lock = await handed.lock;
-    rig.counted.live += 1;
-    rig.counted.most = Math.max(rig.counted.most, rig.counted.live);
-    rig.events.push(`check holds ${lock}`);
-    const admitted = await memory?.admit(new AbortController().signal, () => MEMORY_PER_ENGINE);
-    rig.events.push('check admitted');
-    await told;
-    admitted?.ended();
-    rig.counted.live -= 1;
-    rig.events.push('check ended');
-    handed.ended();
-    if (fails) {
-      throw new Error('the stand-in check failed');
-    }
-  })();
-  done.catch(() => undefined);
-  return { lock: () => lock, end: tell, done };
-}
-
-/** Every suite of [param rig] ran once. */
-function everySuiteRanOnce(rig: CheckRig, what: string): void {
-  assert.deepEqual(
-    rig.ran.toSorted(),
-    [...rig.four.declared.keys()].toSorted(),
-    `${what}: every suite ran once`,
-  );
-}
-
-/** A lane lends the check its slot, one suite engine goes beside it, and the slot returns to its lane. */
-async function checksALaneLendsItsSlot(): Promise<void> {
-  const rig = checkRig();
-  const handed = new HandedSlot(true);
-  const check = standInCheck(rig, handed);
-  const run = rig.lanes(handed);
-  await untilItHolds('the check to hold a lane slot', () => check.lock() !== null);
-  await untilItHolds('a suite engine beside it', () => rig.going.length === 1);
-  await delay(50);
-  const lent = check.lock() ?? '';
-  assert.ok(['one', 'two'].includes(lent), `the check holds a lane's slot: ${lent}`);
-  assert.equal(rig.going.length, 1, 'one suite engine goes beside the check, not two');
-  assert.notEqual(rig.going[0]?.lock, lent, "on the other lane's slot");
-  check.end();
-  await check.done;
-  assert.equal(handed.lent, true, 'the slot was lent');
-  await untilItHolds('a suite engine on the lent slot', () => rig.going.some((one) => one.lock === lent));
-  assert.ok(!rig.released.includes(lent), 'the lent slot is not given back while its lane holds it');
-  await rig.endAsTheyCome(run);
-  await run;
-  everySuiteRanOnce(rig, 'a lent slot');
-  assert.ok(rig.counted.most <= 2, `never three engines at once: ${String(rig.counted.most)}`);
-  assert.deepEqual(rig.released.toSorted(), ['one', 'two'], 'both slots go back once the lanes end');
-}
-
-/** A check over before it began, or one that fails, keeps no lane waiting. */
-async function checksAnEndedCheckKeepsNoLaneWaiting(): Promise<void> {
-  const before = checkRig();
-  const over = new HandedSlot(true);
-  over.ended();
-  const run = before.lanes(over);
-  await untilItHolds('two suite engines at once from the start', () => before.going.length === 2);
-  await before.endAsTheyCome(run);
-  await run;
-  everySuiteRanOnce(before, 'a check over before it began');
-  assert.equal(over.lent, false, 'nothing was lent to it');
-
-  const failing = checkRig();
-  const handed = new HandedSlot(true);
-  const check = standInCheck(failing, handed, undefined, true);
-  const failed = failing.lanes(handed);
-  await untilItHolds('the check to hold a lane slot', () => check.lock() !== null);
-  check.end();
-  await assert.rejects(check.done, /the stand-in check failed/);
-  await failing.endAsTheyCome(failed);
-  await failed;
-  everySuiteRanOnce(failing, 'a check that fails');
-}
-
-/** A run naming no lanes file keeps the check beside its lanes, in the first slot a lane is done with. */
-async function checksMainsWayLendsNothing(): Promise<void> {
-  const rig = checkRig();
-  const handed = new HandedSlot();
-  let settled = false;
-  void handed.lock.then(() => {
-    settled = true;
-  });
-  const run = rig.lanes(handed);
-  await untilItHolds('two suite engines at once from the start', () => rig.going.length === 2);
-  assert.equal(settled, false, 'the check has no slot while both lanes go');
-  await rig.endAsTheyCome(run);
-  await run;
-  await delay(0);
-  assert.equal(settled, true, 'the check takes the first slot a lane is done with');
-  assert.equal(handed.lent, false, 'and nothing was lent');
-  assert.equal(rig.released.length, 1, 'the other slot goes back to the machine');
-  everySuiteRanOnce(rig, "main's way");
-}
-
-/** With room for one engine, the check is admitted in its lent slot first and the suites after it. */
-async function checksTheCheckIsAdmittedBeforeItsLane(): Promise<void> {
-  const gib = 1024 ** 3;
-  const read = 5.6 * gib;
-  assert.ok(
-    roomForAnother(read, 0, gib) && !roomForAnother(read, MEMORY_PER_ENGINE, gib),
-    'the read leaves room for one engine',
-  );
-  const rig = checkRig();
-  const gate = new MemoryGate({ markWaiting: () => () => undefined }, () => Promise.resolve(read), 5);
-  const handed = new HandedSlot(true);
-  const check = standInCheck(rig, handed, gate);
-  const run = rig.lanes(handed, gate);
-  await untilItHolds('the check admitted', () => rig.events.includes('check admitted'));
-  await delay(50);
-  assert.equal(rig.going.length, 0, 'no suite engine goes beside the admitted check');
-  const lent = check.lock() ?? '';
-  check.end();
-  await check.done;
-  await rig.endAsTheyCome(run);
-  await run;
-  const firstStart = rig.events.findIndex((event) => event.startsWith('start '));
-  assert.deepEqual(
-    rig.events.slice(0, firstStart),
-    [`check holds ${lent}`, 'check admitted', 'check ended'],
-    `the check holds its slot, is admitted and ends before any suite engine: ${rig.events.join(', ')}`,
-  );
-  assert.ok(rig.events.includes(`start ${lent}`), 'and a suite engine runs on the lent slot');
-  assert.equal(rig.counted.most, 1, 'never two go at once');
-  everySuiteRanOnce(rig, 'tight memory');
-}
-
-/** What the compile check reads of a run, over [param directory]. */
-function checkLaunchIn(
-  directory: string,
-  slots: EngineSlots,
-  godotPath = 'no-engine',
-): Parameters<typeof compileUnlessUnchanged>[0] {
-  return {
-    godotPath,
-    projectPath: join(directory, 'project'),
-    deadlineSeconds: 120,
-    running: new Set(),
-    cores: null,
-    runDirectory: join(directory, 'run'),
-    slots,
-    silenceFloorSeconds: 60,
-  };
-}
-
-/** The real check asks memory once in its lent slot, gives the slot back to its lane after a throw, and its error is read last. */
-async function checksTheRealCheckLendsAndAsks(): Promise<void> {
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lent-check-'));
-  try {
-    const slotsDirectory = join(scratch, 'slots');
-    const slots = new EngineSlots(slotsDirectory, 2, { pid: process.pid, started: await ownStart() });
-    const launch = checkLaunchIn(scratch, slots);
-    const asked: number[] = [];
-    const refusing = {
-      admit: (_signal: AbortSignal, need: () => number): Promise<Admitted> => {
-        asked.push(need());
-        return Promise.reject(new Error('no room for the check'));
-      },
-    };
-    const rig = checkRig();
-    const handed = new HandedSlot(true);
-    const suites = [rig.four.declared.keys().next().value ?? ''].map((path) => ({
-      path,
-      cases: ['test_one'],
-      windowed: false,
-      headless: false,
-      together: false,
-      accessible: false,
-    }));
-    const compiling = compileUnlessUnchanged(launch, suites, null, handed, refusing);
-    compiling.catch(() => undefined);
-    const run = runShares(
-      slots,
-      rig.four.units,
-      rig.four.declared,
-      2,
-      [],
-      rig.four.times,
-      (plan, index, lock) =>
-        new Promise<{ index: number }>((finished) => {
-          rig.going.push({
-            lock,
-            ended: false,
-            end: () => {
-              rig.ran.push(...plan.suites.map((one) => one.path));
-              finished({ index });
-            },
-          });
-        }),
-      handed,
-    );
-    run.catch(() => undefined);
-    const lent = await handed.lock;
-    await untilItHolds('a suite engine on the lent slot', () => rig.going.some((one) => one.lock === lent));
-    assert.equal(handed.lent, true, 'the slot was lent');
-    assert.deepEqual(asked, [MEMORY_PER_ENGINE], 'the check asked memory once, for an engine');
-    assert.ok(existsSync(lent), "the lent slot's lock is still there while its lane holds it");
-    await rig.endAsTheyCome(run);
-    await run;
-    everySuiteRanOnce(rig, 'the real check');
-    await assert.rejects(compiling, /no room for the check/, "the check's error is read after the lanes");
-    assert.deepEqual(leftInSlots(slotsDirectory), [], 'both slots are given back');
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-}
-
-/** A check that throws before its slot keeps no lending lane waiting. */
-async function checksACheckThrowingBeforeItsSlot(): Promise<void> {
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-thrown-check-'));
-  try {
-    const slots = new EngineSlots(join(scratch, 'slots'), 2, { pid: process.pid, started: await ownStart() });
-    const blocked = join(scratch, 'a file');
-    writeFileSync(blocked, '');
-    const underAFile = { ...checkLaunchIn(scratch, slots), runDirectory: join(blocked, 'run') };
-    const asFolder = checkLaunchIn(join(scratch, 'folder'), slots);
-    mkdirSync(join(asFolder.runDirectory, 'compile', 'suites.txt'), { recursive: true });
-    mkdirSync(join(scratch, 'kept', 'project'), { recursive: true });
-    const unreadable = new ProjectScripts(join(scratch, 'kept', 'project'));
-    const refused = (): never => {
-      throw new Error('the scripts are unreadable');
-    };
-    for (const read of ['projectPath', 'script', 'baseOf']) {
-      Object.defineProperty(unreadable, read, { get: refused });
-    }
-    const throwers: Array<[string, (handed: HandedSlot) => Promise<unknown>]> = [
-      ['a run folder under a file', (handed) => compileUnlessUnchanged(underAFile, [], null, handed)],
-      ['a suites file that is a folder', (handed) => compileUnlessUnchanged(asFolder, [], null, handed)],
-      [
-        'scripts that throw at their first read',
-        (handed) =>
-          compileUnlessUnchanged(
-            checkLaunchIn(join(scratch, 'kept'), slots),
-            [],
-            { file: join(scratch, 'kept.json'), scripts: unreadable, always: [] },
-            handed,
-          ),
-      ],
-    ];
-    for (const [what, start] of throwers) {
-      const rig = checkRig();
-      const handed = new HandedSlot(true);
-      const compiling = start(handed);
-      compiling.catch(() => undefined);
-      const run = rig.lanes(handed);
-      await untilItHolds(`${what}: two suite engines at once from the start`, () => rig.going.length === 2);
-      await rig.endAsTheyCome(run);
-      await run;
-      everySuiteRanOnce(rig, what);
-      assert.deepEqual(rig.released.toSorted(), ['one', 'two'], `${what}: both slots are given back`);
-      await assert.rejects(compiling, Error, `${what}: the error is read from the check's promise`);
-    }
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-}
-
-/** With Godot, the check tells its admission what its engine holds at each look. */
-async function checksTheCheckTellsWhatItHolds(): Promise<void> {
-  const godotPath = resolveGodotPath();
-  const gdunit = process.env['GDUNIT4_PATH'];
-  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
-    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
-      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
-    }
-    console.log('compile check readings skipped (Godot or gdUnit4 not found)');
-    return;
-  }
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-check-readings-'));
-  try {
-    const slots = new EngineSlots(join(scratch, 'slots'), 1, { pid: process.pid, started: await ownStart() });
-    const launch = checkLaunchIn(scratch, slots, godotPath);
-    // The suite's script waits as it loads, so the check's engine lives past three of its looks.
-    writeTree(launch.projectPath, {
-      'project.godot': 'config_version=5\n\n[application]\nconfig/name="CheckReadings"\n',
-      'tests/slow_test.gd':
-        'extends GdUnitTestSuite\n\n\nstatic func _static_init() -> void:\n\tOS.delay_msec(2000)\n\n\n' +
-        'func test_one() -> void:\n\tassert_bool(true).is_true()\n',
-    });
-    cpSync(gdunit, join(launch.projectPath, 'addons', 'gdUnit4'), { recursive: true });
-    spawnSyncHidden(godotPath, ['--headless', '--path', launch.projectPath, '--import'], {
-      encoding: 'utf8',
-      timeout: ENGINE_CALL_TIMEOUT_MS,
-    });
-    const needs: number[] = [];
-    const readings: number[] = [];
-    let readBeforeEnd = -1;
-    const recording = {
-      admit: (_signal: AbortSignal, need: () => number): Promise<Admitted> => {
-        needs.push(need());
-        return Promise.resolve({
-          need: need(),
-          held: 0,
-          ended: () => {
-            readBeforeEnd = readings.length;
-          },
-          holds: (bytes: number) => {
-            readings.push(bytes);
-          },
-        });
-      },
-    };
-    const suite = {
-      path: 'res://tests/slow_test.gd',
-      cases: ['test_one'],
-      windowed: false,
-      headless: false,
-      together: false,
-      accessible: false,
-    };
-    const compiled = await compileUnlessUnchanged(launch, [suite], null, undefined, recording);
-    assert.deepEqual(
-      needs,
-      [MEMORY_PER_ENGINE],
-      `the check is admitted once, for an engine: ${compiled.log}`,
-    );
-    assert.ok(
-      readings.slice(0, readBeforeEnd).some((bytes) => bytes > 0),
-      `the check tells its admission what its engine holds before it ends: ${JSON.stringify(readings)}`,
-    );
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-}
-
-/**
- * A paced run's compile check runs in a slot one of its lanes lends it, so the run holds no more
- * engines than its lanes. The lane takes it back however the check ends, the check is admitted by
- * memory as a lane's engine is, and a run naming no lanes file keeps the check beside its lanes.
- */
-async function testAPacedRunsCompileCheckIsOneOfItsLanes(): Promise<void> {
-  await checksALaneLendsItsSlot();
-  await checksAnEndedCheckKeepsNoLaneWaiting();
-  await checksMainsWayLendsNothing();
-  await checksTheCheckIsAdmittedBeforeItsLane();
-  await checksTheRealCheckLendsAndAsks();
-  await checksACheckThrowingBeforeItsSlot();
-  await checksTheCheckTellsWhatItHolds();
-}
-
-/**
- * A run in a gate follows the lanes file its paced portion writes: it begins on its own lanes, adds
- * the rest the file names while work and processors allow, gives its mark back at its ceiling, and
- * takes no lock in the portion's pool. A stand-in process plays the portion.
- */
-async function testAGatesRunFollowsItsLanesFile(): Promise<void> {
-  const godotPath = resolveGodotPath();
-  const gdunit = process.env['GDUNIT4_PATH'];
-  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
-    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
-      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
-    }
-    console.log('gate lanes regression skipped (Godot or gdUnit4 not found)');
-    return;
-  }
-  const room = roomFor(3, availableParallelism(), (await memoryAvailable()).bytes);
-  if (room.engines < 3) {
-    console.log(`gate lanes regression skipped: under three engines fit, since ${room.held ?? ''}`);
-    return;
-  }
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gate-lanes-'));
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gate-lanes-slots-'));
-  const pool = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gate-lanes-pool-'));
-  const file = join(pool, 'lanes-1.json');
-  const mark = `${file}${FOLLOWS_SUFFIX}`;
-  const standIn = join(pool, 'portion.cjs');
-  const listings = join(pool, 'listings.jsonl');
-  const testRuns = join(project, '.godot', 'gdharness', 'test-runs');
-  const children: Array<ReturnType<typeof spawnHidden>> = [];
-  const suiteOf = (waits: readonly number[]): string =>
-    [
-      'extends GdUnitTestSuite',
-      '',
-      ...waits.flatMap((seconds, at) => [
-        '',
-        `func test_wait_${String(at)}() -> void:`,
-        `\tawait get_tree().create_timer(${seconds.toFixed(1)}).timeout`,
-        '\tassert_bool(true).is_true()',
-      ]),
-      '',
-    ].join('\n');
-  const gateTimes = join(project, 'gate', 'suite-times.json');
-  const resultFile = join(project, 'gate', 'result.json');
-  const keep = (suites: Record<string, readonly number[]>): void => {
-    mkdirSync(dirname(gateTimes), { recursive: true });
-    writeFileSync(
-      gateTimes,
-      JSON.stringify(
-        Object.fromEntries(
-          Object.entries(suites).map(([path, costs]) => [
-            path,
-            {
-              seconds: costs.reduce((sum, cost) => sum + cost, 0),
-              cases: Object.fromEntries(costs.map((cost, at) => [`test_wait_${String(at)}`, cost])),
-            },
-          ]),
-        ),
-      ),
-    );
-  };
-  const four = ['a', 'b', 'c', 'd'].map((name) => `tests/${name}_lane_test.gd`);
-  const fourTimed = Object.fromEntries(four.map((path) => [`res://${path}`, [40]]));
-  const standsIn = async (mode: 'onMark' | 'always' | 'never', lanes: number, as?: number): Promise<void> => {
-    rmSync(listings, { force: true });
-    rmSync(file, { force: true });
-    // A run kept from before would show its compile log from the first listing.
-    rmSync(testRuns, { recursive: true, force: true });
-    const child = spawnHidden(
-      process.execPath,
-      [standIn, pool, file, String(lanes), mode, listings, slots, testRuns],
-      { stdio: ['pipe', 'ignore', 'ignore'] },
-    );
-    children.push(child);
-    const began = (await startTimesOf([child.pid ?? 0])).get(child.pid ?? 0);
-    child.stdin.write(`${String(as ?? began ?? Date.now())}\n`);
-    await untilItHolds('the stand-in to list the pool', () => existsSync(listings));
-  };
-  const listed = (): Array<{
-    names: string[];
-    mark: number | null;
-    at: number;
-    locks: number;
-    compile: boolean;
-    suites: boolean;
-  }> =>
-    readFileSync(listings, 'utf8')
-      .split('\n')
-      .filter((line) => line !== '')
-      .map((line) => {
-        const one: unknown = JSON.parse(line);
-        const names = get(one, 'names');
-        const held = get(one, 'mark');
-        const at = get(one, 'at');
-        const locks = get(one, 'locks');
-        assert.ok(
-          Array.isArray(names) && typeof at === 'number' && typeof locks === 'number',
-          `a listing names files, locks and a time: ${line}`,
-        );
-        return {
-          names: names.map(String),
-          mark: typeof held === 'number' ? held : null,
-          at,
-          locks,
-          compile: get(one, 'compile') === true,
-          suites: get(one, 'suites') === true,
-        };
-      });
-  /** The most machine slots held at one listing, and whether the compile log was seen. */
-  const slotsSeen = (): { most: number; compiled: boolean; compiledFirst: boolean; withCompile: number } => {
-    const seen = listed();
-    const compiledAt = seen.findIndex((one) => one.compile);
-    const suitesAt = seen.findIndex((one) => one.suites);
-    return {
-      most: Math.max(0, ...seen.map((one) => one.locks)),
-      compiled: compiledAt >= 0,
-      compiledFirst: compiledAt >= 0 && (suitesAt < 0 || compiledAt < suitesAt),
-      withCompile: Math.max(0, ...seen.filter((one) => one.compile).map((one) => one.locks)),
-    };
-  };
-  const runWith = (
-    laneVariable: string | undefined,
-    poolOf: number,
-    ...args: string[]
-  ): { said: string; status: number | null; pid: number } => {
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      GODOT_PATH: godotPath,
-      [SHARE_COUNT_VARIABLE]: String(poolOf),
-    };
-    delete env[SHARE_VARIABLE];
-    if (laneVariable === undefined) {
-      delete env[LANES_VARIABLE];
-    } else {
-      env[LANES_VARIABLE] = laneVariable;
-    }
-    const ran = spawnSyncHidden(
-      process.execPath,
-      [
-        'build/cli.js',
-        'test',
-        project,
-        '--slots',
-        slots,
-        '--times',
-        gateTimes,
-        '--result',
-        resultFile,
-        ...args,
-      ],
-      { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
-    );
-    return { said: `${ran.stdout}${ran.stderr}`, status: ran.status, pid: ran.pid };
-  };
-  const stands = (): void => {
-    for (const child of children.splice(0)) {
-      child.kill();
-    }
-  };
-  try {
-    writeFileSync(
-      standIn,
-      [
-        "const { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } = require('node:fs');",
-        "const { join } = require('node:path');",
-        'const [pool, file, lanes, mode, listings, slots, runs] = process.argv.slice(2);',
-        'const read = (folder) => { try { return readdirSync(folder); } catch { return []; } };',
-        // Whether a run's engine named by [param named] has written its log yet.
-        'const logged = (named) => read(runs).some((run) => read(join(runs, run)).some((one) => named(one) && existsSync(join(runs, run, one, "engine.log"))));',
-        'let started = 0;',
-        "process.stdin.setEncoding('utf8');",
-        "process.stdin.on('data', (line) => { started = Number(line); });",
-        `const mark = file + ${JSON.stringify(FOLLOWS_SUFFIX)};`,
-        'const said = () => writeFileSync(file, JSON.stringify({ lanes: Number(lanes), pid: process.pid, started, written: Date.now() }));',
-        'let wrote = false;',
-        'let last = 0;',
-        'setInterval(() => {',
-        '  const names = readdirSync(pool);',
-        '  let held = null;',
-        '  try { held = JSON.parse(readFileSync(mark, "utf8")).pid; } catch {}',
-        '  const locks = read(slots).filter((name) => name.endsWith(".lock")).length;',
-        '  const compile = logged((one) => one === "compile");',
-        '  const suites = logged((one) => one.startsWith("engine-"));',
-        "  appendFileSync(listings, JSON.stringify({ names, mark: held, at: Date.now(), locks, compile, suites }) + '\\n');",
-        '  if (started === 0 || mode === "never") { return; }',
-        // Written only once a listing has seen the mark, since the run gives it back at its ceiling.
-        '  if (mode === "onMark" && !wrote && held !== null) { said(); wrote = true; }',
-        '  if (mode === "always" && Date.now() - last > 1000) { said(); last = Date.now(); }',
-        '}, 50);',
-        '',
-      ].join('\n'),
-    );
-    writeTree(project, {
-      'project.godot': 'config_version=5\n\n[application]\nconfig/name="GateLanes"\n',
-      ...Object.fromEntries(four.map((path) => [path, suiteOf([8])])),
-    });
-    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
-
-    // A file raising the run above its two lanes, followed until its ceiling.
-    keep(fourTimed);
-    await standsIn('onMark', 4);
-    const ceiling = Math.min(4, availableParallelism());
-    const followed = runWith(file, 4, '--engines', '2', '--slot-count', '4');
-    const endedAt = Date.now();
-    stands();
-    assert.equal(followed.status, 0, followed.said);
-    const risen = readRunResult(resultFile);
-    assert.ok(risen.dealing.includes(lanesSaid(2, ceiling)), `the rise is said: ${followed.said}`);
-    assert.ok(
-      risen.engines.some((engine) => engine.lane === 2),
-      `an engine ran in an added lane: ${JSON.stringify(risen.engines)}`,
-    );
-    const seen = listed();
-    const marked = seen.findIndex((one) => one.mark !== null);
-    assert.ok(
-      marked >= 0 && seen[marked]?.mark === followed.pid,
-      `the mark names the run while it follows: ${JSON.stringify(seen[marked])}, run ${String(followed.pid)}`,
-    );
-    // Each added engine waits 8 s, so a listing 2 s before the run ended was taken while it lived.
-    assert.ok(
-      seen.slice(marked).some((one) => one.mark === null && one.at < endedAt - 2000),
-      'and is given back at the ceiling while the run still lives',
-    );
-    assert.ok(
-      seen.every((one) => one.names.every((name) => !name.endsWith('.lock'))),
-      'the run takes no lock in the pool',
-    );
-    assert.deepEqual(leftInSlots(slots), [], 'and the machine slots are all given back');
-    assert.equal(existsSync(mark), false, 'no mark is left');
-
-    // A file whose writer has gone adds no lane, and the run leaves no mark. Each run records the
-    // times its suites took, and four quick ones would be dealt to a single engine.
-    keep(fourTimed);
-    writeTree(project, Object.fromEntries(four.map((path) => [path, suiteOf([1])])));
-    const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
-    await exitOf(gone);
-    await standsIn('never', 4);
-    writeFileSync(
-      file,
-      JSON.stringify({ lanes: 4, pid: gone.pid ?? 0, started: Date.now() - 60_000, written: Date.now() }),
-    );
-    const dead = runWith(file, 4, '--engines', '2', '--slot-count', '4');
-    stands();
-    assert.equal(dead.status, 0, dead.said);
-    assert.deepEqual(
-      [...new Set(readRunResult(resultFile).engines.map((engine) => engine.lane))].toSorted((a, b) => a - b),
-      [0, 1],
-      `a dead file adds no lane to the run's two: ${dead.said}`,
-    );
-    assert.doesNotMatch(dead.said, /raised this run from/, 'and says nothing of a rise');
-    assert.equal(existsSync(mark), false, 'it leaves no mark');
-    const deadSlots = slotsSeen();
-    assert.ok(deadSlots.compiled, 'the compile check ran');
-    assert.ok(
-      deadSlots.most <= 2,
-      `a paced run holds its two lanes, the check in one: ${String(deadSlots.most)}`,
-    );
-
-    // An empty variable names no file.
-    keep(fourTimed);
-    await standsIn('always', 4);
-    const empty = runWith('', 4, '--engines', '2', '--slot-count', '4');
-    stands();
-    assert.equal(empty.status, 0, empty.said);
-    assert.deepEqual(
-      [...new Set(readRunResult(resultFile).engines.map((engine) => engine.lane))].toSorted((a, b) => a - b),
-      [0, 1],
-      `no lane is added to the run's two: ${empty.said}`,
-    );
-    assert.equal(
-      slotsSeen().withCompile,
-      3,
-      'a run naming no lanes file compiles in a slot beside its two lanes',
-    );
-    for (const folder of [pool, project, process.cwd()]) {
-      assert.deepEqual(
-        readdirSync(folder).filter((name) => name.endsWith(FOLLOWS_SUFFIX)),
-        [],
-        `no mark is made in ${folder}`,
-      );
-    }
-
-    // Processors cap the lanes, so a run held to two follows nothing.
-    writeTree(project, {
-      'tests/a_lane_test.gd': suiteOf([1, 1, 1, 1]),
-      'tests/b_lane_test.gd': suiteOf([1, 1, 1, 1]),
-    });
-    keep({
-      'res://tests/a_lane_test.gd': [20, 20, 20, 20],
-      'res://tests/b_lane_test.gd': [20, 20, 20, 20],
-    });
-    await standsIn('always', 9);
-    const held = runWith(file, 9, '--engines', '2', '--cores', '2', '--slot-count', '4');
-    stands();
-    assert.equal(held.status, 0, held.said);
-    assert.ok(
-      readRunResult(resultFile).engines.every((engine) => engine.lane < 2),
-      'no lane is added',
-    );
-    assert.doesNotMatch(held.said, /raised this run from/, 'and nothing is said of a rise');
-    assert.doesNotMatch(
-      held.said,
-      /Dealt out case by case/,
-      'the units are cut for the two processors, so neither suite is dealt out',
-    );
-    assert.ok(
-      listed().every((one) => one.mark === null && one.names.every((name) => !name.endsWith(FOLLOWS_SUFFIX))),
-      'no mark stood at any listing',
-    );
-
-    // Two long suites, whole for two engines, are cut for the pool's four so the run has units to grow on.
-    if (availableParallelism() < 3) {
-      console.log('gate lanes few-long-suites case skipped: under three processors cannot raise two lanes');
-    } else {
-      writeTree(project, {
-        'tests/a_lane_test.gd': suiteOf([3, 3, 3, 3]),
-        'tests/b_lane_test.gd': suiteOf([3, 3, 3, 3]),
-      });
-      rmSync(join(project, 'tests', 'c_lane_test.gd'), { force: true });
-      rmSync(join(project, 'tests', 'd_lane_test.gd'), { force: true });
-      // The earlier run recorded what its suites cost, so the 20 s cases are kept again.
-      keep({
-        'res://tests/a_lane_test.gd': [20, 20, 20, 20],
-        'res://tests/b_lane_test.gd': [20, 20, 20, 20],
-      });
-      await standsIn('onMark', 4);
-      const grown = runWith(file, 4, '--engines', '2', '--slot-count', '8');
-      stands();
-      assert.equal(grown.status, 0, grown.said);
-      assert.match(
-        grown.said,
-        /Dealt out case by case.*a_lane_test\.gd.*b_lane_test\.gd|Dealt out case by case.*b_lane_test\.gd.*a_lane_test\.gd/,
-        `both suites are dealt out: ${grown.said}`,
-      );
-      const grownResult = readRunResult(resultFile);
-      assert.ok(
-        grownResult.dealing.includes(lanesSaid(2, Math.min(4, availableParallelism()))),
-        `the rise is said: ${grown.said}`,
-      );
-      assert.ok(
-        grownResult.engines.some((engine) => engine.lane === 2),
-        `an engine ran in an added lane: ${JSON.stringify(grownResult.engines)}`,
-      );
-      assert.equal(existsSync(mark), false, 'no mark is left');
-    }
-
-    // An ordered run cannot grow, so it makes no mark.
-    keep(fourTimed);
-    writeTree(project, Object.fromEntries(four.map((path) => [path, suiteOf([1])])));
-    await standsIn('always', 4);
-    const ordered = runWith(file, 4, '--engines', '2', '--slot-count', '4', '--order', 'named', ...four);
-    stands();
-    assert.equal(ordered.status, 0, ordered.said);
-    assert.doesNotMatch(ordered.said, /raised this run from/, 'an ordered run says nothing of a rise');
-    assert.ok(
-      listed().every((one) => one.mark === null),
-      'and no mark stood at any listing',
-    );
-
-    // An ordered run keeps the units it cuts for its engines, so two long suites stay whole in it.
-    writeTree(project, {
-      'tests/a_lane_test.gd': suiteOf([1, 1, 1, 1]),
-      'tests/b_lane_test.gd': suiteOf([1, 1, 1, 1]),
-    });
-    for (const removed of ['c', 'd']) {
-      rmSync(join(project, 'tests', `${removed}_lane_test.gd`), { force: true });
-    }
-    keep({
-      'res://tests/a_lane_test.gd': [20, 20, 20, 20],
-      'res://tests/b_lane_test.gd': [20, 20, 20, 20],
-    });
-    await standsIn('always', 4);
-    const wholeOrdered = runWith(
-      file,
-      4,
-      '--engines',
-      '2',
-      '--slot-count',
-      '4',
-      '--order',
-      'named',
-      'tests/a_lane_test.gd',
-      'tests/b_lane_test.gd',
-    );
-    stands();
-    assert.equal(wholeOrdered.status, 0, wholeOrdered.said);
-    assert.match(wholeOrdered.said, /8 test functions in 2 suites over 1 engine, in the order named/);
-    assert.doesNotMatch(wholeOrdered.said, /Dealt out case by case/, 'no suite is cut for the pool');
-    const orderedSlots = slotsSeen();
-    assert.ok(
-      orderedSlots.most <= 1,
-      `an ordered paced run holds its one lane: ${String(orderedSlots.most)}`,
-    );
-    assert.ok(orderedSlots.compiledFirst, 'its lane lends the check its slot before its first suite engine');
-  } finally {
-    stands();
-    sweep(project, slots, pool);
-  }
 }
 
 /**
@@ -93707,7 +86041,8 @@ async function onAFullMachine(body: (machine: FullMachine) => Promise<void>): Pr
     1,
     { pid: process.pid, started: await ownStart() },
     undefined,
-    () => 'tier',
+    undefined,
+    plentyOfMemory,
   );
   const children: ReturnType<typeof spawnHidden>[] = [];
   try {
@@ -94010,7 +86345,8 @@ async function withServersOnAFullMachine(
     1,
     { pid: process.pid, started: await ownStart() },
     undefined,
-    () => 'tier',
+    undefined,
+    plentyOfMemory,
   );
   const cleared = Object.fromEntries(SLOT_VARIABLES.map((name) => [name, '']));
   const servers: ServerProcess[] = [];
@@ -94277,33 +86613,6 @@ async function testADeadHoldersProjectLockIsTakenOver(): Promise<void> {
   });
 }
 
-/** A project lock whose key is all digits, given back, leaves nothing in the projects folder. */
-async function testAProjectLockWithADigitKeyLeavesNoFreedMark(): Promise<void> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-digit-key-'));
-  try {
-    const folder = join(directory, PROJECTS_FOLDER);
-    mkdirSync(folder);
-    const lock = join(folder, '1234567890123456.lock');
-    writeFileSync(lock, JSON.stringify({ pid: process.pid, started: await ownStart() }));
-    giveBackSlot(lock, process.pid);
-    assert.deepEqual(readdirSync(folder), [], 'the lock is gone and no freed mark was written');
-    writeFileSync(lock, JSON.stringify({ pid: process.pid, started: await ownStart() }));
-    await giveBackSlotAsync(lock, process.pid);
-    assert.deepEqual(readdirSync(folder), [], 'the same holds for the give-back on the event loop');
-    const slot = join(directory, '7.lock');
-    writeFileSync(slot, JSON.stringify({ pid: process.pid, started: await ownStart() }));
-    giveBackSlot(slot, process.pid);
-    assert.deepEqual(
-      readdirSync(directory).toSorted(),
-      [FREED_FOLDER, PROJECTS_FOLDER],
-      'a slot lock still marks',
-    );
-    assert.deepEqual(readdirSync(join(directory, FREED_FOLDER)), ['7']);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
 /** The classes command waiting for its project's lock says so on its output, naming the holder. */
 async function testTheClassesCommandSaysItWaitsForItsProjectsLock(): Promise<void> {
   await onAFullMachine(async (machine) => {
@@ -94461,167 +86770,6 @@ async function testInOneSlotHoldsOneSlotAndAWaitGivesItBack(): Promise<void> {
   });
 }
 
-/** What the stand-in slot command (test/support/slot-grant.ts) wrote about itself. */
-interface GrantEntry {
-  readonly event: string;
-  readonly argv?: string[];
-  readonly pid?: number;
-  readonly handedTo?: number;
-  readonly started?: number;
-}
-
-/** The members of [param record] named in [param keys] that are numbers. */
-function numbersOf<K extends string>(
-  record: Record<string, unknown>,
-  keys: readonly K[],
-): Partial<Record<K, number>> {
-  const found: Partial<Record<K, number>> = {};
-  for (const key of keys) {
-    const value = record[key];
-    if (typeof value === 'number') {
-      found[key] = value;
-    }
-  }
-  return found;
-}
-
-/** What the stand-in slot command is asked to do: see test/support/slot-grant.ts. */
-interface GrantAnswer {
-  readonly say?: string;
-  readonly delayMs?: number;
-  readonly exit?: number;
-  /** Stays up past the end of its input. */
-  readonly deaf?: boolean;
-  /** Answers a `hand` line with `cannot` and exit code 2. */
-  readonly handRefuse?: boolean;
-  /** Exits with code 3 this long after it started. */
-  readonly exitAfterMs?: number;
-  /** Delays every start but the first by this long, on a lock named for each process. */
-  readonly lateMs?: number;
-  /** Prints `queued` before waiting, in a late start only where `lateMs` is set. */
-  readonly queued?: boolean;
-  /** What a late start prints in place of `held`. */
-  readonly lateSay?: string;
-  /** A command line in place of the stand-in's. */
-  readonly command?: string;
-}
-
-interface GrantingCommand {
-  readonly directory: string;
-  /** The lock the stand-in grants. */
-  readonly lock: string;
-  readonly entries: () => GrantEntry[];
-  /** Waits for the stand-in to see end of input. */
-  readonly untilEof: () => Promise<void>;
-}
-
-const grantNumber = (value: number | undefined): string | undefined =>
-  value === undefined ? undefined : String(value);
-const grantFlag = (on: boolean | undefined, setTo: string): string | undefined =>
-  on === true ? setTo : undefined;
-
-/** Runs [param body] with `GODOT_ENGINE_SLOT_COMMAND` naming the stand-in, which answers as [param answer] says. */
-async function withASlotCommand<T>(
-  answer: GrantAnswer,
-  body: (command: GrantingCommand) => Promise<T>,
-): Promise<T> {
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-grant-'));
-  const log = join(directory, 'seen.jsonl');
-  const lock = join(directory, 'granted.lock');
-  const stand = resolve('test', 'support', 'slot-grant.ts');
-  const set: Record<string, string | undefined> = {
-    [SLOT_COMMAND_VARIABLE]: answer.command ?? `"${process.execPath}" "${stand}"`,
-    GRANT_LOG: log,
-    GRANT_LOCK: lock,
-    GRANT_SAY: answer.say,
-    GRANT_DELAY_MS: grantNumber(answer.delayMs),
-    GRANT_EXIT: grantNumber(answer.exit),
-    GRANT_DEAF: grantFlag(answer.deaf, '1'),
-    GRANT_HAND: grantFlag(answer.handRefuse, 'refuse'),
-    GRANT_EXIT_AFTER_MS: grantNumber(answer.exitAfterMs),
-    GRANT_LATE_MS: grantNumber(answer.lateMs),
-    GRANT_QUEUED: grantFlag(answer.queued, '1'),
-    GRANT_LATE_SAY: answer.lateSay,
-  };
-  const restore = settingEnvironment(set);
-  const entries = (): GrantEntry[] =>
-    existsSync(log)
-      ? readFileSync(log, 'utf8')
-          .split('\n')
-          .filter((line) => line !== '')
-          .map((line): GrantEntry => {
-            const said: unknown = JSON.parse(line);
-            assert.ok(isRecord(said) && typeof said['event'] === 'string', `a stand-in entry: ${line}`);
-            return {
-              event: said['event'],
-              ...(Array.isArray(said['argv']) ? { argv: said['argv'].map(String) } : {}),
-              ...numbersOf(said, ['pid', 'handedTo', 'started']),
-            };
-          })
-      : [];
-  try {
-    return await body({
-      directory,
-      lock,
-      entries,
-      untilEof: async () => {
-        const until = Date.now() + 15_000;
-        while (!entries().some((entry) => entry.event === 'eof')) {
-          if (Date.now() > until) {
-            throw new Error(`The stand-in never saw end of input: ${JSON.stringify(entries())}`);
-          }
-          await delay(50);
-        }
-      },
-    });
-  } finally {
-    // A stand-in that never saw end of input is a failed case's, and would otherwise outlive it.
-    if (answer.exit === undefined && !entries().some((one) => one.event === 'eof')) {
-      for (const pid of entries().flatMap((entry) => (entry.pid === undefined ? [] : [entry.pid]))) {
-        try {
-          process.kill(pid);
-        } catch {
-          // Gone already.
-        }
-      }
-    }
-    restore();
-    sweep(directory);
-  }
-}
-
-/** Sets [param values] in this process's environment, a value of undefined clearing the name, and answers how to undo it. */
-function settingEnvironment(values: Record<string, string | undefined>): () => void {
-  const before = Object.keys(values).map((name) => [name, process.env[name]] as const);
-  const put = (name: string, value: string | undefined): void => {
-    if (value === undefined) {
-      delete process.env[name];
-    } else {
-      process.env[name] = value;
-    }
-  };
-  for (const [name, value] of Object.entries(values)) {
-    put(name, value);
-  }
-  return () => {
-    for (const [name, value] of before) {
-      put(name, value);
-    }
-  };
-}
-
-/** The slot a stand-in engine printed from its environment, or undefined. */
-function printedSlot(ran: Awaited<ReturnType<typeof runEngine>>): string | undefined {
-  return /^slot (.+)$/m.exec(
-    ran.log
-      .everything()
-      .map((entry) => entry.text)
-      .join('\n'),
-  )?.[1];
-}
-
-const SLOT_PRINTER = ['-e', 'console.log("slot " + process.env.GODOT_ENGINE_HELD)'];
-
 /** What a folder holds, names only and all the way down, or null where it is not there. */
 function folderListing(directory: string | undefined): string[] | null {
   if (directory === undefined || !existsSync(directory)) {
@@ -94630,981 +86778,6 @@ function folderListing(directory: string | undefined): string[] | null {
   return readdirSync(directory, { recursive: true, encoding: 'utf8' }).toSorted();
 }
 
-/** The events the stand-in logged, in order. */
-function grantEvents(command: GrantingCommand): string[] {
-  return command.entries().map((entry) => entry.event);
-}
-
-/**
- * Every engine slot is asked of the command `GODOT_ENGINE_SLOT_COMMAND` names, and the engine runs
- * with the lock it granted. The command is told the project and the kind of the take, and nothing
- * is made in the slots folder.
- */
-async function testASlotCommandGrantsTheSlotAnEngineRunsOn(): Promise<void> {
-  const project = join(realpathSync(tmpdir()), 'gdharness-grant-project');
-  const folder = process.env[SLOTS_VARIABLE];
-  const before = folderListing(folder);
-  await withASlotCommand({}, async (command) => {
-    const ran = await runEngine(process.execPath, SLOT_PRINTER, { project });
-    assert.equal(ran.failure, null, howItEnded(ran));
-    assert.equal(printedSlot(ran), command.lock, 'the engine runs on the granted lock');
-    const [start] = command.entries();
-    assert.deepEqual(start?.argv, ['--project', project, '--kind', 'one-off']);
-    assert.deepEqual(grantEvents(command), ['start', 'eof']);
-    assert.deepEqual(folderListing(folder), before, 'the slots folder is left as it was');
-  });
-}
-
-/** A refusal fails the start with its reason in the answer, and no engine starts. */
-async function testASlotCommandRefusalFailsTheStartWithItsReason(): Promise<void> {
-  await withASlotCommand({ say: 'refused the machine is closed for the night', exit: 3 }, async (command) => {
-    const marker = join(command.directory, 'engine-ran');
-    const ran = await runEngine(process.execPath, [
-      '-e',
-      `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x')`,
-    ]);
-    const failure = ran.failure ?? '';
-    assert.match(failure, /engine slot command .* refused the slot: the machine is closed for the night\./);
-    assert.match(failure, /It exited with code 3\./);
-    assert.equal(existsSync(marker), false, 'no engine started');
-  });
-}
-
-/**
- * A command that exits before a line, answers in neither form, or is not there fails the start and
- * names which.
- */
-async function testASlotCommandThatDoesNotAnswerFailsTheStartWithTheCause(): Promise<void> {
-  await withASlotCommand({ say: '', exit: 5 }, async () => {
-    const ran = await runEngine(process.execPath, SLOT_PRINTER);
-    assert.match(ran.failure ?? '', /exited before it answered\. It exited with code 5\./);
-    assert.equal(printedSlot(ran), undefined, 'no engine started');
-  });
-  await withASlotCommand({ say: 'granted, I think' }, async (command) => {
-    const ran = await runEngine(process.execPath, SLOT_PRINTER);
-    assert.match(ran.failure ?? '', /first line in neither form.*"granted, I think"/);
-    assert.equal(printedSlot(ran), undefined, 'no engine started');
-    await command.untilEof();
-  });
-  await withASlotCommand({ say: 'held slots/0.lock' }, async (command) => {
-    const ran = await runEngine(process.execPath, SLOT_PRINTER);
-    assert.match(ran.failure ?? '', /first line in neither form.*"held slots\/0\.lock"/);
-    await command.untilEof();
-  });
-  const missing = join(realpathSync(tmpdir()), 'gdharness-no-such-slot-command');
-  await withASlotCommand({ command: `"${missing}" --grant` }, async () => {
-    const ran = await runEngine(process.execPath, SLOT_PRINTER);
-    assert.match(ran.failure ?? '', /engine slot command .*no-such-slot-command.* could not be started/);
-    assert.equal(printedSlot(ran), undefined, 'no engine started');
-  });
-}
-
-/** A server's start holds the grant until it lets the slot go, and the command sees end of input then. */
-async function testASlotCommandSeesEndOfInputWhenAServerStartLetsGo(): Promise<void> {
-  await withASlotCommand({}, async (command) => {
-    const slot = await slotForCall(false, join(realpathSync(tmpdir()), 'gdharness-grant-project'));
-    assert.equal(slot.lock, command.lock);
-    assert.equal(slot.delegated, true);
-    await delay(300);
-    assert.deepEqual(grantEvents(command), ['start'], 'held while the start runs');
-    slot.release();
-    await slot.settled();
-    assert.deepEqual(grantEvents(command), ['start', 'eof']);
-  });
-}
-
-/**
- * A command that carries on past the end of its input is waited for a few seconds, then ended, so
- * a released slot never leaves a command running.
- */
-async function testACommandThatIgnoresTheEndOfItsInputIsEndedAfterAWait(): Promise<void> {
-  await withASlotCommand({ deaf: true }, async (command) => {
-    const slot = await slotForCall();
-    const pid = command.entries()[0]?.pid ?? 0;
-    const released = Date.now();
-    slot.release();
-    await slot.settled();
-    const waited = Date.now() - released;
-    assert.ok(waited >= 4500 && waited < 20_000, `waited ${String(waited)} ms for the command`);
-    assert.deepEqual(grantEvents(command), ['start', 'eof']);
-    assert.equal(alive(pid), false, 'the command is ended, not left running');
-  });
-}
-
-/**
- * A game the server starts for editor_run under a command's slot gives its keeper no lock to take
- * over, since the lock is the command's, and the slot follows the game's process. The record the
- * keeper is given is asked of the function the server uses, and the server's call is read from its
- * source, since the run itself needs an engine and an editor to play it.
- */
-async function testAKeptRunUnderASlotCommandIsHandedToItsKeeper(): Promise<void> {
-  const source = readFileSync(join('src', 'server.ts'), 'utf8');
-  assert.match(source, /\.\.\.keeperSlotOf\(slot, /, 'the server asks it for the keeper');
-  assert.match(source, /handSlotToKeeper\(slot, launched\.keeperPid/, 'and hands the slot to the keeper');
-  await withASlotCommand({}, async (command) => {
-    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kept-grant-'));
-    try {
-      const slot = await slotForCall(true, project);
-      const launched = await launchOutsideTheTree(
-        {
-          command: process.execPath,
-          args: ['-e', 'setTimeout(() => {}, 3000)'],
-          env: onTheSlot(process.env, slot.lock),
-          run: {
-            transcript: join(project, 'transcript.log'),
-            startedAt: Date.now(),
-            projectPath: project,
-            debugged: false,
-            ...keeperSlotOf(slot, 'a game'),
-          },
-        },
-        process.execPath,
-        resolve('build', 'keeper.js'),
-      );
-      assert.ok('pid' in launched, JSON.stringify(launched));
-      const keeper = launched.keeperPid;
-      assert.notEqual(keeper, undefined, 'the keeper names itself');
-      await handSlotToKeeper(slot, keeper, project);
-      assert.deepEqual(grantEvents(command), ['start', 'hand']);
-      assert.equal(command.entries()[1]?.handedTo, keeper, 'the slot is the keeper’s, not the game’s');
-      assert.equal(alive(keeper ?? 0), true, 'and the keeper holds on while the game runs');
-    } finally {
-      await delay(500);
-      sweep(project);
-    }
-  });
-  assert.deepEqual(keeperSlotOf({ lock: '/s/0.lock', from: 7, delegated: true }, 'a game'), {});
-  assert.deepEqual(keeperSlotOf({ lock: '/s/0.lock', from: 7, delegated: false }, 'a game'), {
-    slot: { lock: '/s/0.lock', from: 7, by: 'a game' },
-  });
-  await withASlotCommand({}, async (command) => {
-    const slot = await slotForCall(true);
-    assert.deepEqual(keeperSlotOf(slot, 'a game'), {}, 'a granted slot is not the keeper’s');
-    slot.release();
-    await command.untilEof();
-  });
-}
-
-/**
- * An engine started after the grant never holds the command's input open: a pipe reads end of
- * input once every handle to its write end is closed, so an engine inheriting it would keep the
- * slot after the release for as long as the engine ran.
- */
-async function testALiveEngineDoesNotHoldTheCommandsInputOpen(): Promise<void> {
-  await withASlotCommand({}, async (command) => {
-    const slot = await slotForCall();
-    const engine = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    try {
-      slot.release();
-      await command.untilEof();
-      assert.equal(alive(engine.pid ?? 0), true, 'the engine still runs when the command has seen the end');
-    } finally {
-      engine.kill();
-    }
-  });
-}
-
-/**
- * The slots a run of `gdharness test` or `spread` takes are the command's too: a take, a give-back
- * and an end of the run each reach it, and it is never asked for a slot that is "free now".
- */
-async function testASlotCommandServesTheSlotsOfATestRun(): Promise<void> {
-  await withASlotCommand({}, async (command) => {
-    const directory = join(command.directory, 'slots');
-    const holder = { pid: process.pid, started: await ownStart() };
-    const slots = new EngineSlots(directory, 2, holder);
-    assert.equal(await slots.takeFree(), null, 'a command has no free-now answer');
-    assert.deepEqual(grantEvents(command), [], 'and is not asked for one');
-    assert.equal(await slots.take(), command.lock);
-    slots.release(command.lock);
-    await command.untilEof();
-    assert.equal(await slots.take(), command.lock);
-    slots.markWaiting()();
-    slots.releaseAll();
-    await untilEvents(command, ['start', 'eof', 'start', 'eof']);
-    assert.equal(existsSync(directory), false, 'nothing is made in the slots folder, a memory wait included');
-  });
-}
-
-/**
- * A wait for a grant is said to the client that asked for progress, naming the command, and to the
- * call's answer, which the built-in taker words from the slots folder this one never reads.
- */
-async function testAWaitForAGrantIsSaidToTheCallThatWaits(): Promise<void> {
-  await withASlotCommand({ delayMs: 2600 }, async (command) => {
-    const heard: string[] = [];
-    const waits: SlotWaits = { ms: 0, said: undefined };
-    const slot = await withCallSignal(
-      undefined,
-      async () => await slotForCall(),
-      (_, message) => {
-        heard.push(message);
-      },
-      undefined,
-      waits,
-    );
-    slot.release();
-    await slot.settled();
-    assert.match(heard.join('\n'), /Waiting \d+ s so far for an engine slot from `.*slot-grant\.ts"`\./);
-    assert.ok(waits.ms >= 2000, `the wait is counted: ${String(waits.ms)} ms`);
-    assert.match(waits.said?.(waits.ms) ?? '', /waited \d+ s for an engine slot in all, from `.*slot-grant/);
-    assert.equal(grantEvents(command).at(-1), 'eof');
-  });
-}
-
-/** Waits until the stand-in has logged [param events], and gives up after fifteen seconds. */
-async function untilEvents(command: GrantingCommand, events: readonly string[]): Promise<void> {
-  const until = Date.now() + 15_000;
-  while (!isDeepStrictEqual(grantEvents(command), events)) {
-    assert.ok(Date.now() < until, `the stand-in logged ${grantEvents(command).join(', ')}`);
-    await delay(50);
-  }
-}
-
-/** A call cancelled while it waits for the grant ends the command's input and fails the start. */
-async function testACancelledWaitForAGrantEndsTheCommandsInput(): Promise<void> {
-  await withASlotCommand({ delayMs: 30_000 }, async (command) => {
-    const cancel = new AbortController();
-    const waiting = withCallSignal(cancel.signal, async () => await slotForCall());
-    await delay(500);
-    cancel.abort(new Error('the client stopped waiting'));
-    await assert.rejects(waiting, /the client stopped waiting/);
-    assert.deepEqual(grantEvents(command), ['start', 'eof']);
-  });
-}
-
-/** A call's deadline ends the wait the same way, and the engine's start fails as cancelled. */
-async function testTheWaitForAGrantEndsAtTheCallsDeadline(): Promise<void> {
-  await withASlotCommand({ delayMs: 30_000 }, async (command) => {
-    const marker = join(command.directory, 'engine-ran');
-    const ran = await withCallSignal(AbortSignal.timeout(700), async () => {
-      return await runEngine(process.execPath, [
-        '-e',
-        `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x')`,
-      ]);
-    });
-    assert.equal(ran.failure, 'the call was cancelled');
-    assert.equal(existsSync(marker), false, 'no engine started');
-    assert.deepEqual(grantEvents(command), ['start', 'eof']);
-  });
-}
-
-/** A gdharness that is killed holding a grant lets the command see end of input, so the slot is freed. */
-async function testAKilledGdharnessLetsTheCommandSeeEndOfInput(): Promise<void> {
-  await withASlotCommand({}, async (command) => {
-    const holder = spawnHidden(process.execPath, [resolve('test', 'support', 'slot-holder.ts')], {
-      stdio: ['ignore', 'pipe', 'inherit'],
-    });
-    try {
-      let said = '';
-      holder.stdout.setEncoding('utf8');
-      holder.stdout.on('data', (chunk: string) => {
-        said += chunk;
-      });
-      const until = Date.now() + 30_000;
-      while (!said.includes('granted')) {
-        assert.ok(Date.now() < until, `the holder never held the slot: ${said}`);
-        await delay(50);
-      }
-      assert.deepEqual(grantEvents(command), ['start'], 'held while its holder lives');
-      const commandPid = command.entries()[0]?.pid ?? 0;
-      holder.kill();
-      // On Windows libuv puts every child that is not detached in a job object that ends it when
-      // its parent goes, so the command is gone at once and never reads the end of its input.
-      // Detaching it would read the end but leaves its console children windows of their own.
-      // Elsewhere it reads the end. Either way nothing holds the slot on.
-      const gone = Date.now() + 15_000;
-      while (alive(commandPid) && !grantEvents(command).includes('eof')) {
-        assert.ok(Date.now() < gone, 'the command still holds the slot after its gdharness was killed');
-        await delay(50);
-      }
-    } finally {
-      holder.kill();
-    }
-  });
-}
-
-/** An engine under an inherited slot calls no command, as it takes no slot of its own. */
-async function testAnInheritedSlotCallsNoSlotCommand(): Promise<void> {
-  const listed = await processTree();
-  assert.ok(listed !== undefined, whyTheProcessTreeFailed() ?? 'the process table');
-  const above = ancestorsIn(listed, process.pid, 1).find((pid) =>
-    inheritsSlot(listed, process.pid, { pid }, basename(process.execPath)),
-  );
-  assert.ok(above !== undefined, 'a process above this one on another executable');
-  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-grant-'));
-  const before = process.env['GODOT_ENGINE_HELD'];
-  try {
-    const lent = join(directory, '0.lock');
-    writeFileSync(lent, JSON.stringify({ pid: above, started: (await startTimesOf([above])).get(above) }));
-    process.env['GODOT_ENGINE_HELD'] = lent;
-    await withASlotCommand({}, async (command) => {
-      const holder = { pid: process.pid, started: await ownStart() };
-      const slots = new EngineSlots(join(directory, 'own'), 2, holder);
-      assert.equal(await slots.take(), lent, 'the slot it was started on');
-      assert.equal(await slots.takeFree(), null, 'the inherited slot is lent to one engine only');
-      assert.deepEqual(grantEvents(command), [], 'the command is never started');
-      slots.releaseAll();
-    });
-  } finally {
-    if (before === undefined) {
-      delete process.env['GODOT_ENGINE_HELD'];
-    } else {
-      process.env['GODOT_ENGINE_HELD'] = before;
-    }
-    sweep(directory);
-  }
-}
-
-/** What the command is told of a take made under [param variables], and of one with no project. */
-async function theKindAskedUnder(
-  variables: Record<string, string>,
-  project: string | undefined,
-): Promise<string[] | undefined> {
-  const restore = settingEnvironment(variables);
-  try {
-    return await withASlotCommand({}, async (command) => {
-      const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
-        pid: process.pid,
-        started: await ownStart(),
-      });
-      slots.release(await slots.take(undefined, undefined, undefined, false, project));
-      await command.untilEof();
-      return command.entries()[0]?.argv;
-    });
-  } finally {
-    restore();
-  }
-}
-
-/** A take inside a gate is asked of the command as a gate's. */
-async function testASlotCommandIsToldAGatesTakeIsAGate(): Promise<void> {
-  const project = join(realpathSync(tmpdir()), 'gdharness-grant-project');
-  assert.deepEqual(
-    await theKindAskedUnder({ [SHARE_VARIABLE]: 'pool', [SHARE_COUNT_VARIABLE]: '2' }, project),
-    ['--project', project, '--kind', 'gate'],
-  );
-}
-
-/** Work the machine's queue runs outside a gate's seat, a timing or a tier, is side work. */
-async function testASlotCommandIsToldQueueWorkIsSideWork(): Promise<void> {
-  const project = join(realpathSync(tmpdir()), 'gdharness-grant-project');
-  const side = ['--project', project, '--kind', 'side'];
-  assert.deepEqual(await theKindAskedUnder({ GODOT_ENGINE_TIER: 'full' }, project), side);
-  assert.deepEqual(
-    await theKindAskedUnder({ GODOT_ENGINE_TIMED: join(tmpdir(), 'no-such-lent.lock') }, project),
-    side,
-  );
-}
-
-/** Any other take is a one-off, and one with no project passes no `--project`. */
-async function testASlotCommandIsToldAnythingElseIsAOneOff(): Promise<void> {
-  const project = join(realpathSync(tmpdir()), 'gdharness-grant-project');
-  assert.deepEqual(await theKindAskedUnder({}, project), ['--project', project, '--kind', 'one-off']);
-  assert.deepEqual(await theKindAskedUnder({}, undefined), ['--kind', 'one-off']);
-}
-
-/** A call's answer carries what its slot command said as `engineSlotNote`, and nothing where it said nothing. */
-function testACallAnswersWithWhatItsSlotCommandSaid(): void {
-  const notes = newCallNotes();
-  assert.deepEqual(callNotesSaid(notes), {});
-  notes.slotNotes.add('The command exited.');
-  notes.slotNotes.add('It printed nothing.');
-  notes.classList.add('No class list.');
-  assert.deepEqual(callNotesSaid(notes), {
-    classListNote: 'No class list.',
-    engineSlotNote: 'The command exited. It printed nothing.',
-  });
-}
-
-/**
- * The slot of a game the editor played is handed to the game's process with its start time, or
- * given back where that process is not there to hand it to.
- */
-async function testASlotOfAPlayedGameIsHandedToTheGame(): Promise<void> {
-  await withASlotCommand({}, async (command) => {
-    const game = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { stdio: 'ignore' });
-    try {
-      const slot = await slotForCall(true);
-      await handSlotToGame(slot, game.pid ?? 0, null);
-      assert.deepEqual(grantEvents(command), ['start', 'hand']);
-      assert.equal(command.entries().at(1)?.handedTo, game.pid);
-      assert.notEqual(command.entries().at(1)?.started, 0, 'with the start time the system reports');
-    } finally {
-      game.kill();
-    }
-  });
-  await withASlotCommand({}, async (command) => {
-    const slot = await slotForCall(true);
-    await handSlotToGame(slot, 2_000_000_000, null);
-    await command.untilEof();
-    assert.deepEqual(grantEvents(command), ['start', 'eof'], 'no process to hand to gives the slot back');
-  });
-}
-
-/**
- * A `gdharness test` run of two lanes whose second grant is queued for 15 s ends soon after its
- * suites, and every command it started sees the end of its input. Only the run's own handling of the
- * lanes' asks (`ranEngines` ending those no lane took) does that, so it is the one case that runs a
- * real engine under the command. The run is bounded, and a run that waits for the grant fails.
- */
-function testAQueuedGrantEndsAGdharnessTestRunWithItsSuites(): void {
-  const engine = cacheEngine('late grant run regression');
-  if (engine === null) {
-    return;
-  }
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-late-grant-'));
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-late-grant-slots-'));
-  try {
-    const suite = (name: string): string =>
-      `extends GdUnitTestSuite\n\nfunc test_${name}() -> void:\n\tawait get_tree().create_timer(3.0).timeout\n\tassert_bool(true).is_true()\n`;
-    writeFileSync(
-      join(project, 'project.godot'),
-      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="LateGrant"\n\n[rendering]\nrenderer/rendering_method="gl_compatibility"\n',
-    );
-    writeTree(project, {
-      'tests/a_test.gd': suite('a'),
-      'tests/b_test.gd': suite('b'),
-      'tests/c_test.gd': suite('c'),
-    });
-    cpSync(engine.gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
-    const env: NodeJS.ProcessEnv = { ...process.env, GODOT_PATH: engine.godot };
-    for (const name of Object.keys(env)) {
-      if (name.startsWith('GODOT_ENGINE_')) {
-        delete env[name];
-      }
-    }
-    const cli = resolve('build', 'cli.js');
-    const args = [
-      cli,
-      'test',
-      project,
-      '--slots',
-      join(slots, 'folder'),
-      '--slot-count',
-      '2',
-      '--engines',
-      '2',
-    ];
-    // The first run imports the project, which the run under the command then does not need.
-    const first = spawnSyncHidden(process.execPath, [...args, 'tests/c_test.gd'], {
-      encoding: 'utf8',
-      env,
-      timeout: 120_000,
-    });
-    assert.equal(first.status, 0, `the first run imports and passes: ${first.stdout}${first.stderr}`);
-    const log = join(slots, 'seen.jsonl');
-    Object.assign(env, {
-      GODOT_ENGINE_SLOT_COMMAND: `"${process.execPath}" "${resolve('test', 'support', 'slot-grant.ts')}"`,
-      GRANT_LOG: log,
-      GRANT_LOCK: join(slots, 'granted.lock'),
-      GRANT_LATE_MS: '15000',
-      GRANT_QUEUED: '1',
-    });
-    const began = Date.now();
-    const ran = spawnSyncHidden(process.execPath, [...args, 'tests/a_test.gd', 'tests/b_test.gd'], {
-      encoding: 'utf8',
-      env,
-      timeout: 60_000,
-    });
-    const took = Date.now() - began;
-    const events = existsSync(log)
-      ? readFileSync(log, 'utf8')
-          .split('\n')
-          .filter((line) => line !== '')
-          .map((line) => {
-            const entry: unknown = JSON.parse(line);
-            return isRecord(entry) ? String(entry['event']) : '';
-          })
-      : [];
-    const said = `${ran.stdout}${ran.stderr} (${String(took)} ms, ${events.join(',')})`;
-    assert.equal(ran.status, 0, `the run ends on its own: ${said}`);
-    assert.ok(took < 45_000, `the run did not wait for the queued grant: ${said}`);
-    assert.equal(
-      events.filter((one) => one === 'start').length,
-      2,
-      `the run asked for its two lanes: ${said}`,
-    );
-    assert.equal(
-      events.filter((one) => one === 'eof').length,
-      2,
-      `every command the run started saw the end of its input: ${said}`,
-    );
-  } finally {
-    sweep(project, slots);
-  }
-}
-
-/**
- * The server hands a played game's slot through `handedRunSlot` when it ties the run to the game,
- * and its start waits for that hand through `settledRunSlot` before it answers. Its code is read
- * from its source, since the start itself needs an engine and an editor, and the two functions are
- * run as the server calls them: a hand the command refuses is in the answer's notes.
- */
-async function testAPlayedGamesSlotIsHandedAndSettledByTheServer(): Promise<void> {
-  const source = readFileSync(join('src', 'server.ts'), 'utf8');
-  assert.match(
-    source,
-    /private tie\([^)]*\): void \{[^}]*handedRunSlot\(run, endpoint\.pid\);/s,
-    'tie hands it',
-  );
-  assert.doesNotMatch(source, /void handSlotToGame/, 'and does not let the hand go unawaited');
-  assert.match(
-    source,
-    /await settledRunSlot\(played, callSignal\(\)\);\s+return this\.jsonTextResponse\(\{\s+started: true,\s+through: 'editor'/,
-    'and the editor start waits for it before it answers',
-  );
-  await withASlotCommand({ handRefuse: true }, async () => {
-    const game = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { stdio: 'ignore' });
-    const notes = newCallNotes();
-    try {
-      const noted = await withCallSignal(
-        undefined,
-        async () => {
-          const run: { slot?: CallSlot; slotHanded?: Promise<void>; projectPath: string | null } = {
-            slot: await slotForCall(true),
-            projectPath: null,
-          };
-          handedRunSlot(run, game.pid ?? 0);
-          assert.equal(run.slot, undefined, 'the run no longer holds the slot it handed');
-          await settledRunSlot(run, callSignal());
-          return callNotesSaid(notes);
-        },
-        undefined,
-        undefined,
-        undefined,
-        notes,
-      );
-      assert.match(noted['engineSlotNote'] ?? '', /did not hand .* to process \d+/);
-    } finally {
-      game.kill();
-    }
-  });
-}
-
-/** A hand the command refuses gives the slot back through the command alone: its own lock file stays. */
-async function testAFailedHandLeavesTheCommandsLockFile(): Promise<void> {
-  await withASlotCommand({ handRefuse: true }, async (command) => {
-    // The command writes the lock in the form gdharness itself writes, naming the asking process.
-    writeFileSync(command.lock, JSON.stringify({ pid: process.pid, started: await ownStart() }));
-    const game = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { stdio: 'ignore' });
-    try {
-      const slot = await slotForCall(true);
-      await handSlotToGame(slot, game.pid ?? 0, null);
-      await slot.settled();
-      assert.equal(existsSync(command.lock), true, 'the command’s lock file is left to the command');
-      assert.deepEqual(grantEvents(command), ['start', 'hand']);
-    } finally {
-      game.kill();
-    }
-  });
-}
-
-/**
- * A played game's slot is handed while the start is still answering, and the answer waits for it so
- * a hand the command refuses is in that answer, within the call's own deadline.
- */
-async function testAPlayedGamesFailedHandIsInTheAnswerOfTheStart(): Promise<void> {
-  await withASlotCommand({ handRefuse: true }, async () => {
-    const game = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { stdio: 'ignore' });
-    const notes = newCallNotes();
-    try {
-      const noted = await withCallSignal(
-        undefined,
-        async () => {
-          const slot = await slotForCall(true);
-          const run: { slot?: typeof slot; slotHanded?: Promise<void> } = {
-            slotHanded: handSlotToGame(slot, game.pid ?? 0, null),
-          };
-          await settledRunSlot(run, callSignal());
-          return callNotesSaid(notes);
-        },
-        undefined,
-        undefined,
-        undefined,
-        notes,
-      );
-      assert.match(noted['engineSlotNote'] ?? '', /did not hand .* to process \d+/);
-    } finally {
-      game.kill();
-    }
-  });
-  const gone = new AbortController();
-  const waited = settledRunSlot({ slotHanded: new Promise<void>(() => undefined) }, gone.signal);
-  gone.abort();
-  await waited;
-}
-
-/** The notes a call's code below it makes, as the server gathers them. */
-function aCallsNotes(): CallNotes {
-  return newCallNotes();
-}
-
-/**
- * A slot the command granted for a game that outlives the call is handed on through the command:
- * it is sent `hand <pid> <start>`, answers `handed` and exits 0, and gdharness neither closes its
- * input as a release nor counts its exit as a lost slot. Releasing afterwards does nothing more.
- */
-async function testAGrantIsHandedOnThroughTheCommand(): Promise<void> {
-  await withASlotCommand({}, async (command) => {
-    const notes = aCallsNotes();
-    await withCallSignal(
-      undefined,
-      async () => {
-        const taken = await slotForCall(true);
-        assert.equal(await taken.handTo({ pid: 4242, started: 1_700_000_000_000 }), true);
-        taken.release();
-        await taken.settled();
-        await delay(300);
-      },
-      undefined,
-      undefined,
-      undefined,
-      notes,
-    );
-    assert.deepEqual(grantEvents(command), ['start', 'hand'], 'no end of input after the hand');
-    const handed = command.entries().at(1);
-    assert.equal(handed?.handedTo, 4242);
-    assert.equal(handed.started, 1_700_000_000_000);
-    assert.equal(notes.slotNotes.size, 0, 'and the command leaving is no lost slot');
-  });
-}
-
-/** A command that will not hand the slot on fails the hand, and the answer says what it printed and its exit. */
-async function testACommandThatWillNotHandTheSlotOnFailsTheHand(): Promise<void> {
-  await withASlotCommand({ handRefuse: true }, async () => {
-    const notes = aCallsNotes();
-    const handed = await withCallSignal(
-      undefined,
-      async () => await (await slotForCall(true)).handTo({ pid: 4242, started: 1 }),
-      undefined,
-      undefined,
-      undefined,
-      notes,
-    );
-    assert.equal(handed, false);
-    const said = [...notes.slotNotes].join(' ');
-    assert.match(said, /did not hand .* to process 4242/);
-    assert.match(said, /It exited with code 2\./);
-    assert.match(said, /cannot/);
-  });
-}
-
-/** A command that prints `held` and exits holds nothing, so the start fails and names the cause. */
-async function testACommandThatExitsAfterGrantingNeverHoldsTheSlot(): Promise<void> {
-  await withASlotCommand({ exit: 7 }, async (command) => {
-    const marker = join(command.directory, 'engine-ran');
-    const ran = await runEngine(process.execPath, [
-      '-e',
-      `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x')`,
-    ]);
-    assert.match(ran.failure ?? '', /exited while it held .*granted\.lock.* It exited with code 7\./);
-    assert.equal(existsSync(marker), false, 'no engine started on a slot nobody holds');
-  });
-}
-
-/** A command that exits while the engine runs is told in the answer, and the engine is left running. */
-async function testACommandThatExitsWhileTheEngineRunsLosesTheSlotInTheAnswer(): Promise<void> {
-  await withASlotCommand({ exitAfterMs: 1500 }, async () => {
-    const notes = aCallsNotes();
-    const ran = await withCallSignal(
-      undefined,
-      async () =>
-        await runEngine(process.execPath, ['-e', 'setTimeout(() => console.log("engine finished"), 3500)']),
-      undefined,
-      undefined,
-      undefined,
-      notes,
-    );
-    assert.equal(ran.failure, null, howItEnded(ran));
-    assert.match(
-      ran.log
-        .everything()
-        .map((entry) => entry.text)
-        .join('\n'),
-      /engine finished/,
-      'the engine was not killed',
-    );
-    const said = [...notes.slotNotes].join(' ');
-    assert.match(said, /exited while it held .*granted\.lock.*It exited with code 3\./);
-  });
-}
-
-/** A take for a game editor_run starts is a `game` to the command, whatever else it is. */
-async function testASlotCommandIsToldAGameIsAGame(): Promise<void> {
-  const project = join(realpathSync(tmpdir()), 'gdharness-grant-project');
-  await withASlotCommand({}, async (command) => {
-    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
-      pid: process.pid,
-      started: await ownStart(),
-    });
-    slots.release(await slots.take(undefined, undefined, undefined, true, project));
-    await command.untilEof();
-    assert.deepEqual(command.entries()[0]?.argv, ['--project', project, '--kind', 'game']);
-  });
-}
-
-/** Waits until the stand-in has logged [param event] [param count] times. */
-async function untilCount(command: GrantingCommand, event: string, count: number): Promise<void> {
-  const until = Date.now() + 15_000;
-  while (grantEvents(command).filter((one) => one === event).length < count) {
-    assert.ok(Date.now() < until, `the stand-in logged ${grantEvents(command).join(', ')}`);
-    await delay(50);
-  }
-}
-
-/** What `takenLanes` is given for a run of two lanes on [param slots]. */
-function twoLanesOn(slots: EngineSlots): Parameters<typeof takenLanes<{ lane: number }>>[0] {
-  return {
-    slots,
-    ordered: false,
-    plans: [{ lane: 0 }, { lane: 1 }],
-    memoryHeld: false,
-    byMemory: { engines: 2 },
-    followed: () => null,
-  };
-}
-
-/**
- * A run under a slot command asks for the slot of every lane at once. Grants that come together
- * stand for slots free now, so each lane starts on its own and no shares are dealt, as on the
- * slots folder with both slots free. Nothing is made in the slots folder.
- */
-async function testARunUnderASlotCommandStartsOnTheGrantsThatCameAtOnce(): Promise<void> {
-  await withASlotCommand({ lateMs: 0 }, async (command) => {
-    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
-      pid: process.pid,
-      started: await ownStart(),
-    });
-    const said: string[] = [];
-    const started = await takenLanes(twoLanesOn(slots), (line) => said.push(line));
-    assert.equal(started.taken.length, 2, 'a grant for each lane');
-    assert.equal(started.shared, false, 'so the lanes keep what they were dealt');
-    assert.deepEqual(said, []);
-    for (const lock of started.taken) {
-      slots.release(lock);
-    }
-    started.granted?.end();
-    await untilCount(command, 'eof', 2);
-    assert.equal(existsSync(join(command.directory, 'slots')), false, 'nothing in the slots folder');
-  });
-}
-
-/**
- * A grant that comes later than the others does not hold the run up. The run starts on the grants
- * it has and deals shares as a slots folder with one slot busy does. A lane that waits is handed the
- * late grant when it comes, and one that came after the work was done is given back unused.
- */
-async function testAQueuedGrantDoesNotHoldARunUp(): Promise<void> {
-  await withASlotCommand({ lateMs: 5000, queued: true }, async (command) => {
-    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
-      pid: process.pid,
-      started: await ownStart(),
-    });
-    const said: string[] = [];
-    const began = Date.now();
-    const started = await takenLanes(twoLanesOn(slots), (line) => said.push(line));
-    assert.ok(
-      Date.now() - began < 4500,
-      `the run did not wait for the late grant: ${String(Date.now() - began)} ms`,
-    );
-    assert.equal(started.taken.length, 1, 'one grant at once');
-    assert.equal(started.shared, true, 'so the suites go to whichever engine is granted');
-    assert.deepEqual(said, [sharesSaid(1, 2)]);
-    const granted = started.granted;
-    assert.notEqual(granted, undefined);
-    // The work is done before the late grant: it is given back unused, and the command sees the end.
-    granted?.end();
-    await untilCount(command, 'eof', 1);
-    slots.release(started.taken[0] ?? '');
-    await untilCount(command, 'eof', 2);
-    assert.equal(
-      readFileSync(join(command.directory, 'seen.jsonl.held'), 'utf8').split('\n').filter(Boolean).length,
-      1,
-      'the queued request was withdrawn before it was granted',
-    );
-  });
-  await withASlotCommand({ lateMs: 8000, queued: true }, async (command) => {
-    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
-      pid: process.pid,
-      started: await ownStart(),
-    });
-    const started = await takenLanes(twoLanesOn(slots), () => undefined);
-    const over = new AbortController();
-    over.abort(new Error('handed out'));
-    const began = Date.now();
-    await assert.rejects(async () => await started.granted?.slots.take(over.signal), /handed out/);
-    assert.ok(Date.now() - began < 2000, 'refused at once, not when the grant comes');
-    slots.release(started.taken[0] ?? '');
-    started.granted?.end();
-    await untilCount(command, 'eof', 2);
-  });
-  await withASlotCommand({ lateMs: 3000, queued: true }, async (command) => {
-    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
-      pid: process.pid,
-      started: await ownStart(),
-    });
-    const started = await takenLanes(twoLanesOn(slots), () => undefined);
-    const late = await started.granted?.slots.take();
-    assert.notEqual(late, undefined, 'a lane that waits is given the late grant');
-    assert.notEqual(late, started.taken[0]);
-    slots.release(late ?? '');
-    slots.release(started.taken[0] ?? '');
-    started.granted?.end();
-    await untilCount(command, 'eof', 2);
-  });
-}
-
-/**
- * A grant with no `queued` before it is a free slot however late it comes. The run starts on the
- * grants it holds without waiting for it, and the late grant joins the lane that asks for it, or
- * is given back when none does. A command that never answers holds up no start either.
- */
-async function testAGrantThatWasNotQueuedJoinsALateRunWithoutHoldingItsStart(): Promise<void> {
-  await withASlotCommand({ lateMs: 6000 }, async (command) => {
-    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
-      pid: process.pid,
-      started: await ownStart(),
-    });
-    const began = Date.now();
-    const started = await takenLanes(twoLanesOn(slots), () => undefined);
-    assert.ok(
-      Date.now() - began < 5000,
-      `the start waited for the late grant: ${String(Date.now() - began)} ms`,
-    );
-    assert.equal(started.taken.length, 1, 'the run starts on the grant it holds');
-    assert.equal(started.shared, true);
-    const joined = await started.granted?.slots.take();
-    assert.notEqual(joined, undefined, 'the late grant joins the lane that asks for it');
-    assert.notEqual(joined, started.taken[0]);
-    slots.release(joined ?? '');
-    slots.release(started.taken[0] ?? '');
-    started.granted?.end();
-    await untilCount(command, 'eof', 2);
-  });
-  await withASlotCommand({ lateMs: 6000 }, async (command) => {
-    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
-      pid: process.pid,
-      started: await ownStart(),
-    });
-    const started = await takenLanes(twoLanesOn(slots), () => undefined);
-    // No lane asks for it before the work is done, so it is given back unused.
-    started.granted?.end();
-    slots.release(started.taken[0] ?? '');
-    await untilCount(command, 'eof', 2);
-  });
-  await withASlotCommand({ say: '' }, async (command) => {
-    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
-      pid: process.pid,
-      started: await ownStart(),
-    });
-    const began = Date.now();
-    const started = await takenLanes(twoLanesOn(slots), () => undefined);
-    assert.ok(Date.now() - began < 6000, 'a command that never answers does not hold the start');
-    assert.equal(started.taken.length, 0);
-    started.granted?.end();
-    await untilCount(command, 'eof', 2);
-  });
-}
-
-/** While an ask is outstanding the run says what it waits for, though it holds a grant already. */
-async function testAnOutstandingAskSaysItsWaitWhileAGrantIsHeld(): Promise<void> {
-  await withASlotCommand({ lateMs: 30_000 }, async (command) => {
-    const lines: string[] = [];
-    const slots = new EngineSlots(
-      join(command.directory, 'slots'),
-      2,
-      { pid: process.pid, started: await ownStart() },
-      (line) => lines.push(line),
-    );
-    const held = await slots.take();
-    const over = new AbortController();
-    const waiting = slots.take(over.signal);
-    waiting.catch(() => undefined);
-    const until = Date.now() + 8000;
-    while (lines.length === 0 && Date.now() < until) {
-      await delay(100);
-    }
-    over.abort();
-    slots.release(held);
-    assert.match(lines.join('\n'), /Waiting \d+ s so far for an engine slot from `.*slot-grant\.ts/);
-    await untilCount(command, 'eof', 2);
-  });
-}
-
-/**
- * A command that queues a request and then refuses it takes one lane from the run, not the run:
- * the lane waits for the end of the hand-out without a slot. A run whose every ask is refused
- * fails with the command's reason, as the error type the CLI and the tool answers print as itself.
- */
-async function testARefusedLaneIsALaneTheRunDoesNotGet(): Promise<void> {
-  await withASlotCommand({ lateMs: 300, queued: true, lateSay: 'refused busy' }, async (command) => {
-    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
-      pid: process.pid,
-      started: await ownStart(),
-    });
-    const started = await takenLanes(twoLanesOn(slots), () => undefined);
-    assert.equal(started.taken.length, 1);
-    const over = new AbortController();
-    const lane = started.granted?.slots.take(over.signal);
-    assert.notEqual(lane, undefined);
-    const outcome = await Promise.race([
-      lane?.then(
-        () => 'granted',
-        () => 'rejected',
-      ),
-      delay(1500).then(() => 'waiting'),
-    ]);
-    assert.equal(outcome, 'waiting', 'the refused lane waits for the end of the hand-out');
-    over.abort(new Error('handed out'));
-    await assert.rejects(async () => await lane, /handed out/);
-    slots.release(started.taken[0] ?? '');
-    started.granted?.end();
-  });
-  await withASlotCommand({ say: 'refused no room' }, async (command) => {
-    const slots = new EngineSlots(join(command.directory, 'slots'), 2, {
-      pid: process.pid,
-      started: await ownStart(),
-    });
-    await assert.rejects(
-      async () => await takenLanes(twoLanesOn(slots), () => undefined),
-      (error: unknown) => error instanceof Refusal && error.message.includes('refused the slot: no room'),
-    );
-    await assert.rejects(
-      async () => await slotForCall(false),
-      (error: unknown) => error instanceof Refusal && error.message.includes('refused the slot: no room'),
-    );
-  });
-  for (const answer of [{ say: 'gibberish' }, { say: '', exit: 0 }]) {
-    await withASlotCommand(answer, async () => {
-      await assert.rejects(
-        async () => await slotForCall(false),
-        (error: unknown) => error instanceof Refusal,
-        `${JSON.stringify(answer)} is the scheduler's doing, not a defect`,
-      );
-    });
-  }
-}
-
-/** A start that waits for its one slot ignores `queued` and waits for the grant as it does without. */
-async function testAStartForOneSlotIgnoresQueued(): Promise<void> {
-  await withASlotCommand({ queued: true, delayMs: 500 }, async (command) => {
-    const slot = await slotForCall(false);
-    assert.equal(slot.lock, command.lock, 'the slot is the one the command granted');
-    assert.deepEqual(grantEvents(command), ['start']);
-    assert.equal(
-      existsSync(join(command.directory, 'seen.jsonl.held')),
-      true,
-      'it printed held after queued',
-    );
-    slot.release();
-    await command.untilEof();
-  });
-}
-
-/** The keeper tells its launcher its own pid beside the game's, which a delegate's slot is handed to. */
 function testALauncherAnswersWithTheKeepersPidToo(): void {
   assert.deepEqual(readLaunched('pid 12 keeper 99\n'), { pid: 12, keeperPid: 99 });
   assert.deepEqual(readLaunched('pid 12\n'), { pid: 12 });
@@ -100512,93 +91685,6 @@ interface DiagnosticsBesideACompetitor {
   readonly slotsAfter: string[];
 }
 
-/**
- * Runs that call on one engine slot with a stand-in engine, a competitor for the slot queued behind
- * it, and optionally the slot held by another process first. The competitor takes the slot at the
- * first moment the call lets it go.
- */
-async function diagnosticsBesideACompetitor(options: {
-  readonly foreignHolder: boolean;
-  readonly pauseMs: number;
-  readonly crash?: string;
-  readonly cancelAfterTheFirstEngine?: boolean;
-  readonly lent?: boolean;
-}): Promise<DiagnosticsBesideACompetitor> {
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-slot-'));
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-slots-'));
-  const logFile = join(project, 'stand-in.log');
-  try {
-    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
-    for (const name of ['a', 'broken', 'c']) {
-      writeFileSync(join(project, `${name}.gd`), 'extends Node\n');
-    }
-    writeFileSync(logFile, '');
-    const entries = (): StandInEntry[] => standInEntries(logFile);
-    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    const taker = new EngineSlots(slots, 1, holder, undefined, () => 'other');
-    const foreign = options.foreignHolder ? await taker.take() : null;
-    const server = new ServerProcess({
-      env: {
-        [SLOTS_VARIABLE]: slots,
-        [SLOT_COUNT_VARIABLE]: '1',
-        GODOT_PATH: operationStandIn(),
-        GDH_STAND_IN_LOG: logFile,
-        GDH_STAND_IN_PAUSE_MS: String(options.pauseMs),
-        GDH_STAND_IN_CRASH: options.crash ?? '',
-        GDHARNESS_BRIDGE_PORT: String(await reservePort()),
-        GDHARNESS_LSP_PORT: String(await reservePort()),
-      },
-    });
-    let competitorTookAt: number | null = null;
-    try {
-      await server.initialize('regression-test');
-      const id = server.nextRequestId;
-      const call = server
-        .request(
-          'tools/call',
-          {
-            name: 'script_diagnostics',
-            arguments: { projectPath: project, scriptPath: ['a.gd', 'broken.gd', 'c.gd'] },
-          },
-          options.cancelAfterTheFirstEngine === true ? 60_000 : 120_000,
-        )
-        .catch(() => null);
-      assert.ok(
-        await cameTrue(
-          () =>
-            foreign === null
-              ? entries().length > 0
-              : leftInSlots(slots).some((name) => name.startsWith('waiting/')),
-          30_000,
-        ),
-        `the call asks for its slot: ${slotsSaid()}`,
-      );
-      const competitor = taker.take().then((lock) => {
-        competitorTookAt = Date.now();
-        taker.release(lock);
-      });
-      await delay(700);
-      if (foreign !== null) {
-        taker.release(foreign);
-      }
-      if (options.cancelAfterTheFirstEngine === true) {
-        assert.ok(await cameTrue(() => entries().some((entry) => entry.event === 'start'), 30_000));
-        server.notify('notifications/cancelled', { requestId: id, reason: 'the caller stopped waiting' });
-      }
-      // A cancelled call is never answered, so only the slot it frees is waited for.
-      const said = options.cancelAfterTheFirstEngine === true ? null : await call;
-      await Promise.race([competitor, delay(60_000)]);
-      const answer = said === null ? null : (textOf(said)?.replaceAll(/port \d+/g, 'port N') ?? null);
-      return { answer, entries: entries(), competitorTookAt, slotsAfter: leftInSlots(slots) };
-    } finally {
-      await server.stop();
-    }
-  } finally {
-    sweep(project);
-    sweep(slots);
-  }
-}
-
 /** The engines a call started, as "operation" in order. */
 function enginesStarted(ran: DiagnosticsBesideACompetitor): string[] {
   return ran.entries.filter((entry) => entry.event === 'start').map((entry) => entry.operation);
@@ -100744,9 +91830,9 @@ interface TwoCallsAtOneRebuild {
 
 /**
  * A call over three scripts, and a second call sent once the first one's engine started, after a
- * class_name script was written. The second starts the class rebuild and the first joins it before
- * its next engine. With [param slotCount] 2, another process takes the second slot once the first
- * engine starts and keeps it for 12 seconds.
+ * class_name script was written. The second starts the class rebuild, which takes no slot, and the
+ * first joins it before its next engine, holding its slot. With [param slotCount] 2, another process
+ * takes the second slot once the first engine starts and keeps it for 12 seconds.
  */
 async function twoDiagnosticsAtOneRebuild(slotCount: 1 | 2): Promise<TwoCallsAtOneRebuild> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-rebuild-'));
@@ -100759,7 +91845,7 @@ async function twoDiagnosticsAtOneRebuild(slotCount: 1 | 2): Promise<TwoCallsAtO
     }
     writeFileSync(logFile, '');
     const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    const taker = new EngineSlots(slots, slotCount, holder, undefined, () => 'other');
+    const taker = new EngineSlots(slots, slotCount, holder, undefined, undefined, plentyOfMemory);
     const server = new ServerProcess({
       env: {
         [SLOTS_VARIABLE]: slots,
@@ -100812,8 +91898,8 @@ async function twoDiagnosticsAtOneRebuild(slotCount: 1 | 2): Promise<TwoCallsAtO
 }
 
 /**
- * Two calls on one slot, one joining the class rebuild the other started, both answer: the joiner
- * gives its slot back while it waits, so the rebuild it waits for can run.
+ * Two calls on one slot, one joining the class rebuild the other started, both answer: the rebuild
+ * takes no slot, so the joiner's hold on the only one does not stop it.
  */
 async function testDiagnosticsJoiningAClassRebuildOnOneSlotBothAnswer(): Promise<void> {
   const ran = await twoDiagnosticsAtOneRebuild(1);
@@ -100824,8 +91910,8 @@ async function testDiagnosticsJoiningAClassRebuildOnOneSlotBothAnswer(): Promise
 }
 
 /**
- * With two slots, one held by another process, the rebuild a call joins runs on the slot the
- * joiner held, rather than waiting for the other process while the joiner's slot idles.
+ * With two slots, one held by the joiner and one by another process, the rebuild the joiner waits
+ * for starts at once, since it takes no slot.
  */
 async function testDiagnosticsJoiningAClassRebuildHoldNoIdleSlot(): Promise<void> {
   const ran = await twoDiagnosticsAtOneRebuild(2);
@@ -100857,7 +91943,7 @@ async function testScriptDiagnosticsKeepsOneSlotForAllItsEngines(): Promise<void
     }
     writeFileSync(logFile, '');
     const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    const taker = new EngineSlots(slots, 1, holder, undefined, () => 'other');
+    const taker = new EngineSlots(slots, 1, holder, undefined, undefined, plentyOfMemory);
     const server = new ServerProcess({
       env: {
         [SLOTS_VARIABLE]: slots,
@@ -100900,83 +91986,6 @@ async function testScriptDiagnosticsKeepsOneSlotForAllItsEngines(): Promise<void
       assert.ok(
         takenAt >= answeredAt - 1000 && takenAt > Math.max(...starts),
         `the slot stays with the call until it answers: taken ${String(takenAt - answeredAt)} ms from the answer`,
-      );
-    } finally {
-      await server.stop();
-    }
-  } finally {
-    sweep(project);
-    sweep(slots);
-  }
-}
-
-/**
- * A call over several scripts that joins, between its engines, the class rebuild another call
- * started gives its slot back while it waits: a taker queued behind it gets the slot before the
- * rebuild ends.
- */
-async function testDiagnosticsJoiningARebuildBetweenItsEnginesGiveTheirSlotBack(): Promise<void> {
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-join-'));
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-join-slots-'));
-  const logFile = join(project, 'stand-in.log');
-  try {
-    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
-    for (const name of ['a', 'broken', 'c']) {
-      writeFileSync(join(project, `${name}.gd`), 'extends Node\n');
-    }
-    writeFileSync(logFile, '');
-    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-    const taker = new EngineSlots(slots, 1, holder, undefined, () => 'other');
-    const server = new ServerProcess({
-      env: {
-        [SLOTS_VARIABLE]: slots,
-        [SLOT_COUNT_VARIABLE]: '1',
-        GODOT_PATH: operationStandIn(),
-        GDH_STAND_IN_LOG: logFile,
-        GDH_STAND_IN_PAUSE_MS: '1500',
-        GDH_STAND_IN_PAUSE_MS_refresh_class_cache: '8000',
-        GDHARNESS_BRIDGE_PORT: String(await reservePort()),
-        GDHARNESS_LSP_PORT: String(await reservePort()),
-      },
-    });
-    try {
-      await server.initialize('regression-test');
-      const diagnose = async (scriptPath: string | string[]): Promise<string | null> => {
-        const said = await server
-          .request(
-            'tools/call',
-            { name: 'script_diagnostics', arguments: { projectPath: project, scriptPath } },
-            60_000,
-          )
-          .catch(() => null);
-        return said === null ? null : (textOf(said) ?? null);
-      };
-      const first = diagnose(['a.gd', 'broken.gd', 'c.gd']);
-      assert.ok(
-        await cameTrue(() => standInEntries(logFile).some((entry) => entry.event === 'start'), 30_000),
-        'the first call starts its engine',
-      );
-      const got: { at?: number } = {};
-      const taken = taker.take().then((lock) => {
-        got.at = Date.now();
-        taker.release(lock);
-      });
-      writeFileSync(join(project, 'fresh.gd'), 'class_name Fresh\nextends Node\n');
-      const second = diagnose('c.gd');
-      const [firstSaid, secondSaid] = await Promise.all([first, second]);
-      await Promise.race([taken, delay(30_000)]);
-      const takenAt = got.at ?? Number.NaN;
-      const entries = standInEntries(logFile);
-      const at = (event: string, operation: string): number =>
-        entries.find((entry) => entry.event === event && entry.operation === operation)?.at ?? Number.NaN;
-      const engines = entries.map((entry) => `${entry.event} ${entry.operation}`).join(', ');
-      assert.match(firstSaid ?? '', /Parse Error: stand-in/, `the first call answers: ${engines}`);
-      assert.match(secondSaid ?? '', /"clean": true/, `the second call answers: ${engines}`);
-      const firstEnded = at('end', 'check_scripts');
-      const rebuildEnded = at('end', 'refresh_class_cache');
-      assert.ok(
-        takenAt > firstEnded && takenAt < rebuildEnded,
-        `the taker gets the slot while the first call waits for the rebuild: taken ${String(takenAt - firstEnded)} ms after its engine, the rebuild ended at ${String(rebuildEnded - firstEnded)} ms: ${engines}`,
       );
     } finally {
       await server.stop();
@@ -101061,7 +92070,7 @@ async function testScriptCreateHoldsNoSlotWhileItAsksTheEditor(): Promise<void> 
         await delay(100);
       }
       const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-      const taker = new EngineSlots(slots, 1, holder, undefined, () => 'other');
+      const taker = new EngineSlots(slots, 1, holder, undefined, undefined, plentyOfMemory);
       const call = server.request(
         'tools/call',
         {
@@ -101192,7 +92201,7 @@ async function testScriptDiagnosticsHoldsNoSlotWhileTheEditorScans(): Promise<vo
       });
       socket.send(JSON.stringify(greeting(project)));
       const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
-      const taker = new EngineSlots(slots, 1, holder, undefined, () => 'other');
+      const taker = new EngineSlots(slots, 1, holder, undefined, undefined, plentyOfMemory);
       const competitorTook: { at: number | null } = { at: null };
       const competitor = taker.take().then(async (lock) => {
         competitorTook.at = Date.now();
@@ -107261,6 +98270,17 @@ interface FedRunAsked {
   readonly selectionIgnore?: readonly string[];
   /** The errors and warnings the suites declare, none when absent. */
   readonly declared?: Expected;
+  /** Whether the run's log reads the console as the piped streams would, an empty log when absent. */
+  readonly logged?: boolean;
+  /** Whether both tools read their skip reasons from the run's report, as a run that wrote one does. */
+  readonly reported?: boolean;
+}
+
+/** A log that has read [param printed] off the engine's stdout. */
+function loggedFrom(printed: string): GameLog {
+  const log = new GameLog();
+  log.append('stdout', `${printed}\n`);
+  return log;
 }
 
 /**
@@ -107323,6 +98343,7 @@ This test is skipped!
         return `<testsuite id="0" name="${name}" package="${suite.path.replace(/^res:\/\//, '').replace(/\/[^/]*$/, '')}" tests="${String(suite.cases.length)}" failures="${String(failures)}" errors="0" skipped="0" flaky="0" time="0.04">${cases}</testsuite>`;
       })
       .join('')}</testsuites>`;
+    const reports = asked.reported === true ? reportedSkips([parseJUnit(xml)]) : undefined;
     const { tally } = aTalliedRun([{ stream: 'stdout' as const, text: `${engineText}\n` }], 1000);
     const diffs = new SuiteDiffs();
     diffs.take(Buffer.from(engineText));
@@ -107363,13 +98384,13 @@ This test is skipped!
       engine: { note: null },
       run: {
         exitSignal: null,
-        log: new GameLog(),
+        log: asked.logged === true ? loggedFrom(engineText) : new GameLog(),
         exitCode,
       },
       tally,
       diffs: diffs.finish(),
       report: parseJUnit(xml),
-      casePrinted: readEngineLog(engineLog, [], asked.declared ?? NONE_EXPECTED),
+      casePrinted: readEngineLog(engineLog, [], asked.declared ?? NONE_EXPECTED, undefined, reports),
       uncaught: null,
       exitCode,
       verdict: word,
@@ -107400,7 +98421,8 @@ This test is skipped!
     };
     return {
       answer,
-      faults: judgeEngine(readRun(engineText), handed, { code: exitCode, signal: null, ended: null }).faults,
+      faults: judgeEngine(readRun(engineText, reports), handed, { code: exitCode, signal: null, ended: null })
+        .faults,
     };
   } finally {
     rmSync(project, { recursive: true, force: true });
@@ -131893,7 +122915,7 @@ async function withAnEditorOfAnotherProject(
         ...(options.playsWindowed === true ? { playsWindowed: true } : {}),
         ...(slotFolder === null
           ? // The other project's game runs beside the editor's.
-            { env: { [SLOT_COUNT_VARIABLE]: slotCountForGames(2) } }
+            { env: { [SLOT_COUNT_VARIABLE]: slotCountForEngines(2) } }
           : {
               env: {
                 GODOT_ENGINE_SLOTS: slotFolder,
@@ -132760,12 +123782,9 @@ async function testARunEndingByItselfLeavesTheOtherRunAlone(): Promise<void> {
   });
 }
 
-/**
- * A third place waits for an engine slot when games may hold two, and starts once one is freed.
- * Of three slots the last stays for a short headless call, so two are the games'.
- */
+/** A third place waits for an engine slot while two games hold both slots, and starts once one is freed. */
 async function testAThirdPlaceWaitsForAnEngineSlot(): Promise<void> {
-  await withRunsBeside({ slots: 3 }, async ({ served, trees, start, call, slots }) => {
+  await withRunsBeside({ slots: 2 }, async ({ served, trees, start, call, slots }) => {
     const first = asNumber(get(await start(trees[0], { runtimeWaitMs: 0 }), 'pid'), 'the first run');
     const second = await start(trees[1], { runtimeWaitMs: 0 });
     assert.equal(get(second, 'started'), true, JSON.stringify(second));
@@ -133706,7 +124725,7 @@ async function testAStartRefusedForMemorySaysSoThroughEveryTool(): Promise<void>
   });
 }
 
-/** A headless engine is let go as it ends: nothing reserves for it or reads it afterwards. */
+/** A headless engine is let go as it ends: nothing reads it afterwards. */
 async function testAHeadlessEngineIsReadNoMoreOnceItHasEnded(): Promise<void> {
   const project = memoryProject();
   const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
@@ -133724,10 +124743,9 @@ async function testAHeadlessEngineIsReadNoMoreOnceItHasEnded(): Promise<void> {
         'const endedAt = Date.now();',
         'const engines = [...new Set(reads.flatMap((read) => read.pids))];',
         'const guarded = engines.filter((pid) => memory.engineMemory.isGuarding(pid));',
-        `const reserved = await slots.reservedMemory(${JSON.stringify(slots)});`,
         'await new Promise((done) => setTimeout(done, 3000));',
         'const after = reads.filter((read) => read.at > endedAt && read.pids.some((pid) => engines.includes(pid)));',
-        'say({ exitCode: ran.exitCode, failure: ran.failure, engines, guarded, reserved, after });',
+        'say({ exitCode: ran.exitCode, failure: ran.failure, engines, guarded, after });',
       ],
       { [SLOTS_VARIABLE]: slots, GDH_HOLD_MB: '60', GDH_STAY_MS: '2500' },
     );
@@ -133736,7 +124754,6 @@ async function testAHeadlessEngineIsReadNoMoreOnceItHasEnded(): Promise<void> {
   }
   assert.equal(get(found, 'exitCode'), 0, JSON.stringify(found));
   assert.deepEqual(get(found, 'guarded'), [], 'the engine is no longer guarded once its run is answered');
-  assert.equal(get(found, 'reserved'), 0, 'and reserves nothing');
   assert.ok(asArray(get(found, 'engines')).length > 0, 'the engine was read while it ran');
   assert.deepEqual(get(found, 'after'), [], 'nothing reads an engine that has ended');
 }
@@ -134083,70 +125100,6 @@ async function testAVariationBaseThatIsNoClassAndNoHeldTypeIsWrittenAsGiven(): P
       scenes.fileOf('theme.tres'),
     );
   });
-}
-
-/**
- * An engine run leaves nothing of its own in the slots folder, and engines already running are not
- * counted again past the free memory that already shows what they hold.
- */
-async function testAnEngineRunLeavesNoReservationInTheSlots(): Promise<void> {
-  const GIB = 1024 ** 3;
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-memory-slots-'));
-  const project = memoryProject();
-  const others = [memoryProject(), memoryProject(), memoryProject(), memoryProject()];
-  const engines: ReturnType<typeof spawnHidden>[] = [];
-  try {
-    await withHoldsInTheEnvironment({ GODOT_ENGINE_SLOTS: slots }, () =>
-      withARuntimeDirectory(async () => {
-        const outcome = await inAProcessOfItsOwn(
-          [
-            `const engine = { godotPath: ${JSON.stringify(memoryEngine())}, script: 'none', debug: false };`,
-            `say(await headless.runOperation(engine, 'get_scene_tree', {}, ${JSON.stringify(project)}));`,
-          ],
-          { GDH_OPERATION_HOLD_MB: '50', GDH_GROW_MB: '50', GDH_STAY_MS: '2500' },
-        );
-        assert.equal(get(outcome, 'ok'), true, JSON.stringify(outcome));
-        assert.deepEqual(leftInSlots(slots), [], 'an engine run leaves nothing in the slots folder');
-
-        // Four engines whose projects kept 1.8 GB each, on a 64 GiB machine whose free memory reads
-        // 9 GiB with them running. A fifth of 1.8 GB fits in what is left past the 4 GB kept.
-        const guards: { release: () => number }[] = [];
-        const ceiling = { bytes: 16 * GIB, source: 'default' } as const;
-        try {
-          for (const other of [...others, project]) {
-            await recordEnginePeak(other, 'project_test', 1.8 * GIB);
-          }
-          for (const other of others) {
-            const engine = spawnHidden(memoryEngine(), ['--path', other], {
-              stdio: 'ignore',
-              env: { ...process.env, GDH_HOLD_MB: '0', GDH_STAY_MS: '15000' },
-            });
-            engines.push(engine);
-            guards.push(
-              engineMemory.guard(engine.pid ?? 0, ceiling, () => assert.fail('under its ceiling'), {
-                project: other,
-                tool: 'project_test',
-              }),
-            );
-          }
-          await delay(2500);
-          const room = async (): Promise<{ bytes: number; said: string }> =>
-            memoryRoomOf(9 * GIB, null, await reservedMemory(slots));
-          assert.equal(await memoryRefusal(project, 'project_test', ceiling, room), null);
-          assert.deepEqual(leftInSlots(slots), [], 'running engines leave nothing in the slots folder');
-        } finally {
-          for (const guard of guards) {
-            guard.release();
-          }
-        }
-      }),
-    );
-  } finally {
-    for (const engine of engines) {
-      engine.kill();
-    }
-    sweep(slots, project, ...others);
-  }
 }
 
 /** A game ended for its memory and polled while it ends is answered with its exit, not a missing keeper. */
@@ -134957,6 +125910,1042 @@ function testAnEngineWhoseCasesAllSkippedAddsNoNothingRanProblem(): void {
   );
 }
 
+/**
+ * A case gdUnit4 cannot run as declared never ran either, so beside a skip, or alone, it is not
+ * counted as ran, and the run adds no "executed no test case" problem the listed cases already say.
+ */
+function testAnUnrunnableCaseIsNotCountedAsRan(): void {
+  const clean = { code: 0, signal: null, ended: null };
+  const typo = `Unknown test case argument's ["value"] found.`;
+  const run = (skip: boolean): string =>
+    [
+      'Run Test Suite: res://test/s_test.gd',
+      '  res://test/s_test.gd > test_typo STARTED',
+      '  res://test/s_test.gd > test_typo PASSED 0ms',
+      '  Report:',
+      '  This test is skipped!',
+      `  Reason: '${typo}'`,
+      '',
+      '',
+      ...(skip
+        ? [
+            '  res://test/s_test.gd > test_later STARTED',
+            '  res://test/s_test.gd > test_later PASSED 0ms',
+            ...skipBlock('not yet'),
+          ]
+        : []),
+      `Statistics: ${skip ? '2' : '1'} test cases | 0 errors | 0 failures | 0 flaky | ${skip ? '2' : '1'} skipped | 0 orphans | PASSED 0ms`,
+      '',
+      `Overall Summary: ${skip ? '2' : '1'} test cases | 0 errors | 0 failures | 0 flaky | ${skip ? '2' : '1'} skipped | 0 orphans |`,
+      'Executed test suites: (1/1)',
+      `Executed test cases : (0/${skip ? '2' : '1'}), ${skip ? '2' : '1'} skipped`,
+    ].join('\n');
+  const handed = (skip: boolean): Parameters<typeof judgeEngine>[1] => ({
+    suites: [{ path: 'res://test/s_test.gd', cases: skip ? ['test_typo', 'test_later'] : ['test_typo'] }],
+    expected: { errors: {}, warnings: {} },
+  });
+  const typoFault = `res://test/s_test.gd > test_typo never ran: gdUnit4 skipped it, saying "${typo}"`;
+  const both = readRun(run(true));
+  assert.deepEqual(
+    [casesRan(both), judgeEngine(both, handed(true), clean).faults],
+    [0, [typoFault, 'res://test/s_test.gd > test_later never ran: gdUnit4 skipped it, saying "not yet"']],
+    'a skip beside a case gdUnit4 cannot run',
+  );
+  const alone = readRun(run(false));
+  assert.deepEqual(
+    [casesRan(alone), judgeEngine(alone, handed(false), clean).faults],
+    [0, [typoFault]],
+    'a case gdUnit4 cannot run, alone',
+  );
+  const row = readRun(
+    [
+      'Run Test Suite: res://test/s_test.gd',
+      '  res://test/s_test.gd > test_p:0 (1) STARTED',
+      '  res://test/s_test.gd > test_p:0 (1) PASSED 0ms',
+      '  Report:',
+      '  This test is skipped!',
+      "  Reason: '",
+      'The test data set at index (0) does not match the expected test parameters:',
+      '\ttest function: func test...(a: int,b: int)',
+      '\ttest input values: [1]',
+      "'",
+      '',
+      'Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans | PASSED 0ms',
+      '',
+      'Overall Summary: 1 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans |',
+      'Executed test suites: (1/1)',
+      'Executed test cases : (0/1), 1 skipped',
+    ].join('\n'),
+  );
+  const rowHanded = { ...handed(false), suites: [{ path: 'res://test/s_test.gd', cases: ['test_p'] }] };
+  assert.deepEqual(
+    [casesRan(row), judgeEngine(row, rowHanded, clean).faults],
+    [
+      0,
+      [
+        'res://test/s_test.gd > test_p:0 (1) never ran: gdUnit4 skipped it, saying "The test data set at index (0) does not match the expected test parameters: test function: func test...(a: int,b: int) test input values: [1]"',
+      ],
+    ],
+    'a row whose data does not fit, alone',
+  );
+}
+
+/** The skip reasons of {@link SKIP_LINES_PRINTED}, each as do_skip was given it. */
+const SKIP_REASONS_OVER_LINES = [
+  ['test_two_lines', 'line one\nline two'],
+  ['test_ends_in_quote', "it is 'done'"],
+  ['test_quote_alone', "first\n'\nlast"],
+  ['test_quote_ends_line', "said 'no'\nthen left"],
+] as const;
+
+/**
+ * What the report of {@link SKIP_LINES_PRINTED}'s run holds of its skips. Under each case of a suite
+ * skipped whole it writes only gdUnit4's own reason, so that suite's reason comes from the console.
+ */
+const SKIP_LINES_REPORTED: ReportedSkips = {
+  cases: new Map(
+    SKIP_REASONS_OVER_LINES.map(([name, reason]) => [
+      skipKey('res://test/lines_skip_test.gd', name),
+      [reason],
+    ]),
+  ),
+  suites: new Map([
+    ['res://test/lines_skip_test.gd', SKIP_REASONS_OVER_LINES.map(([, reason]) => reason)],
+    [
+      'res://test/whole_lines_test.gd',
+      ['Skipped from the entire test suite', 'Skipped from the entire test suite'],
+    ],
+  ]),
+};
+
+/**
+ * Two suites as gdUnit4 printed them: one with the cases of {@link SKIP_REASONS_OVER_LINES} between
+ * two that ran, and one skipped whole with a reason over two lines.
+ */
+const SKIP_LINES_PRINTED = [
+  'Run Test Suite: res://test/lines_skip_test.gd',
+  '  res://test/lines_skip_test.gd > test_ok STARTED',
+  '  res://test/lines_skip_test.gd > test_ok PASSED 26ms',
+  '',
+  ...SKIP_REASONS_OVER_LINES.flatMap(([name, reason]) => [
+    `  res://test/lines_skip_test.gd > ${name} STARTED`,
+    `  res://test/lines_skip_test.gd > ${name} PASSED 0ms`,
+    ...skipBlock(reason),
+  ]),
+  '  res://test/lines_skip_test.gd > test_after STARTED',
+  '  res://test/lines_skip_test.gd > test_after PASSED 26ms',
+  '',
+  'Statistics: 6 test cases | 0 errors | 0 failures | 0 flaky | 4 skipped | 0 orphans | PASSED 448ms',
+  '',
+  '',
+  'Run Test Suite: res://test/whole_lines_test.gd',
+  ...['test_a', 'test_b'].flatMap((name) => [
+    `  res://test/whole_lines_test.gd > ${name} STARTED`,
+    `  res://test/whole_lines_test.gd > ${name} PASSED 0ms`,
+    ...skipBlock('Skipped from the entire test suite'),
+  ]),
+  '  whole_lines_test > finalize()  Report:',
+  '  The Entire test-suite is skipped!',
+  '  Skipped 2 tests',
+  "  Reason: 'waits for",
+  "the next 'build''",
+  '',
+  'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 2 skipped | 0 orphans | PASSED 0ms',
+  '',
+  '',
+  'Overall Summary: 8 test cases | 0 errors | 0 failures | 0 flaky | 6 skipped | 0 orphans |',
+  'Executed test suites: (2/2)',
+  'Executed test cases : (2/8), 6 skipped',
+].join('\n');
+
+/**
+ * A skip reason holding line breaks and quotes is read whole: gdUnit4 prints it over several lines,
+ * ending on a quote with a blank line under it, and writes it so in the report. Both tools fail the
+ * run and list it as do_skip gave it.
+ */
+function testASkipReasonOverSeveralLinesIsReadWhole(): void {
+  const printed = readRun(SKIP_LINES_PRINTED, SKIP_LINES_REPORTED);
+  const lines = 'res://test/lines_skip_test.gd';
+  const whole = 'res://test/whole_lines_test.gd';
+  assert.deepEqual(
+    printed.skipped,
+    [
+      ...SKIP_REASONS_OVER_LINES.map(([name, reason]) => ({ suite: lines, name, reason, cases: 1 })),
+      { suite: whole, name: null, reason: "waits for\nthe next 'build'", cases: 2 },
+    ],
+    'each reason whole',
+  );
+  assert.equal(casesRan(printed), 2, 'eight printed passed, six of them skipped');
+  const judged = judgeEngine(
+    printed,
+    {
+      suites: [
+        { path: lines, cases: ['test_ok', ...SKIP_REASONS_OVER_LINES.map(([name]) => name), 'test_after'] },
+        { path: whole, cases: ['test_a', 'test_b'] },
+      ],
+      expected: { errors: {}, warnings: {} },
+    },
+    { code: 0, signal: null, ended: null },
+  );
+  assert.deepEqual(
+    [judged.passed, judged.faults, judged.passedSuites],
+    [
+      false,
+      [
+        ...SKIP_REASONS_OVER_LINES.map(
+          ([name, reason]) => `${lines} > ${name} never ran: gdUnit4 skipped it, saying "${reason}"`,
+        ),
+        `${whole} never ran all 2 of its cases: gdUnit4 skipped the whole suite, saying "waits for\nthe next 'build'"`,
+      ],
+      [],
+    ],
+    'gdharness test',
+  );
+  const { answer, faults } = fedRunAnswered(
+    [
+      {
+        path: FED_A,
+        cases: [
+          fedCase(FED_A, 'test_ok'),
+          ...SKIP_REASONS_OVER_LINES.map(([name, reason]) => fedSkipped(FED_A, name, reason)),
+        ],
+        closed: 'PASSED',
+      },
+    ],
+    0,
+    { reported: true },
+  );
+  assert.deepEqual(
+    [answer['passed'], answer['verdict'], answer['casesSkipped']],
+    [
+      false,
+      '4 cases skipped with do_skip, so they never ran',
+      SKIP_REASONS_OVER_LINES.map(([name, reason]) => ({ test: `${FED_A} > ${name}`, reason })),
+    ],
+    'project_test',
+  );
+  assert.equal(
+    answer['note'],
+    'gdUnit4 skipped what casesSkipped names because they were declared with do_skip, though it printed each case passed first. Each entry carries the skip_reason it was given. The run is not called passed, as gdharness test judges it.',
+  );
+  assert.deepEqual(
+    faults,
+    SKIP_REASONS_OVER_LINES.map(
+      ([name, reason]) => `${FED_A} > ${name} never ran: gdUnit4 skipped it, saying "${reason}"`,
+    ),
+    'gdharness test, fed',
+  );
+}
+
+/**
+ * A case and a suite whose skip reasons hold line breaks and quotes fail a real run of both tools,
+ * each listed with its whole reason.
+ */
+async function testARealSkipReasonOverSeveralLinesFailsBothTools(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const caseReason = "said 'no'\nthen left";
+  const suiteReason = "waits for\nthe next 'build'";
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    writeTree(project, {
+      'tests/lines_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_runs() -> void:',
+        '\tassert_int(1).is_equal(1)',
+        '',
+        '',
+        'func test_waits(_do_skip := true, _skip_reason := "said \'no\'\\nthen left") -> void:',
+        '\tassert_bool(false).is_true()',
+        '',
+      ].join('\n'),
+      'tests/whole_lines_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func before(_do_skip := true, _skip_reason := "waits for\\nthe next \'build\'") -> void:',
+        '\tpass',
+        '',
+        '',
+        'func test_first() -> void:',
+        '\tassert_int(1).is_equal(1)',
+        '',
+      ].join('\n'),
+    });
+    const ran = test('tests/lines_test.gd', 'tests/whole_lines_test.gd');
+    assert.equal(ran.status, 1, ran.said);
+    for (const fault of [
+      `res://tests/lines_test.gd > test_waits never ran: gdUnit4 skipped it, saying "${caseReason}"`,
+      `res://tests/whole_lines_test.gd never ran its one case: gdUnit4 skipped the whole suite, saying "${suiteReason}"`,
+    ]) {
+      assert.ok(ran.said.includes(fault), `${fault}\n${ran.said}`);
+    }
+    assert.match(ran.said, /^Failed: 2 problems, listed above\. Ran 1 case in 2 suites /m, ran.said);
+    await withStdioServer(
+      async (_call, request) => {
+        const answered = async (path: string): Promise<unknown> => {
+          const response = await request(
+            'tools/call',
+            { name: 'project_test', arguments: { projectPath: project, path } },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          );
+          const blocks = asArray(get(response, 'result', 'content')).map((block) =>
+            String(get(block, 'text')),
+          );
+          return JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        };
+        const oneCase = await answered('res://tests/lines_test.gd');
+        assert.deepEqual(
+          [get(oneCase, 'passed'), get(oneCase, 'casesSkipped')],
+          [false, [{ test: 'res://tests/lines_test.gd > test_waits', reason: caseReason }]],
+          JSON.stringify(oneCase),
+        );
+        const whole = await answered('res://tests/whole_lines_test.gd');
+        assert.deepEqual(
+          [get(whole, 'passed'), get(whole, 'casesSkipped')],
+          [false, [{ test: 'res://tests/whole_lines_test.gd', reason: suiteReason, cases: 1 }]],
+          JSON.stringify(whole),
+        );
+      },
+      { GODOT_PATH: engines.godotPath },
+    );
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
+ * A skip reason with a quote ending a line and a blank line under it, and one with a line starting
+ * `ERROR:`, are each read whole in a real run of both tools, and the second adds no engine error.
+ * The engine's own error in the case that ran is still counted, in both tools.
+ */
+async function testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const reasons = [
+    ['test_quote_blank', "said 'no'\n\nthen left", String.raw`"said 'no'\n\nthen left"`],
+    ['test_error_line', 'boom\nERROR: not an engine error', String.raw`"boom\nERROR: not an engine error"`],
+  ] as const;
+  const suite = 'res://tests/reasons_test.gd';
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    writeTree(project, {
+      'tests/reasons_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_runs() -> void:',
+        '\tpush_error("a real engine error")',
+        '\tassert_int(1).is_equal(1)',
+        ...reasons.flatMap(([name, , literal]) => [
+          '',
+          '',
+          `func ${name}(_do_skip := true, _skip_reason := ${literal}) -> void:`,
+          '\tassert_bool(false).is_true()',
+        ]),
+        '',
+      ].join('\n'),
+    });
+    const ran = test('tests/reasons_test.gd');
+    assert.equal(ran.status, 1, ran.said);
+    for (const [name, reason] of reasons) {
+      const fault = `${suite} > ${name} never ran: gdUnit4 skipped it, saying "${reason}"`;
+      assert.ok(ran.said.includes(fault), `${fault}\n${ran.said}`);
+    }
+    assert.deepEqual(
+      ran.said.match(/an engine error in .+?(?=\. )/g),
+      [`an engine error in ${suite} > test_runs: a real engine error`],
+      ran.said,
+    );
+    assert.match(ran.said, /^Failed: 3 problems, listed above\. Ran 1 case in 1 suite /m, ran.said);
+    await withStdioServer(
+      async (_call, request) => {
+        const response = await request(
+          'tools/call',
+          { name: 'project_test', arguments: { projectPath: project, path: suite } },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        const answer = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        const errorTexts = asArray(get(answer, 'engineEntries'))
+          .filter((entry) => get(entry, 'severity') === 'error')
+          .map((entry) => get(entry, 'text'));
+        assert.deepEqual(
+          [get(answer, 'passed'), get(answer, 'casesSkipped'), get(answer, 'engineErrors'), errorTexts],
+          [
+            false,
+            reasons.map(([name, reason]) => ({ test: `${suite} > ${name}`, reason })),
+            1,
+            ['a real engine error'],
+          ],
+          JSON.stringify(answer),
+        );
+      },
+      { GODOT_PATH: engines.godotPath },
+    );
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
+ * gdUnit4 runs a suite's `after()` between its last case's report and its statistics, so what
+ * `after()` prints follows a skipped last case's reason. A reason closed on its first line ends
+ * there in a real run of both tools: an error ending in a quote is still found, a declared one
+ * adds no fault for being unprinted, and a print stays out of the reason.
+ */
+async function testAnAfterHookPrintingAQuoteKeepsOutOfASkippedLastCasesReason(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const error = "could not load 'res://gone.tres'";
+  const suiteOf = (...head: string[]): string =>
+    [
+      'extends GdUnitTestSuite',
+      '',
+      '',
+      ...head,
+      'func test_ok() -> void:',
+      '\tassert_int(1).is_equal(1)',
+      '',
+      '',
+      'func test_skip(_do_skip := true, _skip_reason := "not today") -> void:',
+      '\tassert_bool(false).is_true()',
+      '',
+    ].join('\n');
+  const after = (line: string): string[] => ['func after() -> void:', `\t${line}`, '', ''];
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    writeTree(project, {
+      'tests/after_error_test.gd': suiteOf(...after(`push_error("${error}")`)),
+      'tests/after_declared_test.gd': suiteOf(
+        `const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"after": ["${error}"]}`,
+        '',
+        '',
+        ...after(`push_error("${error}")`),
+      ),
+      'tests/after_print_test.gd': suiteOf(...after(`print("cleaned 'tmp'")`)),
+    });
+    const skipFault = (suite: string): string =>
+      `res://tests/${suite} > test_skip never ran: gdUnit4 skipped it, saying "not today"\n`;
+    const errored = test('tests/after_error_test.gd');
+    assert.ok(errored.said.includes(skipFault('after_error_test.gd')), errored.said);
+    assert.deepEqual(
+      errored.said.match(/an engine error in .+?(?=\. If )/g),
+      [`an engine error in res://tests/after_error_test.gd > after: ${error}`],
+      errored.said,
+    );
+    assert.match(errored.said, /^Failed: 2 problems, listed above\. Ran 1 case /m, errored.said);
+    const declared = test('tests/after_declared_test.gd');
+    assert.ok(declared.said.includes(skipFault('after_declared_test.gd')), declared.said);
+    assert.match(declared.said, /^Failed: 1 problem, listed above\. Ran 1 case /m, declared.said);
+    const printed = test('tests/after_print_test.gd');
+    assert.ok(printed.said.includes(skipFault('after_print_test.gd')), printed.said);
+    assert.match(printed.said, /^Failed: 1 problem, listed above\. Ran 1 case /m, printed.said);
+    await withStdioServer(
+      async (_call, request) => {
+        const answered = async (suite: string): Promise<unknown> => {
+          const response = await request(
+            'tools/call',
+            { name: 'project_test', arguments: { projectPath: project, path: `res://tests/${suite}` } },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          );
+          const blocks = asArray(get(response, 'result', 'content')).map((block) =>
+            String(get(block, 'text')),
+          );
+          return JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        };
+        const skipped = (suite: string): unknown[] => [
+          { test: `res://tests/${suite} > test_skip`, reason: 'not today' },
+        ];
+        const erroredAnswer = await answered('after_error_test.gd');
+        assert.deepEqual(
+          [
+            get(erroredAnswer, 'casesSkipped'),
+            get(erroredAnswer, 'engineErrors'),
+            asArray(get(erroredAnswer, 'undeclaredErrors')).map((one) => get(one, 'text')),
+          ],
+          [skipped('after_error_test.gd'), 1, [error]],
+          JSON.stringify(erroredAnswer),
+        );
+        const declaredAnswer = await answered('after_declared_test.gd');
+        assert.deepEqual(
+          [
+            get(declaredAnswer, 'casesSkipped'),
+            get(declaredAnswer, 'undeclaredErrors'),
+            get(declaredAnswer, 'declaredNotPrinted'),
+          ],
+          [skipped('after_declared_test.gd'), undefined, undefined],
+          JSON.stringify(declaredAnswer),
+        );
+        const printedAnswer = await answered('after_print_test.gd');
+        assert.deepEqual(
+          get(printedAnswer, 'casesSkipped'),
+          skipped('after_print_test.gd'),
+          JSON.stringify(printedAnswer),
+        );
+      },
+      { GODOT_PATH: engines.godotPath },
+    );
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
+ * A fed suite whose last case is skipped, the console printing [param under] below its skip heading
+ * as gdUnit4 does, and its report holding [param reason]. What the suite's after() prints follows
+ * the reason, before the statistics.
+ */
+function fedSkippedLast(under: readonly string[], reason: string): FedSuite {
+  return {
+    path: FED_A,
+    cases: [
+      fedCase(FED_A, 'test_ok'),
+      {
+        name: 'test_skip',
+        printed: [
+          caseLine(FED_A, 'test_skip', 'PASSED', '0ms'),
+          '  Report:',
+          '  This test is skipped!',
+          ...under,
+        ],
+        skipped: reason,
+      },
+    ],
+    closed: 'PASSED',
+  };
+}
+
+/** What gdharness test says of the case {@link fedSkippedLast} skips with [param reason]. */
+function fedSkipFault(reason: string): string {
+  return `${FED_A} > test_skip never ran: gdUnit4 skipped it, saying "${reason}"`;
+}
+
+const GONE_ERROR = "could not load 'res://gone.tres'";
+
+/**
+ * A skipped last case whose reason holds one apostrophe, and an after() printing an error ending in
+ * a quote, are two things in both tools once the report says where the reason ends: the error is an
+ * engine error, declared or not, and the reason is what the report holds.
+ */
+function testAnApostropheInASkipReasonLeavesAnAfterErrorToTheEngineInBothTools(): void {
+  const suite = fedSkippedLast(["  Reason: 'can't run'", '', '', `ERROR: ${GONE_ERROR}`], "can't run");
+  const skipped = [{ test: `${FED_A} > test_skip`, reason: "can't run" }];
+  const undeclared = fedRunAnswered([suite], 0, { logged: true, reported: true });
+  assert.deepEqual(
+    [
+      undeclared.answer['casesSkipped'],
+      undeclared.answer['engineErrors'],
+      asArray(undeclared.answer['undeclaredErrors']).map((one) => get(one, 'text')),
+    ],
+    [skipped, 1, [GONE_ERROR]],
+    'project_test',
+  );
+  assert.deepEqual(
+    undeclared.faults.map((fault) => fault.replace(/\. If .*/, '')),
+    [fedSkipFault("can't run"), `an engine error in ${FED_A} > after: ${GONE_ERROR}`],
+    'gdharness test',
+  );
+  const declared = fedRunAnswered([suite], 0, {
+    logged: true,
+    reported: true,
+    declared: { errors: { [FED_A]: { after: [GONE_ERROR] } }, warnings: {} },
+  });
+  assert.deepEqual(
+    [
+      declared.answer['casesSkipped'],
+      declared.answer['engineErrors'],
+      declared.answer['undeclaredErrors'],
+      declared.answer['declaredNotPrinted'],
+    ],
+    [skipped, 0, undefined, undefined],
+    'project_test, declared',
+  );
+  assert.deepEqual(declared.faults, [fedSkipFault("can't run")], 'gdharness test, declared');
+}
+
+/**
+ * A reason whose first line ends in a lone quote and whose next line reads as an engine error is
+ * both lines whole in both tools, with no engine error listed.
+ */
+function testASkipReasonWhoseFirstLineEndsInAQuoteIsBothLinesInBothTools(): void {
+  const reason = "ab'\nERROR: cd";
+  const { answer, faults } = fedRunAnswered(
+    [fedSkippedLast(["  Reason: 'ab'", "ERROR: cd'", '', ''], reason)],
+    0,
+    { logged: true, reported: true },
+  );
+  assert.deepEqual(
+    [answer['casesSkipped'], answer['engineErrors'], answer['engineEntries'], answer['undeclaredErrors']],
+    [[{ test: `${FED_A} > test_skip`, reason }], 0, [], undefined],
+    'project_test',
+  );
+  assert.deepEqual(faults, [fedSkipFault(reason)], 'gdharness test');
+}
+
+/**
+ * A reason of several lines with its quotes paired reads the same from the report as from the
+ * console alone, as a run whose report misses the skip reads it.
+ */
+function testAPairedSkipReasonReadsTheSameFromTheReportInBothTools(): void {
+  const reason = "said 'no'\n\nthen left";
+  const suite = fedSkippedLast(["  Reason: 'said 'no'", '', "then left'", '', ''], reason);
+  const fromReport = fedRunAnswered([suite], 0, { logged: true, reported: true });
+  const unreported = { ...suite, cases: suite.cases.map(({ skipped: _skipped, ...one }) => one) };
+  const fromConsole = fedRunAnswered([unreported], 0, { logged: true, reported: true });
+  const read = (run: typeof fromReport): unknown[] => [
+    run.answer['casesSkipped'],
+    run.answer['engineErrors'],
+    run.answer['engineEntries'],
+    run.faults,
+  ];
+  assert.deepEqual(read(fromReport), read(fromConsole), 'report or console');
+  assert.deepEqual(
+    [fromReport.answer['casesSkipped'], fromReport.answer['engineErrors'], fromReport.faults],
+    [[{ test: `${FED_A} > test_skip`, reason }], 0, [fedSkipFault(reason)]],
+  );
+}
+
+/**
+ * A run with no report reads each skip reason as the line its quotes close, so the after() error
+ * below an apostrophe's reason stays the engine's in both tools.
+ */
+function testARunWithNoReportReadsItsSkipReasonsFromTheConsoleInBothTools(): void {
+  const { answer, faults } = fedRunAnswered(
+    [fedSkippedLast(["  Reason: 'can't run'", '', '', `ERROR: ${GONE_ERROR}`], "can't run")],
+    0,
+    { logged: true },
+  );
+  assert.deepEqual(
+    [answer['casesSkipped'], answer['engineErrors']],
+    [[{ test: `${FED_A} > test_skip`, reason: "can't run" }], 1],
+    'project_test',
+  );
+  assert.deepEqual(
+    faults.map((fault) => fault.replace(/\. If .*/, '')),
+    [fedSkipFault("can't run"), `an engine error in ${FED_A} > after: ${GONE_ERROR}`],
+    'gdharness test',
+  );
+}
+
+/**
+ * Where the report and the console disagree on a reason's text, the console's lines are the reason
+ * over as many lines as the report's has, and they are no engine output in either tool.
+ */
+function testAReportSaysHowManyConsoleLinesASkipReasonCoversInBothTools(): void {
+  const reason = "from the console\nERROR: and the engine's line";
+  const { answer, faults } = fedRunAnswered(
+    [fedSkippedLast(["  Reason: 'from the console", "ERROR: and the engine's line'", '', ''], 'one\ntwo')],
+    0,
+    { logged: true, reported: true },
+  );
+  assert.deepEqual(
+    [answer['casesSkipped'], answer['engineErrors'], answer['undeclaredErrors']],
+    [[{ test: `${FED_A} > test_skip`, reason }], 0, undefined],
+    'project_test',
+  );
+  assert.deepEqual(faults, [fedSkipFault(reason)], 'gdharness test');
+}
+
+/**
+ * Where the console's lines do not close the reason the report's line count gives, the report's text
+ * is the reason, and the lines after it are read as any other in both tools.
+ */
+function testASkipReasonTheConsoleDoesNotCloseIsTheReportsInBothTools(): void {
+  const { answer, faults } = fedRunAnswered(
+    [fedSkippedLast(["  Reason: 'not closed here", "ERROR: an engine error'", '', ''], 'one line')],
+    0,
+    { logged: true, reported: true },
+  );
+  assert.deepEqual(
+    [answer['casesSkipped'], answer['engineErrors']],
+    [[{ test: `${FED_A} > test_skip`, reason: 'one line' }], 1],
+    'project_test',
+  );
+  assert.deepEqual(
+    faults.map((fault) => fault.replace(/\. If .*/, '')),
+    [fedSkipFault('one line'), `an engine error in ${FED_A} > after: an engine error'`],
+    'gdharness test',
+  );
+}
+
+/**
+ * Both tools on a skipped last case whose console printed [param printed] as its reason, over its
+ * lines, and whose report holds [param written], as gdUnit4's writer left it: the reason is the
+ * console's text, and no line of it is an engine error.
+ */
+function assertTheConsolesSkipReasonIsRead(printed: string, written: string): void {
+  const under = printed.split('\n').map((line, at, all) => {
+    const opened = at === 0 ? `  Reason: '${line}` : line;
+    return at === all.length - 1 ? `${opened}'` : opened;
+  });
+  const { answer, faults } = fedRunAnswered([fedSkippedLast([...under, '', ''], written)], 0, {
+    logged: true,
+    reported: true,
+  });
+  assert.deepEqual(
+    [answer['casesSkipped'], answer['engineErrors'], answer['undeclaredErrors']],
+    [[{ test: `${FED_A} > test_skip`, reason: printed }], 0, undefined],
+    `project_test: ${printed}`,
+  );
+  assert.deepEqual(faults, [fedSkipFault(printed)], `gdharness test: ${printed}`);
+}
+
+/** gdUnit4's report writer drops `[blocked]` as a tag, and the console keeps it, in both tools. */
+function testASkipReasonOpeningOnABracketedWordKeepsItInBothTools(): void {
+  assertTheConsolesSkipReasonIsRead('[blocked] by the physics fix', ' by the physics fix');
+}
+
+/** gdUnit4's report writer drops `[bug 7]` as a tag, and the console keeps it, in both tools. */
+function testASkipReasonHoldingABracketedWordKeepsItInBothTools(): void {
+  assertTheConsolesSkipReasonIsRead('see [bug 7] here', 'see  here');
+}
+
+/**
+ * A reason holding `</skipped>` and then `]]>`, which gdUnit4 writes raw into its report, is read
+ * whole in both tools.
+ */
+function testASkipReasonHoldingTheElementsEndAndTheCdataEndIsReadWholeInBothTools(): void {
+  assertTheConsolesSkipReasonIsRead('a </skipped> b ]]> c', 'a </skipped> b ]]> c');
+}
+
+/**
+ * A reason over three lines, the middle one an `ERROR:` line with a bracketed word the report
+ * drops, is its three lines whole in both tools.
+ */
+function testASkipReasonOverThreeLinesWithAnErrorLineIsReadWholeInBothTools(): void {
+  assertTheConsolesSkipReasonIsRead('one\nERROR: two [bug 7]\nthree', 'one\nERROR: two \nthree');
+}
+
+/**
+ * A case only the report holds as skipped, and a skip only the console printed, are judged as
+ * without a report.
+ */
+function testASkipOnlyOneOfTheReportAndTheConsoleHoldsIsJudgedAsBefore(): void {
+  const reportOnly: FedSuite = {
+    path: FED_A,
+    cases: [
+      { ...fedCase(FED_A, 'test_later'), skipped: 'the console said nothing' },
+      fedCase(FED_A, 'test_a'),
+    ],
+    closed: 'PASSED',
+  };
+  const consoleOnly: FedSuite = {
+    path: FED_A,
+    cases: [
+      fedCase(FED_A, 'test_ok'),
+      {
+        name: 'test_skip',
+        printed: [
+          caseLine(FED_A, 'test_skip', 'PASSED', '0ms'),
+          '  Report:',
+          '  This test is skipped!',
+          "  Reason: 'the report said nothing'",
+          '',
+          '',
+        ],
+      },
+    ],
+    closed: 'PASSED',
+  };
+  for (const suite of [reportOnly, consoleOnly]) {
+    assert.deepEqual(
+      fedRunAnswered([suite], 0, { logged: true, reported: true }),
+      fedRunAnswered([suite], 0, { logged: true }),
+      suite.cases[0]?.name ?? '',
+    );
+  }
+  assert.deepEqual(
+    [
+      fedRunAnswered([consoleOnly], 0, { logged: true, reported: true }).answer['casesSkipped'],
+      fedRunAnswered([reportOnly], 0, { logged: true, reported: true }).answer['casesSkipped'],
+    ],
+    [
+      [{ test: `${FED_A} > test_skip`, reason: 'the report said nothing' }],
+      [{ test: `${FED_A} > test_later`, reason: 'the console said nothing' }],
+    ],
+  );
+}
+
+/** A reason holding the end of its report's CDATA, `]]>`, is read whole in both tools. */
+function testASkipReasonHoldingTheCdataEndIsReadWholeInBothTools(): void {
+  const reason = "x ]]> can't";
+  const { answer, faults } = fedRunAnswered([fedSkippedLast([`  Reason: '${reason}'`, '', ''], reason)], 0, {
+    logged: true,
+    reported: true,
+  });
+  assert.deepEqual(answer['casesSkipped'], [{ test: `${FED_A} > test_skip`, reason }], 'project_test');
+  assert.deepEqual(faults, [fedSkipFault(reason)], 'gdharness test');
+}
+
+const FED_LATER = 'res://test/b_test.gd';
+
+/**
+ * The console of a run that wrote no report: {@link fedSkippedLast}'s suite with the reason `can't
+ * run` and an after() erroring with a quote at its end, then a later suite that started a case and
+ * printed [param later] before the engine ended.
+ */
+function apostropheBeforeNoReport(later: readonly string[]): string {
+  const under = [
+    "  Reason: 'can't run'",
+    '',
+    '',
+    `ERROR: ${GONE_ERROR}`,
+    '   at: push_error (core/variant/variant_utility.cpp:1023)',
+  ];
+  return [
+    'Godot Engine v4.7.2.stable.official - https://godotengine.org',
+    `Run Test Suite: ${FED_A}`,
+    ...fedSkippedLast(under, "can't run").cases.flatMap((one) => [
+      caseLine(FED_A, one.name, 'STARTED'),
+      ...one.printed,
+    ]),
+    'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 1 skipped | 0 orphans | PASSED 40ms',
+    '',
+    '',
+    `Run Test Suite: ${FED_LATER}`,
+    caseLine(FED_LATER, 'test_later', 'STARTED'),
+    ...later,
+  ].join('\n');
+}
+
+/**
+ * Both tools on {@link apostropheBeforeNoReport} with [param later], for an engine that ended as
+ * [param end] says: the reason is the line its quotes close, and the after() error is the engine's,
+ * settled when declared. gdharness test judges the console, and project_test reads the log file.
+ */
+function assertANoReportRunReadsTheApostrophe(later: readonly string[], end: EngineEnd): void {
+  const printed = apostropheBeforeNoReport(later);
+  const judged = (errors: Expected['errors']): readonly string[] =>
+    judgeEngine(
+      readRun(printed),
+      {
+        suites: [
+          { path: FED_A, cases: ['test_ok', 'test_skip'] },
+          { path: FED_LATER, cases: ['test_later'] },
+        ],
+        expected: { errors, warnings: {} },
+      },
+      end,
+    ).faults;
+  const undeclared = judged({});
+  assert.ok(undeclared.includes(fedSkipFault("can't run")), undeclared.join('\n'));
+  assert.ok(
+    undeclared.some((fault) => fault.startsWith(`an engine error in ${FED_A} > after: ${GONE_ERROR}. `)),
+    undeclared.join('\n'),
+  );
+  const declared = judged({ [FED_A]: { after: [GONE_ERROR] } });
+  assert.ok(declared.includes(fedSkipFault("can't run")), declared.join('\n'));
+  assert.ok(!declared.some((fault) => fault.includes(GONE_ERROR)), declared.join('\n'));
+  const folder = mkdtempSync(join(tmpdir(), 'gdharness-no-report-'));
+  try {
+    const path = join(folder, 'engine.log');
+    writeFileSync(path, `${printed}\n`);
+    const read = readEngineLog(path, [], NONE_EXPECTED);
+    assert.deepEqual(
+      [
+        read.skipped,
+        read.errors.filter((one) => one.suite === FED_A).map((one) => [one.during, one.text]),
+        read.reasonHeadlines,
+      ],
+      [[{ suite: FED_A, name: 'test_skip', reason: "can't run", cases: 1 }], [['after', GONE_ERROR]], []],
+      'project_test',
+    );
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+/** A run its deadline ended in a later suite, which wrote no report, reads the apostrophe's reason in both tools. */
+function testARunTheDeadlineEndedReadsAnApostrophesSkipReasonInBothTools(): void {
+  assertANoReportRunReadsTheApostrophe([], {
+    code: null,
+    signal: null,
+    ended: `the engine ran past the 20 s deadline while running ${FED_LATER}, so it was ended`,
+  });
+}
+
+/** A run that crashed in a later suite, which wrote no report, reads the apostrophe's reason in both tools. */
+function testARunThatCrashedLaterReadsAnApostrophesSkipReasonInBothTools(): void {
+  assertANoReportRunReadsTheApostrophe(
+    [
+      'CrashHandlerException: Program crashed with signal 11',
+      'Engine version: Godot Engine v4.7.2.stable.official',
+      '-- END OF C++ BACKTRACE --',
+    ],
+    { code: null, signal: 'SIGSEGV', ended: null },
+  );
+}
+
+/** A run ended past the log limit in a later suite, which wrote no report, reads the apostrophe's reason in both tools. */
+function testARunPastTheLogLimitReadsAnApostrophesSkipReasonInBothTools(): void {
+  assertANoReportRunReadsTheApostrophe(['printed on and on'], {
+    code: null,
+    signal: null,
+    ended: pastTheLogLimit(FED_LATER),
+  });
+}
+
+/**
+ * A reason with one apostrophe on a skipped last case, and an after() erroring with a quote at its end,
+ * fail a real run of both tools with the skip and the engine error each: the report gdUnit4 wrote
+ * ends the reason where the console cannot.
+ */
+async function testARealSkipReasonWithAnApostropheLeavesTheAfterErrorToBothTools(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const suite = [
+    'extends GdUnitTestSuite',
+    '',
+    '',
+    'func after() -> void:',
+    `\tpush_error("${GONE_ERROR}")`,
+    '',
+    '',
+    'func test_ok() -> void:',
+    '\tassert_int(1).is_equal(1)',
+    '',
+    '',
+    'func test_skip(_do_skip := true, _skip_reason := "can\'t run") -> void:',
+    '\tassert_bool(false).is_true()',
+    '',
+  ].join('\n');
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    writeTree(project, { 'tests/apostrophe_test.gd': suite });
+    const ran = test('tests/apostrophe_test.gd');
+    assert.ok(
+      ran.said.includes(
+        'res://tests/apostrophe_test.gd > test_skip never ran: gdUnit4 skipped it, saying "can\'t run"\n',
+      ),
+      ran.said,
+    );
+    assert.deepEqual(
+      ran.said.match(/an engine error in .+?(?=\. If )/g),
+      [`an engine error in res://tests/apostrophe_test.gd > after: ${GONE_ERROR}`],
+      ran.said,
+    );
+    await withStdioServer(
+      async (_call, request) => {
+        const response = await request(
+          'tools/call',
+          {
+            name: 'project_test',
+            arguments: { projectPath: project, path: 'res://tests/apostrophe_test.gd' },
+          },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        const answer = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        assert.deepEqual(
+          [
+            get(answer, 'casesSkipped'),
+            get(answer, 'engineErrors'),
+            asArray(get(answer, 'undeclaredErrors')).map((one) => get(one, 'text')),
+          ],
+          [[{ test: 'res://tests/apostrophe_test.gd > test_skip', reason: "can't run" }], 1, [GONE_ERROR]],
+          blocks.join('\n'),
+        );
+      },
+      { GODOT_PATH: engines.godotPath },
+    );
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
+ * A skip reason the output cut off, in a run whose report does not hold it, is listed by its first
+ * line, and both tools say it was cut.
+ */
+function testASkipReasonCutOffIsSaidToBeCutInBothTools(): void {
+  const { answer, faults } = fedRunAnswered(
+    [
+      {
+        path: FED_A,
+        cases: [
+          fedCase(FED_A, 'test_ok'),
+          {
+            name: 'test_cut',
+            printed: [
+              caseLine(FED_A, 'test_cut', 'PASSED', '0ms'),
+              '  Report:',
+              '  This test is skipped!',
+              "  Reason: 'line one",
+              'line tw',
+            ],
+          },
+        ],
+        closed: 'UNCLOSED',
+      },
+    ],
+    0,
+    { reported: true },
+  );
+  assert.deepEqual(
+    [answer['passed'], answer['casesSkipped']],
+    [false, [{ test: `${FED_A} > test_cut`, reason: 'line one', cut: true }]],
+    'project_test',
+  );
+  assert.ok(
+    faults.includes(
+      `${FED_A} > test_cut never ran: gdUnit4 skipped it, saying "line one" before the reason was cut off`,
+    ),
+    faults.join('\n'),
+  );
+}
+
+/**
+ * A skip reason's line headed `WARNING:` is no engine warning in project_test's count, which still
+ * counts the engine's own warning in the case that ran.
+ */
+function testASkipReasonsWarningLineLeavesProjectTestsWarningCount(): void {
+  const reason = 'hmm\nWARNING: a line of the reason';
+  const { answer } = fedRunAnswered(
+    [
+      {
+        path: FED_A,
+        cases: [
+          {
+            name: 'test_runs',
+            printed: ['WARNING: a real engine warning', caseLine(FED_A, 'test_runs', 'PASSED', '4ms'), ''],
+          },
+          {
+            name: 'test_skip',
+            printed: [
+              caseLine(FED_A, 'test_skip', 'PASSED', '0ms'),
+              '  Report:',
+              '  This test is skipped!',
+              ...`  Reason: '${reason}'`.split('\n'),
+              '',
+              '',
+            ],
+            skipped: reason,
+          },
+        ],
+        closed: 'PASSED',
+      },
+    ],
+    0,
+    { logged: true, reported: true },
+  );
+  assert.deepEqual(
+    [answer['casesSkipped'], answer['engineWarnings']],
+    [[{ test: `${FED_A} > test_skip`, reason }], 1],
+    JSON.stringify(answer),
+  );
+}
+
 const TESTS: (() => void | Promise<void>)[] = [
   testTurnsRunInOrderAFailureBlocksNoneAndASettledKeyIsForgotten,
   testRegressionPartsCoverEveryTestOnceAndBalance,
@@ -135606,7 +127595,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDiagnosticsJoiningAClassRebuildOnOneSlotBothAnswer,
   testDiagnosticsJoiningAClassRebuildHoldNoIdleSlot,
   testScriptDiagnosticsKeepsOneSlotForAllItsEngines,
-  testDiagnosticsJoiningARebuildBetweenItsEnginesGiveTheirSlotBack,
   testScriptCreateHoldsNoSlotWhileItAsksTheEditor,
   testScriptDiagnosticsHoldsNoSlotWhileTheEditorScans,
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
@@ -135830,7 +127818,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheScriptsGodotNeverFreesAreFound,
   testAnExportAnnotationHoldingACallIsFound,
   testADeadLockHeldOpenIsTakenOverOnceLetGo,
-  testASlotFileHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testABootNoteHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testAClassCacheHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testABridgeAnnouncementHeldShutIsWaitedOnWithoutStoppingTheProcess,
@@ -135856,135 +127843,55 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnExtensionListHeldShutIsWaitedOnWithoutStoppingTheProcess,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testATakeSweepsGoneLocksPastTheCount,
-  testALiveReservationShrinksTheRoomByWhatItOwes,
-  testAGoneHoldersReservationCountsNothing,
-  testSeveralLiveReservationsSum,
-  testAMalformedReservationCountsNothingAndThrowsNothing,
-  testAMarkNamedInTheReservedVariableCountsNothing,
-  testSeveralNamedMarksAreAllSkipped,
-  testAMarkPathSpeltDifferentlyStillMatches,
-  testTheFirstEngineWaitsOnceForTheWholeRun,
-  testTheFirstEngineStartsAtOnceWhenTheRoomFitsBesideAReservation,
-  testALaterReservationHoldsNoEngineAfterTheFirst,
-  testABadSlotCountNeverStopsTheRoomBeingRead,
-  testTheFirstEngineWaitsWhileReservedMemoryLeavesNoRoom,
-  testTheFirstEngineStartsOnceTheReservationIsGone,
-  testTheFirstEngineStartsAnywayAfterTheReservedWaitLimit,
-  testTheFirstEngineStartsAtOnceWithNothingReserved,
-  testReservationsAreReadFromTheMachineFolderNotThePool,
-  testTheRoomEveryReaderGetsIsLessTheReservations,
-  testATestRunWaitsForReservedMemoryBeforeItsFirstEngine,
-  testTheSlotSweepLeavesReservationsAlone,
   testASlotWaitLooksWhenTheSlotsChange,
   testSuitePassesKeyAlikeInEveryCheckout,
-  testTakersWaitTheirTurn,
-  testAHighPriorityTakerGoesBeforeEarlierYoungSideWork,
-  testAGameHeldBackByTheGamesLimitClaimsNoSlotAheadOfACall,
-  testAGameThatCanNeverRunLeavesTheGatesEngineItsOnlySlot,
-  testACallBehindACappedGameDoesNotSayItLeavesTheSlotToIt,
   testTwoTakersThatPlaceEachOtherAheadDoNotLeaveTheSlotToEachOtherForGood,
-  testATakerAheadThatWantsMoreSlotsThanAreFreeIsStillWaitedFor,
   testATakerAheadThatStoppedLookingIsDroppedAfterTheYield,
-  testGamesTakeEverySlotButTheLastKeptOneWithNoGateQueued,
-  testAGameNeverTakesTheLastKeptSlotWithAGateQueued,
-  testGamesTakeEverySlotButTheLastKeptOneOnTwelveSlots,
-  testGamesTakeEverySlotButTheLastKeptOneOnSixteenSlots,
-  testTheGamesLimitLineNamesTheLimitAndNotTheGamesHoldingSlots,
-  testNoGameRunsOnTwoSlotsWhileAGateIsQueued,
-  testAGameAheadOfAGateTakesNoSlotOfTheGates,
   testARingOfThreeTakesTheFreeSlotAtTheYield,
   testACallBehindTwoGamesThatLeaveItTheSlotTakesItAtTheYield,
   testARingTakesTheFreeSlotAtTheYieldWhoeverItIsLeftTo,
   testASlotHeldForALookStartsItsYieldAgain,
   testASlowTakerAheadThatTakesInsideTheYieldIsNeverPassed,
-  testATakerAheadWantingTwoIsWaitedForThroughItsDrain,
-  testSideWorkNeverPassesAGatesEngineWhileAGateIsQueued,
-  testAGamesWaitLineNamesTheKeptSlotsGamesMayTake,
-  testAGamesWaitLineWithNoGateQueuedNamesTheSlotLeftForACall,
-  testAGamesAnswerNamesTheKeptSlotsGamesMayTake,
-  testEveryOtherTakersWaitLinesStayAsTheyWere,
-  testAGameRunsOnOneTwoAndThreeSlots,
-  testAGameTakesTheSlotAWaiterPassedForTheLastKeptSlotIsGiven,
-  testACallTakesTheKeptSlotSideWorkPassedForAGateSlotIsGiven,
-  testASlotGivenToEachTakerAheadInTurnIsTakenAtItsYield,
   testEachFreeSlotCountsItsOwnYield,
-  testTheSlotAPassedWaiterIsGivenIsTakenAtItsYieldAndNotBefore,
-  testAGameOnOneSlotTakesNothingWhileAGateIsQueued,
-  testAGatesEngineGivenASlotInALaterPassIsDroppedOnceItStopsLooking,
-  testAWaiterInItsDrainGivenASlotInALaterPassIsDroppedOnceItStopsLooking,
-  testATakerWaitedForAndGivenASlotInALaterPassIsKeptWhileItLooks,
-  testATakerGivenASlotInTheFirstPassIsDroppedOnceItStopsLooking,
-  testAGatesEngineGivenASlotInALaterPassIsDroppedAtItsYieldAndNotBefore,
-  testAHighPriorityWaiterThatStoppedLookingHoldsNoOtherOneOffBack,
-  testAWaitingMarkNamesItsRepository,
   testARepositoryIsNamedByTheFolderHoldingItsSharedGitFolder,
-  testATakeForAListedRepositoryMarksItsWaitWithTheRepository,
-  testAPriorityFileThatCannotBeReadNamesNoRepository,
-  testThePriorityFileIsOnlyRead,
-  testALookWithNoLineOfItsOwnHasTheProjectsPriority,
-  testATakeForAProjectCarriesItsRepositoryWhateverTakesIt,
-  testAListedRepositoryGoesBeforeEveryOtherOneOffAndAfterGateWork,
-  testAPriorityListChangedWhileTakersWaitReordersThemAtTheNextLook,
-  testABadPriorityFileGivesNormalOrderAndIsSaidOnce,
-  testANormalOneOffPast600SecondsStandsWithGateWorkBesideAListedWaiter,
   testALockOfATakeForAProjectInGitIsAsThatOfATakeForNone,
-  testARunsMemoryMarkNamesTheRepositoryOfItsProject,
-  testAServerSaysAMalformedPriorityListOnceInItsAnswers,
-  testAGateMarkOfAListedRepositoryIsNotHighPriority,
-  testAGatesOwnLineOfAListedRepositoryIsNotHighPriority,
-  testAnEmptyRepositoryInAMarkReadsAsNone,
   testEveryGameTheServerStartsTakesItsSlotForItsProject,
   testARepositoryIsNamedFromItsRealPathAndNeverForABareOne,
   testAnUnreadableWorktreeGitFileListsNoWorktrees,
-  testAMarkBegunInTheSameMillisecondIsRankedByItsExactSince,
   testAWaitForASlotKeepsAMarkUntilItEnds,
-  testAStarvedMeasurementHoldsSideEngines,
-  testATakerHeldBackByAClaimDoesNotSayItLooks,
-  testAGameHeldBackByTheGamesLimitDoesNotSayItLooks,
-  testGatesInTheQueueKeepTheirSlots,
-  testSideWorkTakesOnlyKeptAndSpareSlotsWhileAGateWaitsWhateverItsAge,
-  testASeatedMarkWithNoSpareGivesAYoungAndAnAgedTakeNoGateSlot,
-  testSideWorkTakesNoGateSlotWhileALiveGateHasNoFreshCount,
-  testAGateSlotNoEngineTakesForTenSecondsIsLentToSideWork,
-  testAGateThatTakesItsSlotsInTimeLendsNothing,
-  testTwoSeatedGatesHaveTheirOwedSlotsLentOnTheirOwnSeats,
-  testNothingIsLentOnAStaleCountOrToAGateNotYetSeated,
-  testAGateSeatedHalfASecondAgoIsOwedItsSlotsWhateverTheOlderGatesHold,
-  testAGatesFreePartDoesNotDependOnTheSlotNumbersItsEnginesHold,
-  testTwoGatesRunningHalfTheirShareEachLendTheirFreeHalfAfterTenSeconds,
-  testAnEngineThatEndsGrowsItsGatesFreePart,
-  testAnEngineBelowAGatesProcessCountsToThatGate,
-  testNothingIsLentWhereTheProcessTableCannotBeRead,
-  testSideWorkNeverTakesMoreThanTheFreeSlotsOrAnEngineBack,
-  testSideWorkKeepsEverySlotItIsLent,
-  testASlotFreedWhileTheGateStartsLanesIsNotLentToAnOldLook,
-  testAGateStartingLanesSecondsApartGetsAllOfThem,
-  testTheLendCountsEveryGateEngineAsTheQueueDoes,
-  testAQuietGateRunningTwoOfSixLendsFour,
-  testASlotGivenBackFiftyMillisecondsAgoIsNotLent,
-  testALookWithNoSlotFreedTenSecondsReadsNoProcessTable,
-  testTwentyLooksOverFourSecondsReadTheProcessTableOnce,
-  testALockWrittenAfterAKeptProcessTableIsPlacedByANewReading,
-  testASlotWhoseFreedMarkCannotBeWrittenIsGivenBackAndReadsAsUnmarked,
-  testTheSharedLendingTablesAnswerAsTheQueueDoes,
-  testACountFromBeforeASeatIsStaleForSideWork,
-  testTwoSideTakesInARowGetOneSpareGateSlotBetweenThem,
-  testTwoConcurrentSideTakesUnderOneSpareSlotNeverHoldTwoGateSlots,
-  testASideTakeReadsTheFreeSlotsOnce,
-  testEnginesTogetherStayInsideTheMachinesMemory,
-  testALockWithNoMemoryCountsOneAndAHalfGiBASlot,
   testALockTakenBeyondTheBudgetByARaceIsGivenBack,
-  testTheFirstEngineOnAMachineTakesWhateverItNeeds,
   testALocksMemoryIsThePeakKeptCappedAtTheCeiling,
-  testAMemoryWaiterKeepsItsPlaceInLine,
+  testAMemoryWaiterDoesNotHoldBackOneThatFits,
+  testTwelveTakersOnFourSlotsTakeInTheOrderTheyBeganToWait,
+  testTheContractsLockIsWhatTheCodeWrites,
+  testTheContractsWaitingMarkIsWhatTheCodeWrites,
+  testTheContractsLineOrderIsWhatTheCodeDoes,
+  testTheContractsCapIsTheCountFile,
+  testAWaiterThatStoppedLookingHoldsNoSlotFromALaterTake,
+  testAMarkInSecondsOrWithNoSinceStandsInLineByItsTime,
+  testAnOlderWaiterGoesBeforeNewerMarksInSecondsOrWithNoSince,
+  testACountLoweredBelowTheSlotsHeldStartsNothingUntilEnoughGo,
+  testALockTakenPastALoweredCountByARaceIsGivenBack,
+  testLocksWrittenInOneMillisecondAreOrderedBySlot,
+  testLocksOfAMemoryRaceWrittenInOneMillisecondAreOrderedBySlot,
+  testAStartIsReadAgainAfterTenSecondsAndAReusedPidFreesItsLock,
+  testTheFirstEngineOnAMachineStartsWhateverMemoryReads,
+  testALockWithNoMemoryOwesOneAndAHalfGiBASlot,
+  testALockPastTheCountOwesItsMemory,
+  testTheMemoryCheckKeepsFourGiBBack,
+  testTheContractsMemoryCheckIsWhatTheCodeDoes,
+  testATakeOnMacOSIsNeverHeldForMemory,
+  testTwoStopsOfOneKeeperSignalItsGameOnce,
+  testTheContractsCleanupIsWhatTheCodeDoes,
+  testFilesOfRemovedRulesLeftInTheFolderChangeNothing,
+  testLanesOnOneFreeSlotStartOneAndTakeTheRestBehindOlderWaiters,
+  testTheCapHoldsOnEveryCountAndTheCountFileReplacesIt,
+  testEnginesHoldingTheirPeaksOweNothingAndAnotherStartsOnFreeMemory,
+  testEnginesStillGrowingKeepAnotherWaitingUntilTheOwedSumFalls,
   testTheMemoryWaitIsSaidInWholeLines,
   testAnEndJustPastTheCeilingSaysFiguresThatDiffer,
   testTheMemoryEndOfAnotherServersGameIsNotedBesideItsRun,
   testTheFirstMemoryEndNotedOfARunStays,
-  testSmallMachinesNeverWaitForMemoryWithinTheirSlots,
-  testTheBudgetCountsOnlyTheLocksOfTheSlotsCounted,
-  testASlotWaiterThatComesToWaitForMemoryKeepsItsPlace,
-  testMemoryWaitersMakeNoLocksWhileTheyWait,
   testAGamesLockHandedOnKeepsItsMemory,
   testACallsEngineWithNoToolCountsTheHeadlessPeak,
   testAnEndJustPastTheCeilingIsSaidInOneSentenceWithFiguresThatDiffer,
@@ -136006,27 +127913,13 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGamesKeeperRaisesTheSlotItHolds,
   testARaiseNotWrittenIsAskedAgain,
   testAFollowedEnginePastItsCapRaisesItsSlotToTheCap,
-  testTheNewerOfTwoSideTakesPastTheShareGivesItsGateSlotBack,
-  testACountBegunInTheTickOfASeatIsStaleForSideWork,
-  testATakeInTheTickOfTheCountComesOffIt,
   testASlotTakenOverIsMadeInPlace,
-  testATakeJudgesTheCountItReadOnce,
-  testACountWrittenWholeOrWithAFractionIsRead,
   testAFileMadeInTheSlotsFolderIsNeverReadEmpty,
   testTwoProcessesMakingTheSameLockNeverOverwriteEachOther,
   testTheSlotSweepJudgesStagedFilesByTheirWritersName,
   testASlotLockIsCreatedWithoutAStagedFile,
-  testEveryReaderHoldsAnEmptySlotLockAsHeld,
-  testAnEmptySlotLockAmongTheKeptSlotsStopsAFurtherGame,
-  testATakerAheadClaimsTheGateSlotsItsKindMayTake,
   testAFileTakenBesideTheSlotsIsMadeThroughItsStagedFile,
-  testAPythonQueueGateQueuedFirstGoesBeforeAGdharnessSideTaker,
-  testARunFollowsTheLanesAGateWrites,
   testAShareHoldsNoMoreThanTwoMinutesOfWork,
-  testALanePastTheLanesToldGivesItsSlotBackAndTakesItAgain,
-  testAFallWhileEveryShareIsOutEndsTheParkedLanes,
-  testAParkedLaneEndsWhenTheRunFails,
-  testAMarkNotTakenStillLetsTheRunFallToTheLanesTold,
   testEverySlotVariableTheSourcesReadIsClearedForAFixture,
   testTheLimitedRunEndsACommandThatWillNotEndAndKeepsTheCodeOfOneThatDoes,
   testATimerATestLeavesRunningIsNamedWithTheTestThatSetIt,
@@ -136038,7 +127931,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineFinishingItsShareTakesTheNextInTheSameProcess,
   testTheLastShareEndsTheEngineAndALaneWaitingForASlotStopsWaiting,
   testARunHeldByMemoryStartsAnEngineForEachShare,
-  testALaneToldToStopGivesItsSlotBackBetweenShares,
   testARunDealtSharesOverOneSlotStartsOneEngineForThem,
   testAShareInAReusedEngineHasNoStartTime,
   testAWindowedEngineIsNotReusedForHeadlessShares,
@@ -136055,20 +127947,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFailedEngineBesideAStarvedOneIsNotRunToPassOnASecondTry,
   testAHungShareInAReusedEngineIsEndedByTheDeadlineOfItsOwn,
   testARunNotDealtInSharesStartsEveryEngineForItsOwnPart,
-  testALaneTakesNoShareOnceTheFileTellsFewerThanItWaited,
   testALaneWaitingForMemoryHoldsNoSlot,
-  testALaneStoppedInItsSlotWaitHoldsNoMemory,
   testALaneJudgesMemoryAgainOnceItHoldsItsSlot,
   testALaneJudgesMemoryAgainAtTheTakeAfterAMemoryWait,
   testTwoRunsSharingSlotsStartPastTheRoomOnlyWithNothingGoing,
-  testAParkedLanesSlotGoesToTheMachineNotTheCheck,
-  testARunBegunAtItsCeilingStillFollowsTheLanesFile,
-  testAWaitForSeveralSlotsKeepsThemWhileItKeepsLooking,
-  testATakeInsideAJobWaitsOnTheLentSlotAndMarksNothing,
-  testTheSlotCountIsHeldToTheMemoryThereIs,
-  testAMarkWantingSeveralSlotsHasThemLeftToItForItsDrain,
-  testAProgramInsideAJobTakesNoSlotBesideTheOneItIsLent,
-  testAnEngineOnASlotLendsItToWhatItStarts,
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
   testARestartedCountDoesNotTakeWorkFromBeforeTheRestart,
   testASuiteIsFoundUnderAnySpellingOfItsPath,
@@ -136158,43 +128040,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testSlotlessEnginesOfOneProjectRunOneAtATime,
   testAWaitForTheProjectsLockIsToldAsASlotWait,
   testADeadHoldersProjectLockIsTakenOver,
-  testAProjectLockWithADigitKeyLeavesNoFreedMark,
   testTheClassesCommandSaysItWaitsForItsProjectsLock,
   testInOneSlotHoldsOneSlotAndAWaitGivesItBack,
   testAProjectWaitNamesTheHolderAtEachLine,
-  testASlotCommandGrantsTheSlotAnEngineRunsOn,
-  testASlotCommandRefusalFailsTheStartWithItsReason,
-  testASlotCommandThatDoesNotAnswerFailsTheStartWithTheCause,
-  testASlotCommandSeesEndOfInputWhenAServerStartLetsGo,
-  testACommandThatIgnoresTheEndOfItsInputIsEndedAfterAWait,
-  testAKeptRunUnderASlotCommandIsHandedToItsKeeper,
-  testALiveEngineDoesNotHoldTheCommandsInputOpen,
-  testASlotCommandServesTheSlotsOfATestRun,
-  testAWaitForAGrantIsSaidToTheCallThatWaits,
-  testACancelledWaitForAGrantEndsTheCommandsInput,
-  testTheWaitForAGrantEndsAtTheCallsDeadline,
-  testAKilledGdharnessLetsTheCommandSeeEndOfInput,
-  testAnInheritedSlotCallsNoSlotCommand,
-  testASlotCommandIsToldAGatesTakeIsAGate,
-  testASlotCommandIsToldQueueWorkIsSideWork,
-  testASlotCommandIsToldAnythingElseIsAOneOff,
-  testAGrantIsHandedOnThroughTheCommand,
-  testACallAnswersWithWhatItsSlotCommandSaid,
-  testASlotOfAPlayedGameIsHandedToTheGame,
-  testACommandThatWillNotHandTheSlotOnFailsTheHand,
-  testACommandThatExitsAfterGrantingNeverHoldsTheSlot,
-  testACommandThatExitsWhileTheEngineRunsLosesTheSlotInTheAnswer,
-  testASlotCommandIsToldAGameIsAGame,
-  testARunUnderASlotCommandStartsOnTheGrantsThatCameAtOnce,
-  testAQueuedGrantDoesNotHoldARunUp,
-  testAGrantThatWasNotQueuedJoinsALateRunWithoutHoldingItsStart,
-  testAnOutstandingAskSaysItsWaitWhileAGrantIsHeld,
-  testARefusedLaneIsALaneTheRunDoesNotGet,
-  testAStartForOneSlotIgnoresQueued,
-  testAPlayedGamesSlotIsHandedAndSettledByTheServer,
-  testAQueuedGrantEndsAGdharnessTestRunWithItsSuites,
-  testAFailedHandLeavesTheCommandsLockFile,
-  testAPlayedGamesFailedHandIsInTheAnswerOfTheStart,
   testALauncherAnswersWithTheKeepersPidToo,
   testARunawayEngineLogIsCutAndEnded,
   testProjectTestJudgesItsRunAsTheGateDoes,
@@ -136427,9 +128275,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineIsReadForWhatItHolds,
   testAnEngineIsSizedByWhatItWasSeenToHold,
   testARunOutOfMemoryNamesEveryEngine,
-  testARunAddsALaneAsItsLanesRise,
-  testAPacedRunsCompileCheckIsOneOfItsLanes,
-  testAGatesRunFollowsItsLanesFile,
   testATestRunIsHeldToWhatItsSuitesWereSeenToHold,
   testAnEngineRunsItsSuitesCheapestFirstInTheGame,
   testAStartForAnotherProjectIsPlayedHereBesideAnIdleEditor,
@@ -136481,7 +128326,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAVariationBaseOfTheWrongKindIsRefused,
   testANameThatIsNoThemeItemIsStillRefused,
   testAVariationBaseThatIsNoClassAndNoHeldTypeIsWrittenAsGiven,
-  testAnEngineRunLeavesNoReservationInTheSlots,
   testAPolledGameEndedForItsMemoryCarriesNoKeeperNote,
   testTheRefusalsCeilingStepStartsTheEngineWhenFollowed,
   testTheRefusalNamesAllThereIsToFreeUnderTheKeptMemory,
@@ -136536,6 +128380,29 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARowForItsDataAndAnUnrunnableCaseAreNotListedAsSkips,
   testRealSkipsFailARunOfBothTools,
   testAnEngineWhoseCasesAllSkippedAddsNoNothingRanProblem,
+  testAnUnrunnableCaseIsNotCountedAsRan,
+  testASkipReasonOverSeveralLinesIsReadWhole,
+  testARealSkipReasonOverSeveralLinesFailsBothTools,
+  testARealSkipReasonWithABlankLineOrAnErrorLineIsReadWhole,
+  testAnAfterHookPrintingAQuoteKeepsOutOfASkippedLastCasesReason,
+  testASkipReasonCutOffIsSaidToBeCutInBothTools,
+  testARealSkipReasonWithAnApostropheLeavesTheAfterErrorToBothTools,
+  testAnApostropheInASkipReasonLeavesAnAfterErrorToTheEngineInBothTools,
+  testASkipReasonWhoseFirstLineEndsInAQuoteIsBothLinesInBothTools,
+  testAPairedSkipReasonReadsTheSameFromTheReportInBothTools,
+  testARunWithNoReportReadsItsSkipReasonsFromTheConsoleInBothTools,
+  testAReportSaysHowManyConsoleLinesASkipReasonCoversInBothTools,
+  testASkipReasonTheConsoleDoesNotCloseIsTheReportsInBothTools,
+  testASkipReasonOpeningOnABracketedWordKeepsItInBothTools,
+  testASkipReasonHoldingABracketedWordKeepsItInBothTools,
+  testASkipReasonHoldingTheElementsEndAndTheCdataEndIsReadWholeInBothTools,
+  testASkipReasonOverThreeLinesWithAnErrorLineIsReadWholeInBothTools,
+  testASkipOnlyOneOfTheReportAndTheConsoleHoldsIsJudgedAsBefore,
+  testASkipReasonHoldingTheCdataEndIsReadWholeInBothTools,
+  testARunTheDeadlineEndedReadsAnApostrophesSkipReasonInBothTools,
+  testARunThatCrashedLaterReadsAnApostrophesSkipReasonInBothTools,
+  testARunPastTheLogLimitReadsAnApostrophesSkipReasonInBothTools,
+  testASkipReasonsWarningLineLeavesProjectTestsWarningCount,
 ];
 
 /**
@@ -136550,6 +128417,1136 @@ const TESTS: (() => void | Promise<void>)[] = [
  * An argument names the tests to run, matched loosely against the function name, so a single
  * fixture can be run on its own while it is being written.
  */
+/**
+ * Runs that call on one engine slot with a stand-in engine, a competitor for the slot queued behind
+ * it, and optionally the slot held by another process first. The competitor takes the slot at the
+ * first moment the call lets it go.
+ */
+async function diagnosticsBesideACompetitor(options: {
+  readonly foreignHolder: boolean;
+  readonly pauseMs: number;
+  readonly crash?: string;
+  readonly cancelAfterTheFirstEngine?: boolean;
+  readonly lent?: boolean;
+}): Promise<DiagnosticsBesideACompetitor> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-slot-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-slots-'));
+  const logFile = join(project, 'stand-in.log');
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    for (const name of ['a', 'broken', 'c']) {
+      writeFileSync(join(project, `${name}.gd`), 'extends Node\n');
+    }
+    writeFileSync(logFile, '');
+    const entries = (): StandInEntry[] => standInEntries(logFile);
+    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
+    const taker = new EngineSlots(slots, 1, holder, undefined, undefined, plentyOfMemory);
+    const foreign = options.foreignHolder ? await taker.take() : null;
+    const server = new ServerProcess({
+      env: {
+        [SLOTS_VARIABLE]: slots,
+        [SLOT_COUNT_VARIABLE]: '1',
+        GODOT_PATH: operationStandIn(),
+        GDH_STAND_IN_LOG: logFile,
+        GDH_STAND_IN_PAUSE_MS: String(options.pauseMs),
+        GDH_STAND_IN_CRASH: options.crash ?? '',
+        GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+        GDHARNESS_LSP_PORT: String(await reservePort()),
+      },
+    });
+    let competitorTookAt: number | null = null;
+    try {
+      await server.initialize('regression-test');
+      const id = server.nextRequestId;
+      const call = server
+        .request(
+          'tools/call',
+          {
+            name: 'script_diagnostics',
+            arguments: { projectPath: project, scriptPath: ['a.gd', 'broken.gd', 'c.gd'] },
+          },
+          options.cancelAfterTheFirstEngine === true ? 60_000 : 120_000,
+        )
+        .catch(() => null);
+      assert.ok(
+        await cameTrue(
+          () =>
+            foreign === null
+              ? entries().length > 0
+              : leftInSlots(slots).some((name) => name.startsWith('waiting/')),
+          30_000,
+        ),
+        `the call asks for its slot: ${slotsSaid()}`,
+      );
+      const competitor = taker.take().then((lock) => {
+        competitorTookAt = Date.now();
+        taker.release(lock);
+      });
+      await delay(700);
+      if (foreign !== null) {
+        taker.release(foreign);
+      }
+      if (options.cancelAfterTheFirstEngine === true) {
+        assert.ok(await cameTrue(() => entries().some((entry) => entry.event === 'start'), 30_000));
+        server.notify('notifications/cancelled', { requestId: id, reason: 'the caller stopped waiting' });
+      }
+      // A cancelled call is never answered, so only the slot it frees is waited for.
+      const said = options.cancelAfterTheFirstEngine === true ? null : await call;
+      await Promise.race([competitor, delay(60_000)]);
+      const answer = said === null ? null : (textOf(said)?.replaceAll(/port \d+/g, 'port N') ?? null);
+      return { answer, entries: entries(), competitorTookAt, slotsAfter: leftInSlots(slots) };
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+    sweep(slots);
+  }
+}
+
+/** A line of a take that began [param waited] ms ago and looks now. */
+function lineBegunAgo(waited: number, mark: string): SlotLine {
+  const line = new SlotLine(process.pid, Date.now() - waited);
+  line.mark = mark;
+  return line;
+}
+
+/** A taker ahead that stops looking holds nothing back past the yield, counted from its last look. */
+async function testATakerAheadThatStoppedLookingIsDroppedAfterTheYield(): Promise<void> {
+  const folder = await gameLineFolder(12);
+  const realNow = Date.now;
+  try {
+    slotsHeld(folder, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
+    const t0 = Date.now();
+    waitingMarked(folder, lineBegunAgo(200_000, 'gone.json'), t0);
+    const call = new EngineSlots(folder.directory, 12, folder.me, undefined, undefined, plentyOfMemory);
+    const behind = lineBegunAgo(100_000, 'call.json');
+    const look = async (at: number): Promise<number | null> => {
+      Date.now = () => at;
+      return lockNumber(await call.takeFree(false, behind));
+    };
+    assert.equal(await look(t0), null, 'a taker ahead that has just looked is waited for');
+    assert.equal(await look(t0 + SLOT_YIELD_MS - 100), null, 'until it has left the slot for the yield');
+    assert.equal(await look(t0 + SLOT_YIELD_MS + 100), 9, 'and then the call takes it');
+    call.releaseAll();
+  } finally {
+    Date.now = realNow;
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** Removes the mark of [param line] and its look note from the folder's waiting marks. */
+function waitEndedFor(folder: GameLineFolder, line: SlotLine): void {
+  const mark = line.mark ?? '';
+  rmSync(join(folder.directory, WAITING_FOLDER, mark), { force: true });
+  rmSync(join(folder.directory, WAITING_FOLDER, mark.replace(/\.json$/u, '.seen')), { force: true });
+}
+
+/** The takers among [param looks], by index, that take a slot as each looks in turn. */
+async function lookedAtOnce(
+  slots: readonly EngineSlots[],
+  takers: readonly { readonly game: boolean }[],
+  lines: readonly SlotLine[],
+  looks: readonly number[],
+): Promise<number[]> {
+  const took: number[] = [];
+  for (const at of looks) {
+    if ((await slots[at]?.takeFree(takers[at]?.game ?? false, lines[at])) != null) {
+      took.push(at);
+    }
+  }
+  return took;
+}
+
+/**
+ * [param takers] on a folder of [param folder]'s slots, all held. One slot is freed at a time, and
+ * every taker looks, the order of the looks turning with each round. Answers who took each slot and
+ * the most locks the folder held at once. A taker leaves the line once it has a slot.
+ */
+async function lineTaken(
+  folder: GameLineFolder,
+  takers: readonly { readonly game: boolean; readonly by: string }[],
+): Promise<{ order: number[]; most: number }> {
+  const t0 = Date.now();
+  const lines = takers.map((_, at) => {
+    const line = new SlotLine(process.pid, t0 - (takers.length - at) * 1000);
+    line.mark = `w${String(at).padStart(2, '0')}.json`;
+    waitingMarked(folder, line, t0);
+    return line;
+  });
+  const slots = takers.map(
+    (taker) =>
+      new EngineSlots(
+        folder.directory,
+        folder.count,
+        { ...folder.me, by: taker.by },
+        undefined,
+        undefined,
+        plentyOfMemory,
+      ),
+  );
+  slotsHeld(
+    folder,
+    Array.from({ length: folder.count }, (_, slot) => slot),
+  );
+  const waiting = new Set(takers.keys());
+  const order: number[] = [];
+  let most = folder.count;
+  let held = 0;
+  while (waiting.size > 0) {
+    rmSync(join(folder.directory, `${String(held % folder.count)}.lock`));
+    held += 1;
+    for (const at of waiting) {
+      lookedAt(folder, lines[at]?.mark ?? '', Date.now());
+    }
+    const took = await lookedAtOnce(
+      slots,
+      takers,
+      lines,
+      held % 2 === 0 ? [...waiting].reverse() : [...waiting],
+    );
+    most = Math.max(most, readdirSync(folder.directory).filter((name) => /^\d+\.lock$/u.test(name)).length);
+    assert.equal(took.length, 1, `one slot freed, one taker took it: ${JSON.stringify(took)}`);
+    const winner = took[0] ?? -1;
+    order.push(winner);
+    waiting.delete(winner);
+    const won = lines[winner];
+    if (won !== undefined) {
+      waitEndedFor(folder, won);
+    }
+  }
+  return { order, most };
+}
+
+/** Twelve takers of every kind on four slots take them in the order they began to wait, four at most at once. */
+async function testTwelveTakersOnFourSlotsTakeInTheOrderTheyBeganToWait(): Promise<void> {
+  const folder = await gameLineFolder(4);
+  try {
+    const takers = Array.from({ length: 12 }, (_, at) => ({
+      game: at % 3 === 0,
+      by: ['gdharness test of /a', 'editor_run of /b', 'a tool of /c', 'project_test of /d'][at % 4] ?? '',
+    }));
+    const { order, most } = await lineTaken(folder, takers);
+    assert.deepEqual(
+      order,
+      takers.map((_, at) => at),
+      'each takes in the order it began to wait',
+    );
+    assert.ok(most <= 4, `never more than four locks at once: ${String(most)}`);
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** A file a removed rule used to read changes nothing about who takes a slot. */
+async function testFilesOfRemovedRulesLeftInTheFolderChangeNothing(): Promise<void> {
+  const takers = Array.from({ length: 6 }, (_, at) => ({ game: at % 2 === 1, by: `taker ${String(at)}` }));
+  const outcomes: number[][] = [];
+  for (const stale of [false, true]) {
+    const folder = await gameLineFolder(4);
+    try {
+      if (stale) {
+        const { directory, started } = folder;
+        mkdirSync(join(directory, 'reserved'));
+        writeFileSync(
+          join(directory, 'reserved', 'x.json'),
+          JSON.stringify({ pid: process.pid, started, owed: 50 * MEMORY_GIB }),
+        );
+        writeFileSync(
+          join(directory, 'spare.json'),
+          JSON.stringify({ spare: 4, pid: process.pid, started, written: Date.now() }),
+        );
+        writeFileSync(join(directory, 'priority.json'), JSON.stringify({ high: ['p'] }));
+        mkdirSync(join(directory, 'freed'));
+        writeFileSync(join(directory, 'freed', '0'), JSON.stringify({ freed: Date.now() }));
+        mkdirSync(join(directory, 'queued'));
+        writeFileSync(join(directory, 'queued', 'g.json'), JSON.stringify({ pid: process.pid, started }));
+        writeFileSync(
+          join(directory, 'starved.json'),
+          JSON.stringify({ pid: process.pid, started, what: 'x', starved: 9000 }),
+        );
+        writeFileSync(
+          join(directory, 'lanes.json'),
+          JSON.stringify({ lanes: 1, pid: process.pid, started, written: Date.now() }),
+        );
+        writeFileSync(join(directory, 'lanes.json.follows'), JSON.stringify({ pid: process.pid, started }));
+      }
+      outcomes.push((await lineTaken(folder, takers)).order);
+    } finally {
+      rmSync(folder.directory, { recursive: true, force: true });
+    }
+  }
+  assert.deepEqual(outcomes[0], [0, 1, 2, 3, 4, 5], 'the line goes by age');
+  assert.deepEqual(outcomes[1], outcomes[0], 'and the stale files change none of it');
+}
+
+/** A run of three lanes with one free slot starts one lane, and the others as slots come free, behind an older waiter. */
+async function testLanesOnOneFreeSlotStartOneAndTakeTheRestBehindOlderWaiters(): Promise<void> {
+  const folder = await gameLineFolder(4);
+  const stop = new AbortController();
+  try {
+    slotsHeld(folder, [0, 1, 2]);
+    const slots = new EngineSlots(folder.directory, 4, folder.me, undefined, undefined, plentyOfMemory);
+    const started = await takenLanes(
+      {
+        slots,
+        ordered: false,
+        plans: [{ lane: 0 }, { lane: 1 }, { lane: 2 }],
+        memoryHeld: false,
+        byMemory: { engines: 3 },
+      },
+      () => undefined,
+    );
+    assert.equal(started.taken.length, 1, 'one lane starts on the one free slot');
+    assert.equal(started.shared, true, 'and the other lanes are dealt shares');
+    const order: string[] = [];
+    const waits = ['older', 'lane 1', 'lane 2'].map(async (name, at) => {
+      await delay(300 * at);
+      await slots.take(stop.signal);
+      order.push(name);
+    });
+    await delay(1200);
+    assert.deepEqual(order, [], 'every slot is held');
+    for (const [at, slot] of [0, 1, 2].entries()) {
+      rmSync(join(folder.directory, `${String(slot)}.lock`));
+      assert.ok(
+        await cameTrue(() => order.length === at + 1, 10_000),
+        `a taker starts as slot ${String(slot)} comes free: ${order.join(', ')}`,
+      );
+    }
+    assert.deepEqual(order, ['older', 'lane 1', 'lane 2'], 'one for each slot, oldest first');
+    await Promise.all(waits);
+    slots.releaseAll();
+  } finally {
+    stop.abort();
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** One, two and three slots, twelve and sixteen, and a count file, each cap holds. */
+async function testTheCapHoldsOnEveryCountAndTheCountFileReplacesIt(): Promise<void> {
+  for (const count of [1, 2, 3, 12, 16]) {
+    const folder = await gameLineFolder(count);
+    try {
+      const slots = new EngineSlots(folder.directory, count, folder.me, undefined, undefined, plentyOfMemory);
+      const taken: string[] = [];
+      for (let at = 0; at < count; at++) {
+        const lock = await slots.takeFree();
+        assert.notEqual(lock, null, `slot ${String(at)} of ${String(count)} is free`);
+        taken.push(basename(lock ?? ''));
+      }
+      assert.deepEqual(
+        taken.toSorted((a, b) => Number.parseInt(a, 10) - Number.parseInt(b, 10)),
+        Array.from({ length: count }, (_, at) => `${String(at)}.lock`),
+        `${String(count)} slots, each once`,
+      );
+      assert.equal(await slots.takeFree(), null, `no slot past ${String(count)}`);
+      slots.releaseAll();
+    } finally {
+      rmSync(folder.directory, { recursive: true, force: true });
+    }
+  }
+  const folder = await gameLineFolder(12);
+  try {
+    const slots = new EngineSlots(folder.directory, 12, folder.me, undefined, undefined, plentyOfMemory);
+    const takeAll = async (): Promise<number> => {
+      let taken = 0;
+      while ((await slots.takeFree()) !== null) {
+        taken += 1;
+      }
+      return taken;
+    };
+    writeFileSync(join(folder.directory, SLOT_COUNT_FILE), '3\n');
+    assert.equal(await takeAll(), 3, 'a count file of 3 caps the take made with 12');
+    assert.equal(slots.count, 3);
+    writeFileSync(join(folder.directory, SLOT_COUNT_FILE), '16');
+    assert.equal(await takeAll(), 13, 'and a file of 16 raises it at the next take, to 16 in all');
+    for (const unusable of ['0', 'many', '2.5', '-1', '']) {
+      writeFileSync(join(folder.directory, SLOT_COUNT_FILE), unusable);
+      assert.equal(slotCountFileOf(folder.directory), undefined, `${JSON.stringify(unusable)} is no count`);
+    }
+    writeFileSync(join(folder.directory, SLOT_COUNT_FILE), 'many');
+    slots.releaseAll();
+    assert.equal(await takeAll(), 12, 'a file that is no count leaves the count the take was made with');
+    slots.releaseAll();
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+const GB = 1e9;
+
+/** Ten held slots, each with an engine of a recorded peak, and the memory the stand-in machine reads. */
+async function tenEnginesOn(
+  directory: string,
+  peaks: readonly number[],
+  holding: readonly number[],
+  reading: { free: number },
+): Promise<EngineSlots> {
+  const started = await ownStart();
+  const engines = new Map<number, number>();
+  peaks.forEach((peak, slot) => {
+    const pid = 4_000_000 + slot;
+    engines.set(pid, holding[slot] ?? peak);
+    const path = join(directory, `${String(slot)}.lock`);
+    writeFileSync(
+      path,
+      JSON.stringify({ pid: process.pid, started, memory: peak, engine: { pid, started: Date.now() } }),
+    );
+  });
+  return new EngineSlots(directory, 12, { pid: process.pid, started }, undefined, undefined, {
+    need: 1.6 * GB,
+    available: () => Promise.resolve(reading.free),
+    held: (pids) =>
+      Promise.resolve(
+        new Map(pids.flatMap((pid) => (engines.has(pid) ? [[pid, engines.get(pid) ?? 0] as const] : []))),
+      ),
+  });
+}
+
+/**
+ * Ten engines each holding its recorded peak (7.8 GB for one, 1.6 GB for nine) owe nothing, so a
+ * machine reading 16.6 GB free starts another. Reading 1 GB it waits and says memory, and starts once
+ * the reading rises.
+ */
+async function testEnginesHoldingTheirPeaksOweNothingAndAnotherStartsOnFreeMemory(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-owed-'));
+  try {
+    const peaks = [7.8 * GB, ...Array.from({ length: 9 }, () => 1.6 * GB)];
+    const reading = { free: 16.6 * GB };
+    const slots = await tenEnginesOn(directory, peaks, peaks, reading);
+    const lock = await slots.takeFree();
+    assert.notEqual(lock, null, 'the engine starts: 16.6 GB free less the kept 4 GiB covers 1.6 GB');
+    slots.release(lock ?? '');
+    reading.free = 1 * GB;
+    assert.equal(await slots.takeFree(), null, 'at 1 GB free it waits');
+    assert.ok(slots.drawn.short !== undefined, 'for memory');
+    assert.match(slotWaitSaid(3000, 12, directory, [], slots.drawn), /memory/u, 'and says so');
+    reading.free = 16.6 * GB;
+    assert.notEqual(await slots.takeFree(), null, 'and starts once the reading rises');
+    slots.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Ten engines that started a moment ago, each holding 0.3 GB of a 1.6 GB peak, still owe 13 GB, so
+ * 16.6 GB free does not start another. As they grow the owed sum falls with the reading, and the wait
+ * ends once free less the kept 4 GiB less what is owed covers the engine.
+ */
+async function testEnginesStillGrowingKeepAnotherWaitingUntilTheOwedSumFalls(): Promise<void> {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-owed-'));
+  try {
+    const peaks = Array.from({ length: 10 }, () => 1.6 * GB);
+    const holding = peaks.map(() => 0.3 * GB);
+    const reading = { free: 16.6 * GB };
+    const slots = await tenEnginesOn(directory, peaks, holding, reading);
+    assert.equal(await slots.takeFree(), null, '13 GB is still owed, so 16.6 GB free is not enough');
+    assert.equal(
+      Math.round(slots.drawn.short?.owed ?? 0),
+      13 * GB,
+      'the owed sum is the peaks less what they hold',
+    );
+    const grown = await tenEnginesOn(
+      directory,
+      peaks,
+      peaks.map(() => 1.0 * GB),
+      reading,
+    );
+    reading.free = 9.6 * GB;
+    assert.equal(await grown.takeFree(), null, 'grown to 1.0 GB each with 9.6 GB free it still waits');
+    assert.equal(Math.round(grown.drawn.short?.owed ?? 0), 6 * GB, 'with 6 GB owed');
+    reading.free = 12.1 * GB;
+    assert.notEqual(await grown.takeFree(), null, 'and at 12.1 GB free it starts');
+    grown.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** The object the JSON file at [param path] holds. */
+function jsonObjectOf(path: string): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+  assert.ok(typeof parsed === 'object' && parsed !== null, `${path} holds an object`);
+  return Object.fromEntries(Object.entries(parsed));
+}
+
+/** The text of item [param item] of the contract another queue follows, in docs/test-runs.md. */
+function contractItem(item: 'i' | 'ii' | 'iii' | 'iv' | 'v' | 'vi'): string {
+  const lines = readFileSync('docs/test-runs.md', 'utf8').split('\n');
+  const from = lines.findIndex((line) => line.startsWith(`#### (${item}) `));
+  assert.ok(from >= 0, `the contract has an item (${item})`);
+  const to = lines.findIndex((line, at) => at > from && /^#{1,4} /u.test(line));
+  return lines.slice(from, to < 0 ? undefined : to).join('\n');
+}
+
+/** A folder of 4 slots with a taker of this process, for the contract's tests. */
+async function contractFolder(): Promise<{ directory: string; slots: EngineSlots; started: number }> {
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-contract-'));
+  const slots = new EngineSlots(
+    directory,
+    4,
+    { pid: process.pid, started },
+    undefined,
+    undefined,
+    plentyOfMemory,
+  );
+  return { directory, slots, started };
+}
+
+/** (i) The lock is created exclusively with a pid and a start, and a dead holder's lock is taken over under a steal file. */
+async function testTheContractsLockIsWhatTheCodeWrites(): Promise<void> {
+  const contract = contractItem('i');
+  for (const part of [
+    '<directory>/<n>.lock',
+    'O_CREAT | O_EXCL',
+    '"pid"',
+    '"started"',
+    '<n>.lock.steal',
+    `${String(UNWRITTEN_MS / 1000)} seconds`,
+    `${String(START_TOLERANCE_MS)} ms`,
+  ]) {
+    assert.ok(contract.includes(part), `item (i) names ${part}`);
+  }
+  const { directory, slots, started } = await contractFolder();
+  try {
+    const lock = await slots.takeFree();
+    const written = jsonObjectOf(lock ?? '');
+    assert.equal(written['pid'], process.pid);
+    assert.equal(written['started'], started);
+    assert.equal(basename(lock ?? ''), '0.lock');
+    slots.releaseAll();
+    writeFileSync(join(directory, '0.lock'), JSON.stringify({ pid: 2 ** 31 - 2, started: 1 }));
+    const over = await slots.takeFree();
+    assert.equal(basename(over ?? ''), '0.lock', 'a lock of a gone holder is taken over');
+    assert.equal(existsSync(join(directory, '0.lock.steal')), false, 'and its steal file is removed');
+    assert.equal(jsonObjectOf(over ?? '')['pid'], process.pid);
+    slots.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** (ii) A wait keeps a mark named by pid and counter, holding the holder's fields and a since in milliseconds. */
+async function testTheContractsWaitingMarkIsWhatTheCodeWrites(): Promise<void> {
+  const contract = contractItem('ii');
+  for (const part of [
+    `<directory>/${WAITING_FOLDER}/<pid>-<n>.json`,
+    '`since`',
+    'milliseconds since the epoch',
+    '.seen',
+    `below ${String(SINCE_IN_SECONDS_BELOW)} as seconds`,
+    "as begun at its file's modification time",
+  ]) {
+    assert.ok(contract.includes(part), `item (ii) names ${part}`);
+  }
+  const { directory, slots, started } = await contractFolder();
+  const stop = new AbortController();
+  try {
+    slotsHeld({ directory, count: 4, me: { pid: process.pid, started, by: 'x' }, started }, [0, 1, 2, 3]);
+    const before = Date.now();
+    const waiting = slots.take(stop.signal);
+    waiting.catch(() => undefined);
+    assert.ok(
+      await cameTrue(
+        () =>
+          existsSync(join(directory, WAITING_FOLDER)) &&
+          readdirSync(join(directory, WAITING_FOLDER)).some((name) => name.endsWith('.json')),
+        10_000,
+      ),
+      'the wait makes its mark',
+    );
+    const name = readdirSync(join(directory, WAITING_FOLDER)).find((entry) => entry.endsWith('.json')) ?? '';
+    assert.match(name, /^\d+-\d+\.json$/u);
+    const mark = jsonObjectOf(join(directory, WAITING_FOLDER, name));
+    assert.equal(mark['pid'], process.pid);
+    assert.equal(mark['started'], started);
+    assert.ok(
+      typeof mark['since'] === 'number' && mark['since'] >= before && mark['since'] <= Date.now(),
+      'since is epoch milliseconds',
+    );
+  } finally {
+    stop.abort();
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** (iii) The line goes by since, then pid, then mark name, and a slot is left to a waiter ahead for the yield. */
+function testTheContractsLineOrderIsWhatTheCodeDoes(): void {
+  const contract = contractItem('iii');
+  for (const part of [
+    'earlier `since`',
+    'lower pid',
+    'file name is first, byte by byte',
+    `${String(SLOT_YIELD_MS / 1000)} seconds`,
+  ]) {
+    assert.ok(contract.includes(part), `item (iii) names ${part}`);
+  }
+  const waiter = (mark: string, pid: number, since: number) => ({ mark, pid, since, seen: since });
+  const line = new SlotLine(500, 1000);
+  line.mark = 'm.json';
+  const ahead = line.ahead([
+    waiter('b.json', 500, 1000),
+    waiter('a.json', 500, 1000),
+    waiter('z.json', 400, 1000),
+    waiter('later.json', 1, 1001),
+    waiter('early.json', 900, 999),
+    waiter('after.json', 600, 1000),
+  ]);
+  assert.deepEqual(
+    ahead.map((one) => one.mark),
+    ['early.json', 'z.json', 'a.json', 'b.json'],
+    'earlier since first, then lower pid, then mark name',
+  );
+}
+
+/** (iv) The count file holds a whole number above 0, read at every take, and anything else counts as missing. */
+async function testTheContractsCapIsTheCountFile(): Promise<void> {
+  const contract = contractItem('iv');
+  for (const part of [
+    `<directory>/${SLOT_COUNT_FILE}`,
+    SLOT_COUNT_VARIABLE,
+    'at every take',
+    'whatever their number',
+  ]) {
+    assert.ok(contract.includes(part), `item (iv) names ${part}`);
+  }
+  const { directory, slots } = await contractFolder();
+  try {
+    assert.equal(slotCountFileOf(directory), undefined, 'no file, no count');
+    writeFileSync(join(directory, SLOT_COUNT_FILE), '2');
+    assert.equal((await slots.takeFree()) === null, false);
+    assert.equal(slots.count, 2, 'the file replaces the count the take was made with');
+    writeFileSync(join(directory, SLOT_COUNT_FILE), '3');
+    await slots.takeFree();
+    assert.equal(slots.count, 3, 'and is read again at the next take');
+    for (const unusable of ['0', '-2', 'two', '1.5']) {
+      writeFileSync(join(directory, SLOT_COUNT_FILE), unusable);
+      assert.equal(slotCountFileOf(directory), undefined, `${JSON.stringify(unusable)} counts as missing`);
+    }
+    slots.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** (v) An engine starts when free less kept less owed covers its need, to the byte. */
+async function testTheContractsMemoryCheckIsWhatTheCodeDoes(): Promise<void> {
+  const contract = contractItem('v');
+  const kept = MEMORY_KEPT / 1024 ** 3;
+  for (const part of [
+    'free - kept - owed >= need',
+    `${String(kept)} GiB`,
+    '1.5 GiB',
+    '`memory`',
+    '`engine`',
+  ]) {
+    assert.ok(contract.includes(part), `item (v) names ${part}`);
+  }
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-contract-'));
+  try {
+    standInLock(directory, 0, started, { memory: 2 * GB });
+    const reading = { free: MEMORY_KEPT + 2 * GB + 1 * GB };
+    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, undefined, {
+      need: 1 * GB,
+      available: () => Promise.resolve(reading.free),
+      held: plentyOfMemory.held,
+    });
+    const first = await slots.takeFree();
+    assert.notEqual(first, null, 'free equal to kept, owed and need starts');
+    slots.release(first ?? '');
+    reading.free -= 1;
+    assert.equal(await slots.takeFree(), null, 'one byte less waits');
+    assert.equal(slots.drawn.short?.kept, MEMORY_KEPT);
+    assert.equal(slots.drawn.short.owed, 2 * GB, 'a lock naming no engine owes its whole figure');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * On macOS the memory check holds no take, as item (v) says: its reading there is undefined, and a
+ * take given no reading starts though the locks held owe far more than any machine has.
+ */
+async function testATakeOnMacOSIsNeverHeldForMemory(): Promise<void> {
+  assert.ok(
+    contractItem('v').replace(/\s+/gu, ' ').includes('On macOS only the count holds a take'),
+    'item (v) says so',
+  );
+  assert.equal(await slotMemoryFree('darwin'), undefined, 'macOS gives the check no reading');
+  const read = await slotMemoryFree('linux');
+  assert.ok(typeof read === 'number' && read > 0, `elsewhere the check reads the machine: ${String(read)}`);
+  const started = await ownStart();
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-mac-memory-'));
+  try {
+    standInLock(directory, 0, started, { memory: 1024 * GB });
+    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, undefined, {
+      need: 1 * GB,
+      available: () => Promise.resolve(undefined),
+      held: plentyOfMemory.held,
+    });
+    const taken = await slots.takeFree();
+    assert.notEqual(taken, null, 'no reading starts the engine');
+    assert.equal(slots.drawn.short, undefined, 'and names no memory short');
+    slots.release(taken ?? '');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** (vi) A lock or mark whose pid is gone or whose start differs is removed by the next reader. */
+async function testTheContractsCleanupIsWhatTheCodeDoes(): Promise<void> {
+  const contract = contractItem('vi');
+  for (const part of ['is gone', `${String(START_TOLERANCE_MS)} ms`, 'removed by any reader']) {
+    assert.ok(contract.includes(part), `item (vi) names ${part}`);
+  }
+  const { directory, slots, started } = await contractFolder();
+  try {
+    const marks = join(directory, WAITING_FOLDER);
+    mkdirSync(marks);
+    writeFileSync(
+      join(marks, '1-1.json'),
+      JSON.stringify({ pid: 2 ** 31 - 2, started: 1, since: Date.now() }),
+    );
+    writeFileSync(
+      join(marks, '2-1.json'),
+      JSON.stringify({ pid: process.pid, started: started - 60_000, since: Date.now() }),
+    );
+    writeFileSync(join(marks, '3-1.json'), JSON.stringify({ pid: process.pid, started, since: Date.now() }));
+    writeFileSync(join(directory, '9.lock'), JSON.stringify({ pid: 2 ** 31 - 2, started: 1 }));
+    await slots.takeFree();
+    assert.deepEqual(
+      readdirSync(marks).filter((name) => name.endsWith('.json')),
+      ['3-1.json'],
+      'only the live mark stays',
+    );
+    assert.equal(
+      existsSync(join(directory, '9.lock')),
+      false,
+      'a lock past the count of a gone holder is removed',
+    );
+    slots.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A waiter ahead that stopped looking holds nothing back from a later take of the process either. */
+async function testAWaiterThatStoppedLookingHoldsNoSlotFromALaterTake(): Promise<void> {
+  const folder = await gameLineFolder(2);
+  const realNow = Date.now;
+  try {
+    slotsHeld(folder, [0]);
+    const t0 = Date.now();
+    waitingMarked(folder, lineBegunAgo(200_000, 'gone.json'), t0);
+    const call = new EngineSlots(folder.directory, 2, folder.me, undefined, undefined, plentyOfMemory);
+    const look = async (at: number, line: SlotLine): Promise<number | null> => {
+      Date.now = () => at;
+      return lockNumber(await call.takeFree(false, line));
+    };
+    assert.equal(await look(t0, lineBegunAgo(100_000, 'first.json')), null, 'the slot is left to the waiter');
+    assert.equal(
+      await look(t0 + SLOT_YIELD_MS + 100, lineBegunAgo(100_000, 'second.json')),
+      1,
+      'a later take, at its first look, passes over a waiter that has not looked for the yield',
+    );
+    call.releaseAll();
+  } finally {
+    Date.now = realNow;
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** A mark's since in seconds and a mark with no since stand in line by the time they name. */
+async function testAMarkInSecondsOrWithNoSinceStandsInLineByItsTime(): Promise<void> {
+  for (const kind of ['seconds', 'none'] as const) {
+    const folder = await gameLineFolder(2);
+    try {
+      slotsHeld(folder, [0]);
+      const began = Date.now() - 10_000;
+      const mark = join(folder.directory, WAITING_FOLDER, 'other-1.json');
+      writeFileSync(
+        mark,
+        JSON.stringify({ ...folder.me, ...(kind === 'seconds' ? { since: began / 1000 } : {}) }),
+      );
+      utimesSync(mark, began / 1000, began / 1000);
+      lookedAt(folder, 'other-1.json', Date.now());
+      const call = new EngineSlots(folder.directory, 2, folder.me, undefined, undefined, plentyOfMemory);
+      assert.equal(
+        await call.takeFree(false, lineBegunAgo(5000, 'newer.json')),
+        null,
+        `a take that began after the mark (${kind}) leaves it the slot`,
+      );
+      assert.equal(
+        lockNumber(await call.takeFree(false, lineBegunAgo(20_000, 'older.json'))),
+        1,
+        `a take that began before the mark (${kind}) goes first`,
+      );
+      call.releaseAll();
+    } finally {
+      rmSync(folder.directory, { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * An older waiter beside a newer mark in seconds and a newer mark with no since takes the slot at the
+ * first look after it comes free, not at the yield.
+ */
+async function testAnOlderWaiterGoesBeforeNewerMarksInSecondsOrWithNoSince(): Promise<void> {
+  const folder = await gameLineFolder(1);
+  const stop = new AbortController();
+  try {
+    slotsHeld(folder, [0]);
+    const slots = new EngineSlots(folder.directory, 1, folder.me, undefined, undefined, plentyOfMemory);
+    let tookAt = 0;
+    const waiting = slots.take(stop.signal).then((lock) => {
+      tookAt = Date.now();
+      return lock;
+    });
+    waiting.catch(() => undefined);
+    const marks = join(folder.directory, WAITING_FOLDER);
+    assert.ok(
+      await cameTrue(() => readdirSync(marks).some((name) => name.endsWith('.json')), 10_000),
+      'the take waits with a mark',
+    );
+    await delay(1100);
+    writeFileSync(
+      join(marks, 'q-1.json'),
+      JSON.stringify({ ...folder.me, since: Math.floor(Date.now() / 1000) }),
+    );
+    writeFileSync(join(marks, 'q-2.json'), JSON.stringify(folder.me));
+    lookedAt(folder, 'q-1.json', Date.now());
+    lookedAt(folder, 'q-2.json', Date.now());
+    await delay(300);
+    const freedAt = Date.now();
+    rmSync(join(folder.directory, '0.lock'));
+    assert.ok(await cameTrue(() => tookAt > 0, 10_000), 'the older waiter takes the slot');
+    assert.ok(
+      tookAt - freedAt < SLOT_YIELD_MS / 2,
+      `within a look of the slot coming free: ${String(tookAt - freedAt)} ms`,
+    );
+    slots.releaseAll();
+  } finally {
+    stop.abort();
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * With the count file lowered below the slots held, a take makes no lock until the live locks are
+ * fewer than the count, and a wait is served once enough of them go.
+ */
+async function testACountLoweredBelowTheSlotsHeldStartsNothingUntilEnoughGo(): Promise<void> {
+  const folder = await gameLineFolder(4);
+  const stop = new AbortController();
+  try {
+    slotsHeld(folder, [1, 2, 3]);
+    writeFileSync(join(folder.directory, SLOT_COUNT_FILE), '2');
+    const slots = new EngineSlots(folder.directory, 4, folder.me, undefined, undefined, plentyOfMemory);
+    const locks = (): string[] =>
+      readdirSync(folder.directory)
+        .filter((name) => /^\d+\.lock$/u.test(name))
+        .toSorted();
+    const made: string[] = [];
+    const watcher = watchFolder(folder.directory, (_, name) => {
+      if (name === '0.lock') {
+        made.push(name);
+      }
+    });
+    try {
+      assert.equal(await slots.takeFree(), null, 'three held on a count of 2 starts nothing');
+      await delay(300);
+    } finally {
+      watcher.close();
+    }
+    assert.deepEqual(made, [], 'and makes no lock, not even one it gives back');
+    assert.deepEqual(locks(), ['1.lock', '2.lock', '3.lock']);
+    // Held in an object, since the take sets it later, which no flow analysis follows.
+    const got: { lock: string | null } = { lock: null };
+    const waiting = slots.take(stop.signal).then((lock) => {
+      got.lock = lock;
+    });
+    const taken = (): string | null => got.lock;
+    waiting.catch(() => undefined);
+    rmSync(join(folder.directory, '3.lock'));
+    await delay(1500);
+    assert.equal(taken(), null, 'two held on a count of 2 still starts nothing');
+    rmSync(join(folder.directory, '2.lock'));
+    assert.ok(await cameTrue(() => taken() !== null, 10_000), 'the wait is served once one more goes');
+    assert.equal(basename(taken() ?? ''), '0.lock');
+    slots.releaseAll();
+  } finally {
+    stop.abort();
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** Two takers that both read room below a lowered count do not both keep a lock: the later gives it back. */
+async function testALockTakenPastALoweredCountByARaceIsGivenBack(): Promise<void> {
+  const folder = await gameLineFolder(4);
+  try {
+    const past = new Date(Date.now() - 60_000);
+    slotsHeld(folder, [5]);
+    utimesSync(join(folder.directory, '5.lock'), past, past);
+    writeFileSync(join(folder.directory, SLOT_COUNT_FILE), '2');
+    let raced = false;
+    const slots = new EngineSlots(folder.directory, 4, folder.me, undefined, undefined, {
+      ...plentyOfMemory,
+      available: () => {
+        if (!raced) {
+          raced = true;
+          slotsHeld(folder, [1]);
+          utimesSync(join(folder.directory, '1.lock'), past, past);
+        }
+        return plentyOfMemory.available();
+      },
+    });
+    assert.equal(await slots.takeFree(), null, "the lock made after the other taker's is given back");
+    assert.equal(existsSync(join(folder.directory, '0.lock')), false, 'and is gone');
+  } finally {
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Two locks written in one millisecond keep the order of their slots: the lower slot was there
+ * first, so a race below a lowered count gives back the higher.
+ */
+async function testLocksWrittenInOneMillisecondAreOrderedBySlot(): Promise<void> {
+  for (const { theirs, ours, kept } of [
+    { theirs: 0, ours: 1, kept: false },
+    { theirs: 1, ours: 0, kept: true },
+  ]) {
+    const folder = await gameLineFolder(4);
+    try {
+      const past = new Date(Date.now() - 60_000);
+      slotsHeld(folder, [5]);
+      utimesSync(join(folder.directory, '5.lock'), past, past);
+      writeFileSync(join(folder.directory, SLOT_COUNT_FILE), '2');
+      let raced = false;
+      const slots = new EngineSlots(folder.directory, 4, folder.me, undefined, undefined, {
+        ...plentyOfMemory,
+        available: () => {
+          if (!raced) {
+            raced = true;
+            slotsHeld(folder, [theirs]);
+          }
+          return plentyOfMemory.available();
+        },
+      });
+      // Once both locks are there, both are given one time, to the millisecond.
+      const readTime: unknown = Reflect.get(slots, 'writtenAt');
+      assert.ok(typeof readTime === 'function');
+      const lockOf = (slot: number): string => join(folder.directory, `${String(slot)}.lock`);
+      let tied = false;
+      Reflect.set(slots, 'writtenAt', (path: string): unknown => {
+        if (!tied && existsSync(lockOf(theirs)) && existsSync(lockOf(ours))) {
+          tied = true;
+          const at = Math.floor(Date.now()) / 1000;
+          utimesSync(lockOf(theirs), at, at);
+          utimesSync(lockOf(ours), at, at);
+        }
+        const answer: unknown = Reflect.apply(readTime, slots, [path]);
+        return answer;
+      });
+      const got = await slots.takeFree();
+      assert.ok(tied, 'both locks were there at once');
+      assert.equal(
+        lockNumber(got),
+        kept ? ours : null,
+        kept ? 'the lower slot is first, so it is kept' : 'the higher slot is second, so it is given back',
+      );
+      assert.equal(existsSync(lockOf(ours)), kept);
+      slots.releaseAll();
+    } finally {
+      rmSync(folder.directory, { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * Two engines racing for memory room for one, whose locks carry one millisecond, keep the lower
+ * slot's: the higher gives its slot back, so the machine never runs two on room for one.
+ */
+async function testLocksOfAMemoryRaceWrittenInOneMillisecondAreOrderedBySlot(): Promise<void> {
+  for (const { theirs, ours, kept } of [
+    { theirs: 0, ours: 1, kept: false },
+    { theirs: 1, ours: 0, kept: true },
+  ]) {
+    const folder = await gameLineFolder(4);
+    try {
+      const past = new Date(Date.now() - 60_000);
+      const lockOf = (slot: number): string => join(folder.directory, `${String(slot)}.lock`);
+      // An engine that still owes 1 GB of its peak, and room for one more beside it.
+      writeFileSync(
+        lockOf(3),
+        JSON.stringify({ ...folder.me, memory: GB, engine: { pid: 4_000_009, started: 1 } }),
+      );
+      utimesSync(lockOf(3), past, past);
+      let raced = false;
+      const slots = new EngineSlots(folder.directory, 4, folder.me, undefined, undefined, {
+        need: 1.6 * GB,
+        held: () => Promise.resolve(new Map<number, number>([[4_000_009, 0]])),
+        available: () => {
+          if (!raced) {
+            raced = true;
+            writeFileSync(lockOf(theirs), JSON.stringify({ ...folder.me, memory: 1.6 * GB }));
+          }
+          return Promise.resolve(4 * MEMORY_GIB + GB + 1.7 * GB);
+        },
+      });
+      // Once both locks are there, both are given one time, to the millisecond.
+      const readTime: unknown = Reflect.get(slots, 'writtenAt');
+      assert.ok(typeof readTime === 'function');
+      let tied = false;
+      Reflect.set(slots, 'writtenAt', (path: string): unknown => {
+        if (!tied && existsSync(lockOf(theirs)) && existsSync(lockOf(ours))) {
+          tied = true;
+          const at = Math.floor(Date.now()) / 1000;
+          utimesSync(lockOf(theirs), at, at);
+          utimesSync(lockOf(ours), at, at);
+        }
+        const answer: unknown = Reflect.apply(readTime, slots, [path]);
+        return answer;
+      });
+      const got = await slots.takeFree();
+      assert.ok(tied, 'both locks were there at once');
+      assert.equal(
+        lockNumber(got),
+        kept ? ours : null,
+        kept ? 'the lower slot is first, so it is kept' : 'the higher slot is second, so it is given back',
+      );
+      assert.equal(existsSync(lockOf(ours)), kept);
+      slots.releaseAll();
+    } finally {
+      rmSync(folder.directory, { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * A holder's start, once read, is believed for ten seconds and then read again. A pid that a new
+ * process took after its holder ended then frees the lock it named, once the start is read again.
+ */
+async function testAStartIsReadAgainAfterTenSecondsAndAReusedPidFreesItsLock(): Promise<void> {
+  const folder = await gameLineFolder(1);
+  const realNow = Date.now;
+  try {
+    const earlier = folder.started - 60_000;
+    writeFileSync(join(folder.directory, '0.lock'), JSON.stringify({ pid: process.pid, started: earlier }));
+    const slots = new EngineSlots(folder.directory, 1, folder.me, undefined, undefined, plentyOfMemory);
+    const t0 = realNow();
+    // The start read while the lock's own holder still had the pid.
+    const starts: unknown = Reflect.get(slots, 'starts');
+    assert.ok(starts instanceof Map);
+    starts.set(process.pid, { started: earlier, readAt: t0 });
+    const look = async (at: number): Promise<number | null> => {
+      Date.now = () => at;
+      return lockNumber(await slots.takeFree());
+    };
+    assert.equal(await look(t0), null, 'the start read a moment ago is believed');
+    assert.equal(await look(t0 + 9_900), null, 'and still just inside ten seconds');
+    assert.equal(await look(t0 + 10_100), 0, 'past them the start is read again, and differs');
+    slots.releaseAll();
+  } finally {
+    Date.now = realNow;
+    rmSync(folder.directory, { recursive: true, force: true });
+  }
+}
+
+/** The first engine on a machine starts whatever the memory reading says. */
+async function testTheFirstEngineOnAMachineStartsWhateverMemoryReads(): Promise<void> {
+  const { directory, started } = await contractFolder();
+  try {
+    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, undefined, {
+      need: 1.6 * GB,
+      available: () => Promise.resolve(0),
+      held: plentyOfMemory.held,
+    });
+    assert.notEqual(await slots.takeFree(), null, 'no other engine holds a slot, so it starts');
+    assert.equal(await slots.takeFree(), null, 'and the next, behind it, waits for memory');
+    assert.ok(slots.drawn.short !== undefined);
+    slots.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A lock naming no memory owes the flat 1.5 GiB for each slot it holds. */
+async function testALockWithNoMemoryOwesOneAndAHalfGiBASlot(): Promise<void> {
+  const { directory, started } = await contractFolder();
+  try {
+    standInLock(directory, 0, started, {});
+    standInLock(directory, 1, started, {});
+    const owed = 2 * 1.5 * MEMORY_GIB;
+    const reading = { free: 4 * MEMORY_GIB + owed + GB - 1 };
+    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, undefined, {
+      need: GB,
+      available: () => Promise.resolve(reading.free),
+      held: plentyOfMemory.held,
+    });
+    assert.equal(await slots.takeFree(), null, 'one byte short of 1.5 GiB a lock waits');
+    assert.equal(slots.drawn.short?.owed, owed, 'two locks with no memory owe 3 GiB');
+    reading.free += 1;
+    assert.notEqual(await slots.takeFree(), null, 'and enough starts');
+    slots.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A live lock numbered past the count owes its memory as any other does. */
+async function testALockPastTheCountOwesItsMemory(): Promise<void> {
+  const { directory, started } = await contractFolder();
+  try {
+    standInLock(directory, 7, started, { memory: 8 * GB });
+    const reading = { free: 4 * MEMORY_GIB + 8 * GB + GB - 1 };
+    const slots = new EngineSlots(directory, 2, { pid: process.pid, started }, undefined, undefined, {
+      need: GB,
+      available: () => Promise.resolve(reading.free),
+      held: plentyOfMemory.held,
+    });
+    assert.equal(await slots.takeFree(), null, 'the 8 GB lock past the count is owed');
+    assert.equal(slots.drawn.short?.owed, 8 * GB);
+    reading.free += 1;
+    assert.notEqual(await slots.takeFree(), null, 'and enough starts');
+    slots.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** The check keeps 4 GiB back from the free reading for everything else. */
+async function testTheMemoryCheckKeepsFourGiBBack(): Promise<void> {
+  const { directory, started } = await contractFolder();
+  try {
+    standInLock(directory, 0, started, { memory: GB });
+    const reading = { free: 4 * MEMORY_GIB + 2 * GB - 1 };
+    const slots = new EngineSlots(directory, 4, { pid: process.pid, started }, undefined, undefined, {
+      need: GB,
+      available: () => Promise.resolve(reading.free),
+      held: plentyOfMemory.held,
+    });
+    assert.equal(await slots.takeFree(), null, 'free less 4 GiB less what is owed is a byte short');
+    assert.equal(slots.drawn.short?.kept, 4 * MEMORY_GIB);
+    reading.free += 1;
+    assert.notEqual(await slots.takeFree(), null, 'and a byte more starts');
+    slots.releaseAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** A machine with memory to spare, so a take is judged by its slots and its line alone. */
+const plentyOfMemory = {
+  available: (): Promise<number> => Promise.resolve(1024 * MEMORY_GIB),
+  held: (): Promise<Map<number, number>> => Promise.resolve(new Map<number, number>()),
+};
+
 async function main(): Promise<void> {
   syncSharedGdscript();
   trackTimers();
@@ -136837,7 +129834,7 @@ function testEverySlotVariableTheSourcesReadIsClearedForAFixture(): void {
       }
     }
   }
-  assert.ok(named.size >= 9, `the sources name the slot variables: ${String(named.size)}`);
+  assert.ok(named.size >= 3, `the sources name the slot variables: ${String(named.size)}`);
   for (const name of named) {
     assert.ok(SLOT_VARIABLES.includes(name), `${name} is cleared before a fixture runs`);
   }
