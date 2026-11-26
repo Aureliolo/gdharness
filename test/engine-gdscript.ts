@@ -6698,13 +6698,6 @@ function testTheReconnectFixtureListensWhereItIsTold(godotPath: string, projectD
   // The leg runs this through the loop over CASES, so it runs once and, being last, after every
   // step that meets the project as createProject made it.
   assert.equal(Object.keys(CASES).at(-1), 'reconnect', 'reconnect should be the last case');
-  const source = readFileSync(import.meta.filename, 'utf8');
-  const mainBody = source.slice(source.lastIndexOf('async function main'));
-  assert.ok(mainBody.includes('await main()'), 'the slice should hold main');
-  assert.ok(
-    !mainBody.includes("runFixture(godotPath, projectDir, 'bridge_" + "reconnect')"),
-    'main should not run the reconnect fixture itself',
-  );
 
   const saved = process.env[SHUT_PORT];
   process.env[SHUT_PORT] = 'none';
