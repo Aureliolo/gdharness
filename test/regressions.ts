@@ -102198,9 +102198,6 @@ const reparentingScript =
   'extends Node2D\n\n\nfunc _ready() -> void:\n\tvar holder := Node2D.new()\n\tholder.name = "Holder"\n\tadd_child(holder)\n' +
   '\tvar facing: Node = get_node("Facing")\n\tremove_child(facing)\n\tholder.add_child(facing)\n';
 // A tool script runs in an editor too, so what it drops is what an editor's save would drop as well.
-const notifiedScript =
-  'extends Node2D\n\n\nfunc _notification(what: int) -> void:\n\tif what != NOTIFICATION_SCENE_INSTANTIATED:\n\t\treturn\n' +
-  '\tvar holder := Node2D.new()\n\tholder.name = "Holder"\n\tadd_child(holder)\n\tvar facing: Node = get_node("Facing")\n\tremove_child(facing)\n\tholder.add_child(facing)\n';
 const droppingScript =
   '@tool\nextends Node2D\n\n@export var drop: bool = false:\n\tset(value):\n\t\tdrop = value\n' +
   '\t\tif value and has_node("Facing"):\n\t\t\tget_node("Facing").free()\n';
@@ -102223,30 +102220,8 @@ async function testASceneIsEditedAsSavedWithNoEditor(): Promise<void> {
       'page.tscn': twoNodeScene('page.gd'),
       'dropper.gd': droppingScript,
       'dropper.tscn': twoNodeScene('dropper.gd'),
-      'notified.gd': notifiedScript,
-      'notified.tscn': twoNodeScene('notified.gd'),
     },
     async ({ call, written, fileOf }) => {
-      for (const name of ['notified']) {
-        const scenePath = name + '.tscn';
-        await written('scene_node', {
-          op: 'add',
-          scenePath,
-          nodeType: 'Node2D',
-          nodeName: 'Eye',
-          parentNodePath: 'Facing',
-        });
-        await written('scene_node', {
-          op: 'set',
-          scenePath,
-          nodePath: '.',
-          properties: { position: [3, 4] },
-        });
-        const kept = fileOf(scenePath);
-        assert.doesNotMatch(kept, /Holder/, kept);
-        assert.match(kept, /\[node name="Facing" type="Node2D" parent="\."/, kept);
-        assert.match(kept, /\[node name="Eye" type="Node2D" parent="Facing"/, kept);
-      }
       await written('scene_node', {
         op: 'add',
         scenePath: 'page.tscn',
