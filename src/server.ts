@@ -276,6 +276,7 @@ import {
   SPAWNING_START,
   snapshotAnswer,
 } from './object-snapshot.js';
+import { claimRun } from './orphaned-run.js';
 import { launchOutsideTheTree } from './outside.js';
 import {
   exportedBuild,
@@ -16950,6 +16951,7 @@ export class GodotServer {
 
   /** The run [param record] describes, as this server holds a run picked up from a note. */
   private adoptionOf(record: RunRecord): GodotProcess {
+    claimRun(record, process.pid);
     return {
       pid: record.pid,
       log: new GameLog(),

@@ -377,6 +377,7 @@ import {
   SPAWNING_START,
   snapshotAnswer,
 } from '../src/object-snapshot.js';
+import { claimRun, orphanedSince } from '../src/orphaned-run.js';
 import { type OsLock, tryOsLock } from '../src/os-lock.js';
 import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from '../src/outside.js';
 import {
@@ -22732,6 +22733,115 @@ async function testAKeeperHoldsARunWhoseNoteItCannotWrite(): Promise<void> {
     await met.end();
     sweep(scratch);
   }
+}
+
+/**
+ * A run whose server has gone and which no other server took over is ended by its keeper, so its
+ * engine slot is given back (#1705). A run whose server is still there is left alone, and the
+ * limit is shortened for the test.
+ */
+async function testAKeeperEndsARunWhoseServerHasGone(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-orphaned-run-'));
+  const runtime = join(scratch, 'runtime');
+  const met = new MetProcesses();
+  const before = process.env['GDHARNESS_ORPHANED_AFTER_MS'];
+  process.env['GDHARNESS_ORPHANED_AFTER_MS'] = '1500';
+  const servers: ReturnType<typeof spawnHidden>[] = [];
+  try {
+    const started = async (
+      name: string,
+    ): Promise<{ pid: number; server: ReturnType<typeof spawnHidden> }> => {
+      const server = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
+        stdio: 'ignore',
+      });
+      servers.push(server);
+      const project = join(scratch, name);
+      const launched = launchedThroughTheKeeper(project, runtime, {
+        command: process.execPath,
+        args: ['-e', 'setTimeout(() => {}, 120000)'],
+        run: {
+          transcript: join(project, 'run.log'),
+          startedAt: Date.now(),
+          projectPath: project,
+          serverPid: server.pid,
+        },
+      });
+      const pid = get(launched, 'pid');
+      assert.ok(
+        typeof pid === 'number',
+        `the launch answers with the run's pid: ${JSON.stringify(launched)}`,
+      );
+      await met.meet(pid);
+      return { pid, server };
+    };
+    const orphan = await started('orphan');
+    const held = await started('held');
+    orphan.server.kill();
+    assert.ok(
+      (await answeredWithin(() => (alive(orphan.pid) ? undefined : true), 30_000)) === true,
+      'the game of a run whose server has gone is ended by its keeper',
+    );
+    assert.ok(alive(held.pid), 'and the game of a run whose server is there is not');
+  } finally {
+    for (const server of servers) {
+      server.kill();
+    }
+    if (before === undefined) {
+      delete process.env['GDHARNESS_ORPHANED_AFTER_MS'];
+    } else {
+      process.env['GDHARNESS_ORPHANED_AFTER_MS'] = before;
+    }
+    await met.end();
+    sweep(scratch);
+  }
+}
+
+/** A server taking a run over writes its pid into the note, so the keeper counts the run as held. */
+function testAServerTakingARunOverClaimsItsNote(): void {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-claimed-run-'));
+  const before = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = scratch;
+  try {
+    const record: RunRecord = {
+      pid: process.pid,
+      transcript: join(scratch, 'run.log'),
+      startedAt: Date.now(),
+      startedBy: Date.now(),
+      projectPath: join(scratch, 'project'),
+      serverPid: 2_000_000_000,
+      arguments: [],
+      command: process.execPath,
+    };
+    writeRunRecord(record);
+    claimRun(record, 4242);
+    assert.equal(readRunRecord(record.projectPath)?.serverPid, 4242, 'a run going is claimed');
+    const ended = { ...record, endedAt: Date.now() };
+    writeRunRecord(ended);
+    claimRun(ended, 4243);
+    assert.equal(readRunRecord(record.projectPath)?.serverPid, 2_000_000_000, 'a run that ended is not');
+  } finally {
+    if (before === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = before;
+    }
+    sweep(scratch);
+  }
+}
+
+/** A run whose server went is ended only after the limit, and a server back in time keeps it. */
+function testAnOrphanedRunIsEndedOnlyAfterTheLimit(): void {
+  const gone = (): boolean => false;
+  const first = orphanedSince(7, null, 1_000, gone);
+  assert.deepEqual(first, { since: 1_000, orphaned: false }, 'the clock starts at the first look');
+  const later = orphanedSince(7, first.since, 1_000 + 10 * 60_000, gone);
+  assert.equal(later.orphaned, true, 'and the limit ends the run');
+  assert.deepEqual(
+    orphanedSince(7, first.since, 5_000, () => true),
+    { since: null, orphaned: false },
+    'a server that is there stops the clock',
+  );
+  assert.deepEqual(orphanedSince(undefined, null, 5_000, gone), { since: null, orphaned: false });
 }
 
 /**
@@ -120551,6 +120661,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAProfiledGameIsNotHeldByAReaderOfItsProfile,
   testARunNoteIsNeverReadHalfWritten,
   testAKeeperHoldsARunWhoseNoteItCannotWrite,
+  testAKeeperEndsARunWhoseServerHasGone,
+  testAnOrphanedRunIsEndedOnlyAfterTheLimit,
+  testAServerTakingARunOverClaimsItsNote,
   testAProfiledRunNamesWhereItsTimeWent,
   testACallThroughAnEngineMethodLeavesTheCallersSelfTime,
   testAProfiledRunTimesNoNativeCallsUnlessAsked,
