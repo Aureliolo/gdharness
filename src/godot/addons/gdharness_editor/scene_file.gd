@@ -294,7 +294,7 @@ func _dropped() -> PackedStringArray:
 	var gone: PackedStringArray = []
 	for id: Variant in _loaded:
 		if not held.has(id) and not _removed.has(id):
-			gone.append(str(_loaded[id]))
+			var _added: bool = gone.append(str(_loaded[id]))
 	return gone
 
 
