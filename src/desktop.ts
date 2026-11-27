@@ -48,6 +48,15 @@ export function engineJobName(pid: number): string {
 export const HIDDEN_DESKTOP = 'gdharness';
 
 /**
+ * The desktop a windowed engine in [param lane] runs on. Lane 0 keeps the shared one. Every other
+ * lane gets one of its own on the same window station, so two windowed engines never share a
+ * focus, an input queue or a window size.
+ */
+export function windowedDesktop(lane: number): string {
+  return lane === 0 ? HIDDEN_DESKTOP : `${HIDDEN_DESKTOP}-${String(lane)}`;
+}
+
+/**
  * Names the desktop to a process started on one, and to everything it starts: an editor there plays
  * its games there too. Kept in step with `DESKTOP_VARIABLE` in the runtime autoload, which says what
  * a desktop with no pointer does to a game's own reading of the mouse.

@@ -516,13 +516,16 @@ first suite starts. A run that could not ask prints why, starting with
 
 ### The windowed engine
 
-All the windowed suites go to one windowed engine, which starts first, counts toward `--engines`
-and runs nothing else. A suite there sees the machine's real screen size, scale and keyboard
-layout, and runs slower for drawing frames.
+The windowed suites are dealt over windowed engines, which start first, count toward `--engines`
+and run nothing else. On Windows each has a hidden desktop of its own, so its focus, input events
+and window size are what it gets alone, and the suites are dealt as the headless ones are: no more
+windowed engines than `--engines`, free slots or work for them. Elsewhere every window shares one
+display, so all the windowed suites stay in one engine. A suite there sees the machine's real screen
+size, scale and keyboard layout, and runs slower for drawing frames.
 
 ### After the windowed engine
 
-Once the windowed engine ends, a headless engine follows it in the same slot without giving the
+Once a windowed engine ends, a headless engine follows it in the same slot without giving the
 slot back. It is dealt as though it began then, so a few quick windowed suites never leave a slot
 idle. The windowed engine takes no second share, since its display flags belong to the windowed
 suites. With `--engines 1` the run is that one slot, the windowed engine and then a headless one.

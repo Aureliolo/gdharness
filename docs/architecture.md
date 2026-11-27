@@ -1318,8 +1318,8 @@ A headless save also writes back the uid the file had, and the uid on each exter
 names. An engine with no editor's file system drops them, since only that tells the saver a path's
 uid. A reference gets the uid the uid cache holds for its path and no other.
 
-- A uid the cache does not know warns on every load. That happens for a file made with no editor
-  since the last scan.
+- A uid the cache does not know warns on every load. Each engine start adds the uid of every file
+  to the cache, so that happens only for a file made and referred to inside one engine run.
 - A uid the cache gives another file loads that file. That happens for the original of a scene
   copied whole.
 

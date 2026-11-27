@@ -126,6 +126,7 @@ import {
   retireHelper,
   spawnOnDesktop,
   throughHelper,
+  windowedDesktop,
   windowsCommandLine,
 } from '../src/desktop.js';
 import { HelpedChild, helperFor, ServedHelper } from '../src/desktop-process.js';
@@ -377,6 +378,7 @@ import {
   SPAWNING_START,
   snapshotAnswer,
 } from '../src/object-snapshot.js';
+import { claimRun, orphanedSince } from '../src/orphaned-run.js';
 import { type OsLock, tryOsLock } from '../src/os-lock.js';
 import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from '../src/outside.js';
 import {
@@ -726,6 +728,7 @@ import {
   timesAfter,
   type Unit,
   unitsOf,
+  windowedEnginesFor,
   windowedSaid,
   windowNeedsOf,
   writeJson,
@@ -1401,6 +1404,60 @@ async function testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly(): Promise<voi
     const unsaid = socket('an addon that sends no pid');
     hello(unsaid, undefined);
     assert.equal(unsaid.closedWith?.code, 4001, 'and one with no pid to read is told at once');
+  } finally {
+    for (const made of opened) {
+      if (made.readyState !== 3) {
+        made.close();
+      }
+    }
+  }
+}
+
+/**
+ * A one-shot run that dials in while an editor is held is turned away as a one-shot, not as a second
+ * editor. A gate's `--import` during an upgrade reached the old server's address and warned that
+ * the address already served another editor (#1727). A second editor is still told so, and one that
+ * never greets is refused as a second editor too.
+ */
+async function testAOneShotRunBesideAHeldEditorIsTurnedAwayQuietly(): Promise<void> {
+  const mine = resolve('/gdharness-one-shot-held');
+  const bridge = createBridge(0, 1000, '127.0.0.1', mine);
+  bridge.identifyEditorsWith((pid) => Promise.resolve(pid === 301 ? '--import' : null));
+  const hello = (socket: FakeSocket, pid: number): void => {
+    socket.emit('message', Buffer.from(JSON.stringify(greeting(mine, { editor_pid: pid }))));
+  };
+  const opened: FakeSocket[] = [];
+  const socket = (name: string): FakeSocket => {
+    const made = new FakeSocket(name);
+    opened.push(made);
+    connectFake(bridge, made);
+    return made;
+  };
+  try {
+    const editor = socket('the held editor');
+    hello(editor, 300);
+    await delay(20);
+    assert.equal(bridge.getStatus().connected, true, 'the editor is served');
+
+    const importing = socket('an import');
+    hello(importing, 301);
+    await delay(20);
+    assert.equal(
+      importing.closedWith?.code,
+      4002,
+      `closed as a one-shot: ${JSON.stringify(importing.closedWith)}`,
+    );
+    assert.match(importing.closedWith.reason, /pid 301 was started with --import/);
+    assert.equal(editor.closedWith, null, 'and the held editor is left alone');
+
+    const second = socket('a second editor');
+    hello(second, 302);
+    await delay(20);
+    assert.equal(
+      second.closedWith?.code,
+      4000,
+      `a second editor is told it is one too many: ${JSON.stringify(second.closedWith)}`,
+    );
   } finally {
     for (const made of opened) {
       if (made.readyState !== 3) {
@@ -21451,7 +21508,9 @@ async function testTheLifecycleLogSaysHowAServerEnded(): Promise<void> {
     );
     closed.child.stdin?.end();
     await exited(closed);
-    const told = linesOf(closed.child.pid);
+    // A server that lives past its parent check writes a `parent` line before it ends, whatever
+    // the machine's load made the call take. The log promises the other three, in order.
+    const told = linesOf(closed.child.pid).filter((line) => line['event'] !== 'parent');
     assert.deepEqual(
       told.map((line) => line['event']),
       ['started', 'client', 'ended'],
@@ -22676,6 +22735,115 @@ async function testAKeeperHoldsARunWhoseNoteItCannotWrite(): Promise<void> {
     await met.end();
     sweep(scratch);
   }
+}
+
+/**
+ * A run whose server has gone and which no other server took over is ended by its keeper, so its
+ * engine slot is given back (#1705). A run whose server is still there is left alone, and the
+ * limit is shortened for the test.
+ */
+async function testAKeeperEndsARunWhoseServerHasGone(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-orphaned-run-'));
+  const runtime = join(scratch, 'runtime');
+  const met = new MetProcesses();
+  const before = process.env['GDHARNESS_ORPHANED_AFTER_MS'];
+  process.env['GDHARNESS_ORPHANED_AFTER_MS'] = '1500';
+  const servers: ReturnType<typeof spawnHidden>[] = [];
+  try {
+    const started = async (
+      name: string,
+    ): Promise<{ pid: number; server: ReturnType<typeof spawnHidden> }> => {
+      const server = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
+        stdio: 'ignore',
+      });
+      servers.push(server);
+      const project = join(scratch, name);
+      const launched = launchedThroughTheKeeper(project, runtime, {
+        command: process.execPath,
+        args: ['-e', 'setTimeout(() => {}, 120000)'],
+        run: {
+          transcript: join(project, 'run.log'),
+          startedAt: Date.now(),
+          projectPath: project,
+          serverPid: server.pid,
+        },
+      });
+      const pid = get(launched, 'pid');
+      assert.ok(
+        typeof pid === 'number',
+        `the launch answers with the run's pid: ${JSON.stringify(launched)}`,
+      );
+      await met.meet(pid);
+      return { pid, server };
+    };
+    const orphan = await started('orphan');
+    const held = await started('held');
+    orphan.server.kill();
+    assert.ok(
+      (await answeredWithin(() => (alive(orphan.pid) ? undefined : true), 30_000)) === true,
+      'the game of a run whose server has gone is ended by its keeper',
+    );
+    assert.ok(alive(held.pid), 'and the game of a run whose server is there is not');
+  } finally {
+    for (const server of servers) {
+      server.kill();
+    }
+    if (before === undefined) {
+      delete process.env['GDHARNESS_ORPHANED_AFTER_MS'];
+    } else {
+      process.env['GDHARNESS_ORPHANED_AFTER_MS'] = before;
+    }
+    await met.end();
+    sweep(scratch);
+  }
+}
+
+/** A server taking a run over writes its pid into the note, so the keeper counts the run as held. */
+function testAServerTakingARunOverClaimsItsNote(): void {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-claimed-run-'));
+  const before = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = scratch;
+  try {
+    const record: RunRecord = {
+      pid: process.pid,
+      transcript: join(scratch, 'run.log'),
+      startedAt: Date.now(),
+      startedBy: Date.now(),
+      projectPath: join(scratch, 'project'),
+      serverPid: 2_000_000_000,
+      arguments: [],
+      command: process.execPath,
+    };
+    writeRunRecord(record);
+    claimRun(record, 4242);
+    assert.equal(readRunRecord(record.projectPath)?.serverPid, 4242, 'a run going is claimed');
+    const ended = { ...record, endedAt: Date.now() };
+    writeRunRecord(ended);
+    claimRun(ended, 4243);
+    assert.equal(readRunRecord(record.projectPath)?.serverPid, 2_000_000_000, 'a run that ended is not');
+  } finally {
+    if (before === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = before;
+    }
+    sweep(scratch);
+  }
+}
+
+/** A run whose server went is ended only after the limit, and a server back in time keeps it. */
+function testAnOrphanedRunIsEndedOnlyAfterTheLimit(): void {
+  const gone = (): boolean => false;
+  const first = orphanedSince(7, null, 1_000, gone);
+  assert.deepEqual(first, { since: 1_000, orphaned: false }, 'the clock starts at the first look');
+  const later = orphanedSince(7, first.since, 1_000 + 10 * 60_000, gone);
+  assert.equal(later.orphaned, true, 'and the limit ends the run');
+  assert.deepEqual(
+    orphanedSince(7, first.since, 5_000, () => true),
+    { since: null, orphaned: false },
+    'a server that is there stops the clock',
+  );
+  assert.deepEqual(orphanedSince(undefined, null, 5_000, gone), { since: null, orphaned: false });
 }
 
 /**
@@ -29167,6 +29335,7 @@ function testAUidCacheNamingAFileGoneIsMended(): void {
           [8n, 'res://copy.gd'],
           [0xffff_ffff_ffff_fff0n, 'res://deep/gone_too.gd'],
         ],
+        added: [],
       },
       'each entry naming a file gone moves to the file declaring its uid, outside a .gdignore, or goes',
     );
@@ -29179,11 +29348,11 @@ function testAUidCacheNamingAFileGoneIsMended(): void {
 
     // A sound cache, and one not in Godot's form, are left byte for byte.
     const sound = readFileSync(cache);
-    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [] });
+    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [], added: [] });
     assert.deepEqual(readFileSync(cache), sound);
     const broken = encodedUidCache(stale).subarray(0, 30);
     writeFileSync(cache, broken);
-    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [] });
+    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [], added: [] });
     assert.deepEqual(readFileSync(cache), broken);
 
     // Every way an engine is started mends the cache of the project its --path names, relative to
@@ -29242,6 +29411,71 @@ function testAWrappedEngineIsReadByItsOwnArguments(): void {
     '--',
     'x',
   ]);
+}
+
+/**
+ * A cache older than the files gains an entry for each uid they declare that it lacks (#1723). An
+ * engine that does not scan knew no file for such a uid and warned at every load that named it.
+ */
+function testAUidCacheGainsTheUidsOfFilesItPredates(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-uid-added-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'old.gd': 'extends Node\n',
+      'old.gd.uid': 'uid://1\n',
+      'new/part.tscn': '[gd_scene format=3 uid="uid://2"]\n\n[node name="Part" type="Node"]\n',
+      'new/script.gd': 'extends Node\n',
+      'new/script.gd.uid': 'uid://3\n',
+      'new/data.tres': '[gd_resource type="Resource" format=3 uid="uid://4"]\n',
+      'new/user.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="PackedScene" uid="uid://2" path="res://new/part.tscn" id="1"]\n',
+    });
+    // A digit in a uid text is its value plus 25, so uid://1 is 26n and uid://4 is 29n.
+    const entries: UidEntry[] = [[26n, 'res://old.gd']];
+    const cache = join(project, '.godot', 'uid_cache.bin');
+    mkdirSync(join(project, '.godot'));
+    writeFileSync(cache, encodedUidCache(entries));
+    assert.deepEqual(mendUidCache(project), {
+      moved: [],
+      dropped: [],
+      added: [
+        [27n, 'res://new/part.tscn'],
+        [28n, 'res://new/script.gd'],
+        [29n, 'res://new/data.tres'],
+      ],
+    });
+    assert.deepEqual(
+      readFileSync(cache),
+      encodedUidCache([
+        ...entries,
+        [27n, 'res://new/part.tscn'],
+        [28n, 'res://new/script.gd'],
+        [29n, 'res://new/data.tres'],
+      ]),
+      'the entries it had stand first, and the new ones follow',
+    );
+    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [], added: [] }, 'a second mend is done');
+
+    const fresh = mkdtempSync(join(tmpdir(), 'gdharness-uid-added-none-'));
+    try {
+      writeTree(fresh, {
+        'project.godot': 'config_version=5\n',
+        'a.gd': 'extends Node\n',
+        'a.gd.uid': 'uid://1\n',
+      });
+      mendUidCache(fresh);
+      assert.equal(
+        existsSync(join(fresh, '.godot', 'uid_cache.bin')),
+        false,
+        'no cache is made where none stood',
+      );
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -29558,6 +29792,7 @@ function testASidecarWithNoFileDeclaresNoUid(): void {
           [26n, 'res://gone.gd'],
           [27n, 'res://old.png'],
         ],
+        added: [],
       },
       'only a sidecar beside its file declares, and of two files claiming one uid the later scanned wins',
     );
@@ -29569,7 +29804,11 @@ function testASidecarWithNoFileDeclaresNoUid(): void {
         [30n, 'res://beside/kept.gd'],
       ]),
     );
-    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [] }, 'a second mend finds nothing to do');
+    assert.deepEqual(
+      mendUidCache(project),
+      { moved: [], dropped: [], added: [] },
+      'a second mend finds nothing to do',
+    );
 
     const said: string[] = [];
     const write = process.stderr.write.bind(process.stderr);
@@ -38203,7 +38442,16 @@ function testEngineFlagsAreAListNotAPassage(): void {
   assert.deepEqual(engineFlags([]), { ok: true });
   assert.deepEqual(engineFlags(['--verbose', '--debug-collisions', '--print-fps']), { ok: true });
   assert.deepEqual(
-    engineFlags(['--fixed-fps', '60', '--time-scale', '0.5', '--resolution', '640x360', '--quiet']),
+    engineFlags([
+      '--fixed-fps',
+      '60',
+      '--time-scale',
+      '0.5',
+      '--windowed',
+      '--resolution',
+      '640x360',
+      '--quiet',
+    ]),
     { ok: true },
   );
   const refused = (given: string[]): string => {
@@ -67413,6 +67661,11 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
       // A run that wrote its report says how long the whole call took beside gdUnit4's own seconds.
       const quick = await run('res://quick');
       assert.equal(get(quick, 'passed'), true, JSON.stringify(quick));
+      assert.equal(
+        get(quick, 'engineLog'),
+        undefined,
+        `a run that passed names no log: ${JSON.stringify(quick)}`,
+      );
       const quickTook = Number(get(quick, 'tookMs'));
       // gdUnit4 is copied in unimported, so the first run imports its pictures, which the limit
       // does not cover and importTookMs counts.
@@ -67486,6 +67739,13 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
         /^hung: killed after 12000 ms, having printed nothing/,
         JSON.stringify(stuck),
       );
+      // A run that did not pass keeps its engine log, which holds what a crash printed, and names it.
+      const keptLog = String(get(stuck, 'engineLog'));
+      assert.ok(
+        keptLog !== 'undefined' && existsSync(keptLog),
+        `a run that did not pass names a log that is still there: ${JSON.stringify(stuck)}`,
+      );
+      rmSync(dirname(keptLog), { recursive: true, force: true });
       const loop = await run('res://looping');
       assert.equal(get(loop, 'hung'), false, JSON.stringify(loop));
       assert.equal(get(loop, 'timedOut'), true, JSON.stringify(loop));
@@ -102302,6 +102562,82 @@ async function testASceneIsEditedAsSavedWithNoEditor(): Promise<void> {
   );
 }
 
+const staleShaderScene =
+  '[gd_scene format=3]\n\n[ext_resource type="Shader" path="res://s.gdshader" id="1_s"]\n\n' +
+  '[sub_resource type="ShaderMaterial" id="ShaderMaterial_a"]\nshader = ExtResource("1_s")\n' +
+  'shader_parameter/early = 1.0\nshader_parameter/kept = 2.0\nshader_parameter/stale = 3.0\n\n' +
+  '[node name="Main" type="Node3D" unique_id=1]\n\n' +
+  '[node name="Mesh" type="MeshInstance3D" parent="." unique_id=2]\nmaterial_override = SubResource("ShaderMaterial_a")\n\n' +
+  '[node name="Other" type="Node3D" parent="." unique_id=4]\n';
+
+/**
+ * A shader parameter its shader no longer declares is still in the file and on the material, so an
+ * unset takes it off, and a set of it is still refused as a name the shader lacks.
+ */
+async function testAStaleShaderParameterIsUnset(): Promise<void> {
+  await withASceneProject(
+    'stale shader parameter',
+    {
+      's.gdshader': 'shader_type spatial;\nuniform float kept = 1.0;\nuniform float other = 1.0;\n',
+      'view.tscn': staleShaderScene,
+    },
+    async ({ call, written, fileOf }) => {
+      const mesh = { op: 'set', scenePath: 'view.tscn', nodePath: 'Mesh' };
+      const refusedSet =
+        textOf(
+          await call('scene_node', {
+            ...mesh,
+            properties: { 'material_override/shader_parameter/stale': 4 },
+          }),
+        ) ?? '';
+      assert.match(refusedSet, /declares no uniform stale/, refusedSet);
+      const absent =
+        textOf(await call('scene_node', { ...mesh, unset: ['material_override/shader_parameter/gone'] })) ??
+        '';
+      assert.match(absent, /declares no uniform gone/, absent);
+      await written('scene_node', { ...mesh, unset: ['material_override/shader_parameter/stale'] });
+      const saved = fileOf('view.tscn');
+      assert.doesNotMatch(saved, /shader_parameter\/stale/, saved);
+      assert.match(saved, /shader_parameter\/kept = 2\.0/, saved);
+    },
+  );
+}
+
+/**
+ * A write to another node leaves a shader parameter its shader no longer declares in the file, as
+ * the file held it, since the engine saves only the parameters a shader declares. An unset of it
+ * still takes it out, and a later write does not bring it back.
+ */
+async function testAWriteKeepsAShaderParameterTheShaderLacks(): Promise<void> {
+  await withASceneProject(
+    'stale shader parameter kept',
+    {
+      's.gdshader': 'shader_type spatial;\nuniform float kept = 1.0;\nuniform float other = 1.0;\n',
+      'view.tscn': staleShaderScene,
+    },
+    async ({ written, fileOf }) => {
+      const other = { op: 'set', scenePath: 'view.tscn', nodePath: 'Other' };
+      await written('scene_node', { ...other, properties: { position: [3, 4, 5] } });
+      const kept = fileOf('view.tscn');
+      assert.match(
+        kept,
+        /shader = ExtResource\("[^"]+"\)\nshader_parameter\/early = 1\.0\nshader_parameter\/kept = 2\.0\nshader_parameter\/stale = 3\.0\n/,
+        kept,
+      );
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'view.tscn',
+        nodePath: 'Mesh',
+        unset: ['material_override/shader_parameter/stale'],
+      });
+      await written('scene_node', { ...other, properties: { position: [5, 4, 3] } });
+      const taken = fileOf('view.tscn');
+      assert.doesNotMatch(taken, /shader_parameter\/stale/, taken);
+      assert.match(taken, /shader_parameter\/kept = 2\.0/, taken);
+    },
+  );
+}
+
 /** scene_node set, add, duplicate, get and scene_signal connect and list on a scene, with no editor. */
 async function testASceneNodeIsWrittenAndReadWithNoEditor(): Promise<void> {
   await withASceneProject(
@@ -107160,27 +107496,23 @@ async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
       `a scene inheriting an inherited one: ${JSON.stringify(further)}`,
     );
     const bigger = fileOf('parts/bigger_crate.tscn');
-    assert.match(
-      bigger,
-      /\[ext_resource type="PackedScene" path="res:\/\/parts\/big_crate\.tscn" id="1_base"\]/,
-      `big_crate.tscn was made since the import, so the uid cache has no uid for it to be named by: ${bigger}`,
+    const bigUid = /uid="(uid:\/\/[a-y0-8]+)"/.exec(fileOf('parts/big_crate.tscn'))?.[1] ?? 'no header uid';
+    // The engine start before this write set the cache right, which gave big_crate.tscn, made since
+    // the import, an entry. Naming it by path now happens only for a file made and referred to
+    // inside one engine run, which no tool call does.
+    assert.ok(
+      bigger.includes(`[ext_resource type="PackedScene" uid="${bigUid}" path="res://parts/big_crate.tscn"`),
+      `big_crate.tscn is named by its own uid: ${bigger}`,
     );
-    assert.equal(
-      get(further, 'namedByPath'),
-      "This saved res://parts/big_crate.tscn by path, because the project's uid cache does not hold its uid until the project is scanned. A path loads the same. project_import refresh_uids scans the project, so later writes name it by uid.",
-      'and the answer says why, with the call that changes it',
-    );
+    assert.equal(get(further, 'namedByPath'), undefined, JSON.stringify(further));
     assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
     const refreshed = parseTextContent(await call('project_import', { op: 'refresh_uids' }));
     assert.ok(Array.isArray(get(refreshed, 'uidsCreated')), JSON.stringify(refreshed));
     const cached = asArray(get(refreshed, 'uidsCached')).map(String);
-    assert.ok(
-      cached.includes('res://parts/big_crate.tscn') && cached.includes('res://parts/bigger_crate.tscn'),
-      `the answer names the scenes made since the import as gaining their uid in the cache: ${JSON.stringify(refreshed)}`,
-    );
-    assert.ok(
-      !cached.includes('res://parts/crate.tscn'),
-      `and not the one it held already: ${cached.join(', ')}`,
+    assert.deepEqual(
+      cached,
+      ['res://parts/bigger_crate.tscn'],
+      `only the scene made by the last write is newly taken: the starts before it gave the others their entry: ${JSON.stringify(refreshed)}`,
     );
     const after = await written('scene_node', {
       op: 'set',
@@ -107189,7 +107521,6 @@ async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
       properties: { position: [1, 1] },
     });
     assert.equal(get(after, 'namedByPath'), undefined, JSON.stringify(after));
-    const bigUid = /uid="(uid:\/\/[a-y0-8]+)"/.exec(fileOf('parts/big_crate.tscn'))?.[1] ?? 'no header uid';
     assert.ok(
       fileOf('parts/bigger_crate.tscn').includes(
         `[ext_resource type="PackedScene" uid="${bigUid}" path="res://parts/big_crate.tscn"`,
@@ -115391,6 +115722,7 @@ function testTheUidCacheStepsOverAFolderHoldingAProject(): void {
       assert.deepEqual(mendUidCache(project), {
         moved: [[2972703169784048779n, 'res://boot/loader.gd', 'res://gdharness/loader.gd']],
         dropped: [[8n, 'res://copy.gd']],
+        added: [],
       });
     },
   );
@@ -117071,6 +117403,78 @@ async function testTurnsRunInOrderAFailureBlocksNoneAndASettledKeyIsForgotten():
   } finally {
     process.off('unhandledRejection', count);
   }
+}
+
+/**
+ * Windowed suites are dealt over several windowed engines, each in a lane and on a desktop of its
+ * own, and one engine keeps them all in one. No engine starts here, so CI's engine legs need not
+ * run it for the dealing to be checked.
+ */
+function testWindowedSuitesAreDealtOverWindowedEngines(): void {
+  const unit = (name: string, windowed: boolean): Unit => ({
+    suite: `res://tests/${name}_test.gd`,
+    cases: ['test_one'],
+    cost: 100,
+    timed: true,
+    windowed,
+    accessible: false,
+    headless: !windowed,
+  });
+  const windowed = ['a', 'b', 'c', 'd', 'e', 'f'].map((name) => unit(name, true));
+  const all = [...windowed, unit('h1', false), unit('h2', false)];
+  const declaredOf = (units: readonly Unit[]): Map<string, readonly string[]> =>
+    new Map(units.map((one) => [one.suite, one.cases]));
+  const windowedPlans = (plans: readonly EnginePlan[]): EnginePlan[] => plans.filter((plan) => plan.windowed);
+
+  const many = windowedPlans(dealt(all, declaredOf(all), 3, Number.POSITIVE_INFINITY));
+  assert.deepEqual(
+    many.map((plan) => plan.lane),
+    [0, 1, 2],
+    'six windowed suites and three engines make three windowed engines, each in a lane of its own',
+  );
+  assert.deepEqual(
+    many.flatMap((plan) => plan.suites.map((suite) => suite.path)).toSorted(),
+    windowed.map((one) => one.suite).toSorted(),
+    'and between them they hold every windowed suite once',
+  );
+  assert.deepEqual(
+    many.map((plan) => plan.suites.length),
+    [2, 2, 2],
+    'dealt evenly',
+  );
+  assert.equal(
+    windowedPlans(dealt(all, declaredOf(all), 1, Number.POSITIVE_INFINITY)).length,
+    1,
+    'a run of one engine keeps the windowed suites in one',
+  );
+  assert.equal(
+    windowedPlans(dealt(all, declaredOf(all), 3)).length,
+    1,
+    'a platform allowing one windowed engine keeps them in one',
+  );
+  assert.equal(windowedEnginesFor('linux'), 1, 'Linux has one display for every window');
+  assert.equal(windowedEnginesFor('darwin'), 1, 'and so does macOS');
+  assert.equal(windowedEnginesFor('win32'), Number.POSITIVE_INFINITY, 'Windows gives each its own desktop');
+
+  const shares = new Shares(all, declaredOf(all), 3, Number.POSITIVE_INFINITY);
+  const drawn = [shares.next(0), shares.next(1), shares.next(2)];
+  assert.deepEqual(
+    drawn.map((plan) => plan?.windowed),
+    [true, true, true],
+    'shares hand each of the first three lanes a windowed part',
+  );
+  assert.deepEqual(
+    drawn.map((plan) => plan?.suites.length),
+    [2, 2, 2],
+    'of equal size',
+  );
+  assert.equal(shares.next(0)?.windowed, false, 'and what follows is headless');
+  const alone = new Shares(all, declaredOf(all), 1, Number.POSITIVE_INFINITY);
+  assert.equal(alone.next(0)?.suites.length, 6, 'one lane takes every windowed suite whole');
+
+  const desktops = [0, 1, 2].map(windowedDesktop);
+  assert.equal(desktops[0], HIDDEN_DESKTOP, 'the first lane keeps the shared desktop');
+  assert.equal(new Set(desktops).size, 3, 'and every lane has a desktop of its own');
 }
 
 /**
@@ -119487,6 +119891,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAServerThatDiesMidCallSaysHowItEnded,
   testASceneNodeIsWrittenAndReadWithNoEditor,
   testASceneIsEditedAsSavedWithNoEditor,
+  testAStaleShaderParameterIsUnset,
+  testAWriteKeepsAShaderParameterTheShaderLacks,
   testAConnectionIsWrittenAndJudgedAgainstItsMethodWithNoEditor,
   testAReconnectKeepsBindsAndFlagsWithNoEditor,
   testAConnectionMadeByAnInstancedSceneIsNotEditableWhereItIsInstanced,
@@ -119723,6 +120129,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnOpenConnectionDoesNotHoldItsProcess,
   testOneServerOneProjectRegression,
   testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly,
+  testAOneShotRunBesideAHeldEditorIsTurnedAwayQuietly,
   testEngineEntriesFoldAndScriptErrorsAreKnown,
   testAnEvaluatesErrorIsNotTheGames,
   testAPathReadsErrorIsNotTheGames,
@@ -120123,6 +120530,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartMendsNoClassListWhereThereIsNoneOrNoProjectIsNamed,
   testAnEngineReadsAClassListMendedOfAGoneScript,
   testASidecarWithNoFileDeclaresNoUid,
+  testAUidCacheGainsTheUidsOfFilesItPredates,
   testTwinUidsSettleAsTheEditorScans,
   testAMovedAutoloadBootsFromWhereItIs,
   testACancelledCallEndsTheEngineItStarted,
@@ -120303,6 +120711,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInnerClassBaseIsFollowedToTheInnerClass,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testAnEngineRunsTheCheapEndOfItsUnitsFirst,
+  testWindowedSuitesAreDealtOverWindowedEngines,
   testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn,
   testAMixedSetIsCutIntoEnginesAfterWhatIsLeftOut,
   testACutRunIsDrivenThroughItsEngines,
@@ -120409,6 +120818,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAProfiledGameIsNotHeldByAReaderOfItsProfile,
   testARunNoteIsNeverReadHalfWritten,
   testAKeeperHoldsARunWhoseNoteItCannotWrite,
+  testAKeeperEndsARunWhoseServerHasGone,
+  testAnOrphanedRunIsEndedOnlyAfterTheLimit,
+  testAServerTakingARunOverClaimsItsNote,
   testAProfiledRunNamesWhereItsTimeWent,
   testACallThroughAnEngineMethodLeavesTheCallersSelfTime,
   testAProfiledRunTimesNoNativeCallsUnlessAsked,

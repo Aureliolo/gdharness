@@ -1,4 +1,14 @@
-import { existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cachedEntries } from './class-cache.js';
@@ -27,12 +37,14 @@ export type UidEntry = readonly [id: bigint, path: string];
 interface UidMend {
   readonly moved: readonly (readonly [id: bigint, from: string, to: string])[];
   readonly dropped: readonly UidEntry[];
+  /** The entries put in for a uid a file declares and the cache lacked. */
+  readonly added: readonly UidEntry[];
 }
 
 const CACHE = join('.godot', 'uid_cache.bin');
 const RES = 'res://';
 const UID = 'uid://';
-const NOTHING: UidMend = { moved: [], dropped: [] };
+const NOTHING: UidMend = { moved: [], dropped: [], added: [] };
 const CLASS_LIST = join('.godot', 'global_script_class_cache.cfg');
 
 /** Each id's last entry, in the order each id first stood, or null when [param data] is not a cache. */
@@ -118,6 +130,7 @@ function presenceIn(projectPath: string): (path: string) => boolean {
   };
 }
 
+const HEAD_BYTES = 4096;
 const IMPORT_UID = /^uid="(uid:\/\/[^"]*)"/m;
 const HEADER_UID = /^\[gd_(?:scene|resource)\b[^\]\n]*\buid="(uid:\/\/[^"]*)"/;
 
@@ -126,9 +139,17 @@ const HEADER_UID = /^\[gd_(?:scene|resource)\b[^\]\n]*\buid="(uid:\/\/[^"]*)"/;
  * shader, an `.import` beside an imported file, or a text scene's or resource's own header.
  */
 function declared(path: string, name: string): readonly [text: string, owner: string] | null {
+  // Only the head, which holds the uid in each of these forms, since every file of the project is
+  // asked and a scene can be megabytes.
   const read = (): string | null => {
     try {
-      return readFileSync(path, 'utf8');
+      const file = openSync(path, 'r');
+      try {
+        const head = Buffer.alloc(HEAD_BYTES);
+        return head.toString('utf8', 0, readSync(file, head, 0, HEAD_BYTES, 0));
+      } finally {
+        closeSync(file);
+      }
     } catch {
       return null;
     }
@@ -163,7 +184,7 @@ function declared(path: string, name: string): readonly [text: string, owner: st
  * of two files declaring one id the later wins. The walk goes in the reverse order and keeps the
  * first, so it ends once every id is found.
  */
-function declaringFiles(projectPath: string, wanted: ReadonlySet<bigint>): Map<bigint, string> {
+function declaringFiles(projectPath: string, wanted: ReadonlySet<bigint> | null): Map<bigint, string> {
   const found = new Map<bigint, string>();
   for (const folder of walkProject(projectPath, { withOurs: true, reversed: true }).folders) {
     const prefix = folder.folder === '' ? '' : `${folder.folder}/`;
@@ -171,7 +192,7 @@ function declaringFiles(projectPath: string, wanted: ReadonlySet<bigint>): Map<b
       fileNoCaseCompare(declaredFor(b.name), declaredFor(a.name)),
     );
     for (const file of files) {
-      if (found.size === wanted.size) {
+      if (wanted !== null && found.size === wanted.size) {
         return found;
       }
       recordDeclaration(join(folder.path, file.name), `${prefix}${file.name}`, wanted, found);
@@ -194,12 +215,12 @@ function declaredFor(name: string): string {
 function recordDeclaration(
   path: string,
   spelled: string,
-  wanted: ReadonlySet<bigint>,
+  wanted: ReadonlySet<bigint> | null,
   found: Map<bigint, string>,
 ): void {
   const declaration = declared(path, spelled);
   const id = declaration === null ? null : uidOfText(declaration[0]);
-  if (declaration !== null && id !== null && wanted.has(id) && !found.has(id)) {
+  if (declaration !== null && id !== null && (wanted === null || wanted.has(id)) && !found.has(id)) {
     found.set(id, `${RES}${declaration[1]}`);
   }
 }
@@ -247,11 +268,17 @@ export function mendUidCache(projectPath: string): UidMend {
   }
   const present = presenceIn(projectPath);
   const gone = entries.filter(([, path]) => path.startsWith(RES) && !present(path));
-  if (gone.length === 0) {
+  // Every uid a file declares, since a cache older than a file lacks the entry, and an engine that
+  // does not scan then knows no file for the uid and warns at each load that names it.
+  const now = declaringFiles(projectPath, null);
+  const known = new Set(entries.map(([id]) => id));
+  const added: UidEntry[] = [...now]
+    .filter(([id]) => !known.has(id))
+    .toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  if (gone.length === 0 && added.length === 0) {
     return NOTHING;
   }
   const goneIds = new Set(gone.map(([id]) => id));
-  const now = declaringFiles(projectPath, goneIds);
   const moved: [bigint, string, string][] = [];
   const dropped: UidEntry[] = [];
   for (const [id, path] of gone) {
@@ -270,14 +297,14 @@ export function mendUidCache(projectPath: string): UidMend {
     const to = now.get(id);
     return to === undefined ? [] : [[id, to]];
   });
-  writeFileSync(written, encodedUidCache(kept));
+  writeFileSync(written, encodedUidCache([...kept, ...added]));
   try {
     renameSync(written, cache);
   } catch (error) {
     rmSync(written, { force: true });
     throw error;
   }
-  return { moved, dropped };
+  return { moved, dropped, added };
 }
 
 /** One class of the class list that names a file gone: its name and the `res://` path it is listed at. */
@@ -372,7 +399,11 @@ export function mendBeforeStart(args: readonly string[], cwd: string | URL | und
   }
   const where = join(project, CACHE);
   try {
-    const { moved, dropped } = mendUidCache(project);
+    const { moved, dropped, added } = mendUidCache(project);
+    if (added.length > 0) {
+      const named = added.map(([, path]) => path).join(', ');
+      process.stderr.write(`uid cache: added what files declare and it lacked in ${where}: ${named}\n`);
+    }
     if (moved.length > 0) {
       const named = moved.map(([, from, to]) => `${from} to ${to}`).join(', ');
       process.stderr.write(`uid cache: moved what names a file gone in ${where}: ${named}\n`);

@@ -32,6 +32,7 @@ import { letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
 import { raisedMark } from './game-log.js';
 import { endedOnce, type KeeperListening, listenForTheServer } from './keeper-channel.js';
+import { endWhenOrphaned } from './orphaned-run.js';
 import type { OsLock } from './os-lock.js';
 import {
   KEEPER_SCRIPT,
@@ -709,7 +710,15 @@ async function keep(): Promise<void> {
   const listening = record === null ? null : await listenAndNote(record, ender, debuggerPeer);
   await sayPid(pid);
   const slot = await takeTheSlot(run?.slot);
+  const unwatched =
+    record === null
+      ? undefined
+      : endWhenOrphaned(record, () => {
+          ender.stop = true;
+          ender.end();
+        });
   const told = await exited;
+  unwatched?.();
   // Before the exit is noted: whoever reads the note then reads a transcript with the game's last lines.
   await copied;
   const code = exitFile === '' ? whole(told.code) : helperExit(exitFile, whole(told.code));

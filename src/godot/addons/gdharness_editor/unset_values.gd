@@ -52,6 +52,10 @@ static func place_of(target: Object, path: String, given: Dictionary) -> Array:
 	if not elsewhere.is_empty():
 		return [null, elsewhere]
 	if holder is ShaderMaterial and name.begins_with("shader_parameter/"):
+		# A parameter its shader no longer declares, which the material still holds as the file gave
+		# it, is the one an unset is for. Only a set of it is refused.
+		if holder.get(name) != null:
+			return [holder, name]
 		return [null, GdhDeclared.no_uniform(holder as ShaderMaterial, name)]
 	return [null, GdhPropertyValues.no_property(holder, name)]
 
