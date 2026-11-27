@@ -102311,6 +102311,47 @@ async function testASceneIsEditedAsSavedWithNoEditor(): Promise<void> {
   );
 }
 
+const staleShaderScene =
+  '[gd_scene format=3]\n\n[ext_resource type="Shader" path="res://s.gdshader" id="1_s"]\n\n' +
+  '[sub_resource type="ShaderMaterial" id="ShaderMaterial_a"]\nshader = ExtResource("1_s")\n' +
+  'shader_parameter/kept = 2.0\nshader_parameter/stale = 3.0\n\n' +
+  '[node name="Main" type="Node3D" unique_id=1]\n\n' +
+  '[node name="Mesh" type="MeshInstance3D" parent="." unique_id=2]\nmaterial_override = SubResource("ShaderMaterial_a")\n\n' +
+  '[node name="Other" type="Node3D" parent="." unique_id=4]\n';
+
+/**
+ * A shader parameter its shader no longer declares is still in the file and on the material, so an
+ * unset takes it off, and a set of it is still refused as a name the shader lacks.
+ */
+async function testAStaleShaderParameterIsUnset(): Promise<void> {
+  await withASceneProject(
+    'stale shader parameter',
+    {
+      's.gdshader': 'shader_type spatial;\nuniform float kept = 1.0;\nuniform float other = 1.0;\n',
+      'view.tscn': staleShaderScene,
+    },
+    async ({ call, written, fileOf }) => {
+      const mesh = { op: 'set', scenePath: 'view.tscn', nodePath: 'Mesh' };
+      const refusedSet =
+        textOf(
+          await call('scene_node', {
+            ...mesh,
+            properties: { 'material_override/shader_parameter/stale': 4 },
+          }),
+        ) ?? '';
+      assert.match(refusedSet, /declares no uniform stale/, refusedSet);
+      const absent =
+        textOf(await call('scene_node', { ...mesh, unset: ['material_override/shader_parameter/gone'] })) ??
+        '';
+      assert.match(absent, /declares no uniform gone/, absent);
+      await written('scene_node', { ...mesh, unset: ['material_override/shader_parameter/stale'] });
+      const saved = fileOf('view.tscn');
+      assert.doesNotMatch(saved, /shader_parameter\/stale/, saved);
+      assert.match(saved, /shader_parameter\/kept = 2\.0/, saved);
+    },
+  );
+}
+
 /** scene_node set, add, duplicate, get and scene_signal connect and list on a scene, with no editor. */
 async function testASceneNodeIsWrittenAndReadWithNoEditor(): Promise<void> {
   await withASceneProject(
@@ -119496,6 +119537,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAServerThatDiesMidCallSaysHowItEnded,
   testASceneNodeIsWrittenAndReadWithNoEditor,
   testASceneIsEditedAsSavedWithNoEditor,
+  testAStaleShaderParameterIsUnset,
   testAConnectionIsWrittenAndJudgedAgainstItsMethodWithNoEditor,
   testAReconnectKeepsBindsAndFlagsWithNoEditor,
   testAConnectionMadeByAnInstancedSceneIsNotEditableWhereItIsInstanced,
