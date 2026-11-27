@@ -1889,21 +1889,28 @@ static func _stale_parameter_lines(
 	var lost: Dictionary = {}
 	for key: Variant in before:
 		var section: String = str(key)
-		var material: ShaderMaterial = carried.get(section.trim_prefix("sub:")) as ShaderMaterial
-		if material == null or not section.begins_with("sub:") or not after.has(key):
+		var held: Variant = carried.get(section.trim_prefix("sub:"))
+		if not held is ShaderMaterial or not section.begins_with("sub:") or not after.has(key):
 			continue
-		var filed: Dictionary = GdhHeadlessCheck.entries_of(before[key])
-		var saved: Dictionary = GdhHeadlessCheck.entries_of(after[key])
-		var lines: PackedStringArray = []
+		var material: ShaderMaterial = held
+		var was_section: Dictionary = before[key]
+		var now_section: Dictionary = after[key]
+		var filed: Dictionary = GdhHeadlessCheck.entries_of(was_section)
+		var saved: Dictionary = GdhHeadlessCheck.entries_of(now_section)
+		var lines: Array = []
+		var anchor: String = ""
 		for name: Variant in filed:
 			var property: String = str(name)
-			if (
+			var stale: bool = (
 				property.begins_with("shader_parameter/")
 				and not saved.has(property)
 				and material.get(property) != null
 				and not _declares(material, property.trim_prefix("shader_parameter/"))
-			):
-				var _added: bool = lines.append("%s = %s" % [property, filed[name]])
+			)
+			if stale:
+				lines.append([anchor, "%s = %s" % [property, filed[name]]])
+			if stale or saved.has(property):
+				anchor = property
 		if not lines.is_empty():
 			lost[section.trim_prefix("sub:")] = lines
 	return lost
@@ -1919,8 +1926,9 @@ static func _declares(material: ShaderMaterial, uniform: String) -> bool:
 	return false
 
 
-## [param text], a text scene, with the lines of [param lost], by sub-resource id, added at the end
-## of that sub-resource's section.
+## [param text], a text scene, with the lines of [param lost], by sub-resource id, each added as
+## [code][after, line][/code] after the entry named [code]after[/code] in that sub-resource's
+## section, or at its end where it has none.
 static func _with_lines_added(text: String, lost: Dictionary) -> String:
 	var lines: PackedStringArray = text.split("\n")
 	for id: Variant in lost:
@@ -1933,12 +1941,27 @@ static func _with_lines_added(text: String, lost: Dictionary) -> String:
 				end += 1
 			while lines[end - 1].is_empty():
 				end -= 1
-			var added: PackedStringArray = lost[id]
-			for line: String in added:
-				lines.insert(end, line)
+			var added: Array = lost[id]
+			for pair: Array in added:
+				var at: int = _after_entry(lines, index, end, str(pair[0]))
+				var _inserted: int = lines.insert(at, str(pair[1]))
 				end += 1
 			break
 	return "\n".join(lines)
+
+
+## The line after the entry named [param name], and any lines its value runs over, between
+## [param from] and [param end] of [param lines], or [param end] when there is no such entry.
+static func _after_entry(lines: PackedStringArray, from: int, end: int, name: String) -> int:
+	var at: int = from + 1
+	while at < end and not lines[at].begins_with(name + " = "):
+		at += 1
+	if name.is_empty() or at >= end:
+		return end
+	at += 1
+	while at < end and not lines[at].is_empty() and not lines[at].contains(" = "):
+		at += 1
+	return at
 
 
 ## What a write outside an editor does to [param packed] before it saves, as [packed scene,

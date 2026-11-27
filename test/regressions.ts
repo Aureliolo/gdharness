@@ -102314,7 +102314,7 @@ async function testASceneIsEditedAsSavedWithNoEditor(): Promise<void> {
 const staleShaderScene =
   '[gd_scene format=3]\n\n[ext_resource type="Shader" path="res://s.gdshader" id="1_s"]\n\n' +
   '[sub_resource type="ShaderMaterial" id="ShaderMaterial_a"]\nshader = ExtResource("1_s")\n' +
-  'shader_parameter/kept = 2.0\nshader_parameter/stale = 3.0\n\n' +
+  'shader_parameter/early = 1.0\nshader_parameter/kept = 2.0\nshader_parameter/stale = 3.0\n\n' +
   '[node name="Main" type="Node3D" unique_id=1]\n\n' +
   '[node name="Mesh" type="MeshInstance3D" parent="." unique_id=2]\nmaterial_override = SubResource("ShaderMaterial_a")\n\n' +
   '[node name="Other" type="Node3D" parent="." unique_id=4]\n';
@@ -102368,7 +102368,11 @@ async function testAWriteKeepsAShaderParameterTheShaderLacks(): Promise<void> {
       const other = { op: 'set', scenePath: 'view.tscn', nodePath: 'Other' };
       await written('scene_node', { ...other, properties: { position: [3, 4, 5] } });
       const kept = fileOf('view.tscn');
-      assert.match(kept, /shader_parameter\/kept = 2\.0\nshader_parameter\/stale = 3\.0\n/, kept);
+      assert.match(
+        kept,
+        /shader = ExtResource\("[^"]+"\)\nshader_parameter\/early = 1\.0\nshader_parameter\/kept = 2\.0\nshader_parameter\/stale = 3\.0\n/,
+        kept,
+      );
       await written('scene_node', {
         op: 'set',
         scenePath: 'view.tscn',
