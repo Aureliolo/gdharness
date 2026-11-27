@@ -91,11 +91,7 @@ function stringEnd(source: string, at: number): number {
   const fence = source.startsWith(quote.repeat(3), at) ? quote.repeat(3) : quote;
   let end = at + fence.length;
   while (end < source.length && !source.startsWith(fence, end)) {
-    // A single-quoted string ends at its line. An unterminated one is the tokenizer's error to
-    // report, and treating the rest of the file as a string would hide every use after it.
-    if (fence.length === 1 && source[end] === '\n') {
-      return end;
-    }
+    // A single-quoted string may span lines, as GDScript reads it, so a line break does not end it.
     // Raw strings keep the backslash but still do not end at an escaped quote, so both skip two.
     end += source[end] === '\\' ? 2 : 1;
   }
