@@ -38442,7 +38442,16 @@ function testEngineFlagsAreAListNotAPassage(): void {
   assert.deepEqual(engineFlags([]), { ok: true });
   assert.deepEqual(engineFlags(['--verbose', '--debug-collisions', '--print-fps']), { ok: true });
   assert.deepEqual(
-    engineFlags(['--fixed-fps', '60', '--time-scale', '0.5', '--resolution', '640x360', '--quiet']),
+    engineFlags([
+      '--fixed-fps',
+      '60',
+      '--time-scale',
+      '0.5',
+      '--windowed',
+      '--resolution',
+      '640x360',
+      '--quiet',
+    ]),
     { ok: true },
   );
   const refused = (given: string[]): string => {
@@ -102553,6 +102562,82 @@ async function testASceneIsEditedAsSavedWithNoEditor(): Promise<void> {
   );
 }
 
+const staleShaderScene =
+  '[gd_scene format=3]\n\n[ext_resource type="Shader" path="res://s.gdshader" id="1_s"]\n\n' +
+  '[sub_resource type="ShaderMaterial" id="ShaderMaterial_a"]\nshader = ExtResource("1_s")\n' +
+  'shader_parameter/early = 1.0\nshader_parameter/kept = 2.0\nshader_parameter/stale = 3.0\n\n' +
+  '[node name="Main" type="Node3D" unique_id=1]\n\n' +
+  '[node name="Mesh" type="MeshInstance3D" parent="." unique_id=2]\nmaterial_override = SubResource("ShaderMaterial_a")\n\n' +
+  '[node name="Other" type="Node3D" parent="." unique_id=4]\n';
+
+/**
+ * A shader parameter its shader no longer declares is still in the file and on the material, so an
+ * unset takes it off, and a set of it is still refused as a name the shader lacks.
+ */
+async function testAStaleShaderParameterIsUnset(): Promise<void> {
+  await withASceneProject(
+    'stale shader parameter',
+    {
+      's.gdshader': 'shader_type spatial;\nuniform float kept = 1.0;\nuniform float other = 1.0;\n',
+      'view.tscn': staleShaderScene,
+    },
+    async ({ call, written, fileOf }) => {
+      const mesh = { op: 'set', scenePath: 'view.tscn', nodePath: 'Mesh' };
+      const refusedSet =
+        textOf(
+          await call('scene_node', {
+            ...mesh,
+            properties: { 'material_override/shader_parameter/stale': 4 },
+          }),
+        ) ?? '';
+      assert.match(refusedSet, /declares no uniform stale/, refusedSet);
+      const absent =
+        textOf(await call('scene_node', { ...mesh, unset: ['material_override/shader_parameter/gone'] })) ??
+        '';
+      assert.match(absent, /declares no uniform gone/, absent);
+      await written('scene_node', { ...mesh, unset: ['material_override/shader_parameter/stale'] });
+      const saved = fileOf('view.tscn');
+      assert.doesNotMatch(saved, /shader_parameter\/stale/, saved);
+      assert.match(saved, /shader_parameter\/kept = 2\.0/, saved);
+    },
+  );
+}
+
+/**
+ * A write to another node leaves a shader parameter its shader no longer declares in the file, as
+ * the file held it, since the engine saves only the parameters a shader declares. An unset of it
+ * still takes it out, and a later write does not bring it back.
+ */
+async function testAWriteKeepsAShaderParameterTheShaderLacks(): Promise<void> {
+  await withASceneProject(
+    'stale shader parameter kept',
+    {
+      's.gdshader': 'shader_type spatial;\nuniform float kept = 1.0;\nuniform float other = 1.0;\n',
+      'view.tscn': staleShaderScene,
+    },
+    async ({ written, fileOf }) => {
+      const other = { op: 'set', scenePath: 'view.tscn', nodePath: 'Other' };
+      await written('scene_node', { ...other, properties: { position: [3, 4, 5] } });
+      const kept = fileOf('view.tscn');
+      assert.match(
+        kept,
+        /shader = ExtResource\("[^"]+"\)\nshader_parameter\/early = 1\.0\nshader_parameter\/kept = 2\.0\nshader_parameter\/stale = 3\.0\n/,
+        kept,
+      );
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'view.tscn',
+        nodePath: 'Mesh',
+        unset: ['material_override/shader_parameter/stale'],
+      });
+      await written('scene_node', { ...other, properties: { position: [5, 4, 3] } });
+      const taken = fileOf('view.tscn');
+      assert.doesNotMatch(taken, /shader_parameter\/stale/, taken);
+      assert.match(taken, /shader_parameter\/kept = 2\.0/, taken);
+    },
+  );
+}
+
 /** scene_node set, add, duplicate, get and scene_signal connect and list on a scene, with no editor. */
 async function testASceneNodeIsWrittenAndReadWithNoEditor(): Promise<void> {
   await withASceneProject(
@@ -119811,6 +119896,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAServerThatDiesMidCallSaysHowItEnded,
   testASceneNodeIsWrittenAndReadWithNoEditor,
   testASceneIsEditedAsSavedWithNoEditor,
+  testAStaleShaderParameterIsUnset,
+  testAWriteKeepsAShaderParameterTheShaderLacks,
   testAConnectionIsWrittenAndJudgedAgainstItsMethodWithNoEditor,
   testAReconnectKeepsBindsAndFlagsWithNoEditor,
   testAConnectionMadeByAnInstancedSceneIsNotEditableWhereItIsInstanced,
