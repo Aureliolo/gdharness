@@ -2999,12 +2999,12 @@ async function testASceneIsEditedAsSavedInTheEditor({ call, refusal, project }: 
   );
   writeFileSync(join(project, 'page', 'dropper.gd'), dropping);
   for (const name of ['plain', 'tooled', 'notified', 'dropper']) {
-    writeFileSync(join(project, 'page', name + '.tscn'), scene(name + '.gd'));
+    writeFileSync(join(project, 'page', `${name}.tscn`), scene(`${name}.gd`));
   }
   try {
     await call('editor_rescan', { projectPath: project });
     for (const name of ['plain', 'tooled', 'notified']) {
-      const page = { projectPath: project, scenePath: 'res://page/' + name + '.tscn' };
+      const page = { projectPath: project, scenePath: `res://page/${name}.tscn` };
       await call('scene_node', {
         ...page,
         op: 'add',
@@ -3014,7 +3014,7 @@ async function testASceneIsEditedAsSavedInTheEditor({ call, refusal, project }: 
       });
       await call('scene_node', { ...page, op: 'set', nodePath: '.', properties: { position: [3, 4] } });
       await call('scene_node', { ...page, op: 'set', nodePath: '.', properties: { script: null } });
-      const saved = fileText(project, 'page/' + name + '.tscn');
+      const saved = fileText(project, `page/${name}.tscn`);
       assert.doesNotMatch(saved, /Holder/, saved);
       assert.match(saved, /\[node name="Facing" type="Node2D" parent="\."/, saved);
       assert.match(saved, /\[node name="Eye" type="Node2D" parent="Facing"/, saved);

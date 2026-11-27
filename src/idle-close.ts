@@ -23,6 +23,14 @@ export const IDLE_CLOSE_SETTING = 'gdharness/editor/idle_close_minutes';
 /** The minutes when the setting is absent. Kept in step with `IDLE_MINUTES` in plugin.gd. */
 export const IDLE_CLOSE_MINUTES = 10;
 
+/**
+ * Whether a call to [param tool] uses the editor or its game, and so keeps a hidden editor open.
+ * Calls to every other tool are answered without it.
+ */
+export function usesTheEditor(tool: string): boolean {
+  return tool.startsWith('editor_') || tool.startsWith('runtime_');
+}
+
 /** Where the record lies in a project. Kept in step with `IDLE_RECORD` in plugin.gd. */
 const IDLE_RECORD = join('.godot', 'gdharness-editor-idle.json');
 

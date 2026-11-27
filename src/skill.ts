@@ -181,7 +181,7 @@ otherwise. The headless engine runs the scene's scripts, so the answer puts back
 changed. It refuses a file where it cannot, such as a scene whose script does not compile. For
 those, open the editor (\`editor_launch\` with \`hidden: true\`) and ask again.
 
-A hidden editor quits after ${String(IDLE_CLOSE_MINUTES)} minutes with no call, and the next call
+A hidden editor quits after ${String(IDLE_CLOSE_MINUTES)} minutes with no call that uses it, and the next call
 that needs it opens it again. Set \`${IDLE_CLOSE_SETTING}\` in \`project.godot\` to change the
 minutes, or to 0 to keep it open.
 
