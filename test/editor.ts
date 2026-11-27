@@ -2993,13 +2993,17 @@ async function testASceneIsEditedAsSavedInTheEditor({ call, refusal, project }: 
     '[node name="Page" type="Node2D"]\nscript = ExtResource("1_s")\n\n[node name="Facing" type="Node2D" parent="."]\n';
   writeFileSync(join(project, 'page', 'plain.gd'), moving(''));
   writeFileSync(join(project, 'page', 'tooled.gd'), moving('@tool\n'));
+  writeFileSync(
+    join(project, 'page', 'notified.gd'),
+    'extends Node2D\n\n\nfunc _notification(what: int) -> void:\n\tif what != NOTIFICATION_SCENE_INSTANTIATED:\n\t\treturn\n\tvar holder := Node2D.new()\n\tholder.name = "Holder"\n\tadd_child(holder)\n\tvar facing: Node = get_node("Facing")\n\tremove_child(facing)\n\tholder.add_child(facing)\n',
+  );
   writeFileSync(join(project, 'page', 'dropper.gd'), dropping);
-  for (const name of ['plain', 'tooled', 'dropper']) {
+  for (const name of ['plain', 'tooled', 'notified', 'dropper']) {
     writeFileSync(join(project, 'page', name + '.tscn'), scene(name + '.gd'));
   }
   try {
     await call('editor_rescan', { projectPath: project });
-    for (const name of ['plain', 'tooled']) {
+    for (const name of ['plain', 'tooled', 'notified']) {
       const page = { projectPath: project, scenePath: 'res://page/' + name + '.tscn' };
       await call('scene_node', {
         ...page,

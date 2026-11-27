@@ -170,6 +170,21 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 	if for_writing:
 		_unmade = _unmade_connections(_state)
 	_note_filed(for_writing)
+	if for_writing and not Engine.is_editor_hint():
+		var moved: PackedStringArray = _missing_on_open()
+		if not moved.is_empty():
+			return refuse(
+				(
+					"Nothing was written: %s holds %s, which %s not in the scene once a headless "
+					+ "engine instanced it. %s"
+				)
+				% [
+					path,
+					", ".join(moved),
+					"is" if moved.size() == 1 else "are",
+					_scripts_ran_said(true),
+				]
+			)
 	_note_loaded(root)
 	if not Engine.is_editor_hint():
 		var unsettled: String = _unsettled_on_open(for_writing, failed)
@@ -223,6 +238,30 @@ func _note_filed(for_writing: bool) -> void:
 		_note_opened(root)
 
 
+## The paths of the nodes the file holds that the freshly instanced scene lacks, which a script
+## moved or freed as the scene was made.
+func _missing_on_open() -> PackedStringArray:
+	var moved: PackedStringArray = []
+	for index: int in _state.get_node_count():
+		var at: String = str(_state.get_node_path(index))
+		if _node_at(at) == null:
+			var _added: bool = moved.append(_relative(at))
+	return moved
+
+
+## Why a node can be missing from a scene a headless engine instanced, and the way round it, or ""
+## in an editor and for a scene none of whose scripts an editor would not run. [param always] says
+## it anyway.
+func _scripts_ran_said(always: bool = false) -> String:
+	if Engine.is_editor_hint() or not (always or GdhHeadlessCheck.runs_untooled(_state, {})):
+		return ""
+	return (
+		"The scene's scripts ran when a headless engine instanced it, as they do in the game and "
+		+ "not in an editor. "
+		+ GdhHeadlessCheck.REMEDY
+	)
+
+
 ## Records the nodes of the scene at [param top] that it saves, which are the ones it owns.
 func _note_loaded(top: Node) -> void:
 	_loaded[top.get_instance_id()] = path_of(top)
@@ -244,8 +283,11 @@ func removed(top: Node) -> void:
 ## that took its place.
 func _dropped() -> PackedStringArray:
 	var held: Dictionary = { root.get_instance_id(): true }
+	# A node under one the scene does not own is not saved, so it is as good as gone.
 	for node: Node in root.find_children("*", "", true, true):
-		if node.owner == root:
+		var above: Node = node.get_parent()
+		var in_instance: bool = above.owner != null and above.owner != root
+		if node.owner == root and (held.has(above.get_instance_id()) or in_instance):
 			held[node.get_instance_id()] = true
 	for id: Variant in held.keys():
 		held[_copied_from.get(id, 0)] = true
@@ -1753,9 +1795,9 @@ func _write(check: Callable) -> Dictionary:
 				"Nothing was written: saving would hold fewer nodes than %s did when it was read, "
 				+ "and this call removes none of them. Missing: %s. A script that is a tool "
 				+ "probably takes them out as the scene loads, and an editor saves the scene the "
-				+ "same way, so change that script first."
+				+ "same way, so change that script first. %s"
 			)
-			% [path, ", ".join(dropped)]
+			% [path, ", ".join(dropped), _scripts_ran_said()]
 		)
 	var packed: PackedScene = PackedScene.new()
 	var packing: Error = packed.pack(root)
