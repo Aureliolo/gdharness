@@ -21451,7 +21451,9 @@ async function testTheLifecycleLogSaysHowAServerEnded(): Promise<void> {
     );
     closed.child.stdin?.end();
     await exited(closed);
-    const told = linesOf(closed.child.pid);
+    // A server that lives past its parent check writes a `parent` line before it ends, whatever
+    // the machine's load made the call take. The log promises the other three, in order.
+    const told = linesOf(closed.child.pid).filter((line) => line['event'] !== 'parent');
     assert.deepEqual(
       told.map((line) => line['event']),
       ['started', 'client', 'ended'],
