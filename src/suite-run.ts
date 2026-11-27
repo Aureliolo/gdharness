@@ -645,9 +645,9 @@ interface EngineRan {
   readonly priority: string | null;
 }
 
-/** The number of the engine slot [param lock] is, from its `<n>.lock` name, or null for any other. */
+/** The number of the engine slot [param lock] is, from its `<n>.held` name, or null for any other. */
 function slotOf(lock: string): number | null {
-  const number = /(\d+)\.lock$/.exec(lock)?.[1];
+  const number = /(\d+)\.held$/.exec(lock)?.[1];
   return number === undefined ? null : Number(number);
 }
 
