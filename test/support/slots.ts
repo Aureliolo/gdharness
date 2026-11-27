@@ -6,12 +6,13 @@
  * Set here, on import, before any server or command is spawned: each inherits the variables. A run
  * that names its own keeps them.
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { availableParallelism, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { MOST_ENGINES } from '../../src/engine-launch.js';
-import { ENDED_SUFFIX, SLOT_COUNT_VARIABLE, SLOTS_VARIABLE, WAITING_FOLDER } from '../../src/engine-slots.js';
+import { PROJECTS_FOLDER, SLOT_COUNT_VARIABLE, SLOTS_VARIABLE } from '../../src/engine-slots.js';
+import { tryOsLock } from '../../src/os-lock.js';
 
 /**
  * The variables that tell a process how it takes engine slots, whichever program set them: the
@@ -19,93 +20,89 @@ import { ENDED_SUFFIX, SLOT_COUNT_VARIABLE, SLOTS_VARIABLE, WAITING_FOLDER } fro
  */
 export const SLOT_VARIABLES = [
   'GODOT_ENGINE_HELD',
-  'GODOT_ENGINE_LANES',
-  'GODOT_ENGINE_RESERVED',
-  'GODOT_ENGINE_SHARE',
-  'GODOT_ENGINE_SHARE_COUNT',
   SLOTS_VARIABLE,
   SLOT_COUNT_VARIABLE,
-  'GODOT_ENGINE_STARVING',
-  'GODOT_ENGINE_TIER',
-  'GODOT_ENGINE_TIMED',
   // The marker of a job the machine's queue runs, which nothing here reads but a program started
   // inside the job would.
   ['GODOT', 'TOOLS', 'JOB'].join('_'),
 ];
 
 /**
+ * How many engines the suite may run at once, set by whoever starts it. The machine's own slot count
+ * is no cap, since it says how many engines the whole machine runs.
+ */
+export const TEST_ENGINES_VARIABLE = 'GDHARNESS_TEST_ENGINES';
+
+/**
+ * How many engines the suite may run at once: the most a run takes, and no more than the machine has
+ * processors for. [param cap], the suite's own variable, caps it lower still. A value that is not a
+ * whole number above 0 sets no cap.
+ */
+export function suiteSlotCount(cap: string | undefined, processors: number): number {
+  const most = Math.min(MOST_ENGINES, processors);
+  const allowed = Number(cap);
+  return Number.isInteger(allowed) && allowed >= 1 ? Math.min(most, allowed) : most;
+}
+
+/**
  * Leaves the process with the slot variables of a bare shell and the suite's own slot directory and
  * count, so a result does not depend on the shell that started it, a queue job or a gate included.
- * A fixture sets what it needs itself.
+ * A fixture that needs a set count sets it itself.
  */
 export function withTheSuitesOwnSlotVariables(): void {
   for (const name of SLOT_VARIABLES) {
     delete process.env[name];
   }
   process.env[SLOTS_VARIABLE] = join(tmpdir(), 'gdharness-test-slots');
-  process.env[SLOT_COUNT_VARIABLE] = String(Math.min(MOST_ENGINES, availableParallelism()));
+  process.env[SLOT_COUNT_VARIABLE] = String(
+    suiteSlotCount(process.env[TEST_ENGINES_VARIABLE], availableParallelism()),
+  );
 }
 
 withTheSuitesOwnSlotVariables();
 
 /**
- * What is left in the slot directory [param slots]: every lock, and every wait mark as
- * `waiting/<name>`. The folder of marks stays once a wait has made it, and so does the note each
- * ended wait leaves, which holds nothing. A run that gave back everything leaves an empty list.
+ * The slot count, as the variable spells it, at which a run can hold [param engines] engines at once:
+ * [param suiteCount], the suite's own count, raised to [param engines] where a cap holds it lower.
  */
-export function leftInSlots(slots: string): string[] {
-  const marks = join(slots, WAITING_FOLDER);
-  return [
-    ...readdirSync(slots).filter((name) => name !== WAITING_FOLDER),
-    ...(existsSync(marks)
-      ? readdirSync(marks)
-          .filter((name) => !name.endsWith(ENDED_SUFFIX))
-          .map((name) => `${WAITING_FOLDER}/${name}`)
-      : []),
-  ].toSorted();
+export function slotCountForEngines(engines: number, suiteCount = process.env[SLOT_COUNT_VARIABLE]): string {
+  return String(Math.max(engines, Number(suiteCount) || 0));
+}
+
+/** Whether another holder has the lock at [param lock] now, which a try for it answers. */
+function lockHeld(lock: string): boolean {
+  const taken = tryOsLock(lock);
+  taken?.release();
+  return taken === null;
+}
+
+/** The lock files in [param folder] that are held now, named as `<folder>/<name>`. */
+function heldIn(slots: string, folder: string): string[] {
+  const path = folder === '' ? slots : join(slots, folder);
+  return existsSync(path)
+    ? readdirSync(path)
+        .filter((name) => name.endsWith('.lock') && lockHeld(join(path, name)))
+        .map((name) => (folder === '' ? name : `${folder}/${name}`))
+    : [];
 }
 
 /**
- * Every lock and mark in the suite's slot directory with what it holds and whether its process
- * lives, for a call that stalled: a take waiting on held slots answers nothing until they free.
+ * What is held in the slot directory [param slots]: every slot lock and every project lock as
+ * `projects/<name>`. The files stay once made, so a lock counts only while something holds it. A run
+ * that gave back everything leaves an empty list.
  */
+export function leftInSlots(slots: string): string[] {
+  return [...heldIn(slots, ''), ...heldIn(slots, PROJECTS_FOLDER)].toSorted();
+}
+
+/** Every held lock in the suite's slot directory, for a call that stalled: a take waiting on held slots answers nothing until they free. */
 export function slotsSaid(): string {
   const slots = process.env[SLOTS_VARIABLE];
   if (slots === undefined || !existsSync(slots)) {
     return 'The slot directory holds nothing.';
   }
-  const said = (path: string, name: string): string[] => {
-    try {
-      return readdirSync(path).flatMap((inner) => said(join(path, inner), `${name}/${inner}`));
-    } catch {
-      // Not a folder, so a lock or a mark.
-    }
-    let text: string;
-    try {
-      text = readFileSync(path, 'utf8').trim();
-    } catch {
-      return [`${name} went while it was read`];
-    }
-    const pid = /"pid":(\d+)/.exec(text)?.[1];
-    return [`${name} (${pid === undefined ? 'no pid' : livesSaid(Number(pid))}): ${text}`];
-  };
-  const lines = readdirSync(slots)
-    .toSorted()
-    .flatMap((name) => said(join(slots, name), name))
-    .filter((line) => !line.includes(ENDED_SUFFIX));
-  return lines.length === 0
-    ? `The slot directory ${slots} holds nothing.`
-    : `The slot directory ${slots} holds:\n${lines.join('\n')}`;
-}
-
-function livesSaid(pid: number): string {
-  try {
-    process.kill(pid, 0);
-    return `pid ${String(pid)} lives`;
-  } catch (error) {
-    // EPERM is a live process of another user's.
-    return error instanceof Error && 'code' in error && error.code === 'ESRCH'
-      ? `pid ${String(pid)} has gone`
-      : `pid ${String(pid)} lives`;
-  }
+  const held = leftInSlots(slots);
+  return held.length === 0
+    ? `The slot directory ${slots} holds no held lock.`
+    : `The slot directory ${slots} has held locks:\n${held.join('\n')}`;
 }

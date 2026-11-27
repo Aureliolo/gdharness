@@ -11,22 +11,33 @@ import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { callSignal } from './call-signal.js';
 import {
+  childBoxNote,
+  desktopBoxEnding,
   ensureHelperCompiled,
   type HelperFiles,
+  HelperRefused,
   HIDDEN_DESKTOP,
   helperExit,
   helperFailure,
   helperPid,
   spawnOnDesktop,
 } from './desktop.js';
-import { inASlot, nameSlotEngineOf, onTheSlot } from './engine-slots.js';
+import { inASlot, onTheSlot } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { errorMessage } from './errors.js';
 import { GameLog } from './game-log.js';
-import { belowNormal } from './priority.js';
+import type { SpawnedGame } from './godot-process.js';
+import { discard, scratchDirectory } from './scratch.js';
 import { type ChildProcess, type SpawnOptions, spawnHidden } from './spawn.js';
+import {
+  CONSOLE_CLOSED,
+  diedAsItStarted,
+  ENGINE_STARTS,
+  START_RETRY_MS,
+  START_WINDOW_MS,
+} from './start-race.js';
 import { windowsStatusOf } from './suite-judge.js';
-import { holdExit } from './whole-exit.js';
+import { holdChildExit } from './whole-exit.js';
 
 export interface EngineRun {
   /** Both streams, finished. */
@@ -35,44 +46,49 @@ export interface EngineRun {
   readonly exitSignal: string | null;
   /** Why this server ended the run or could not start it, when it did either. */
   readonly failure: string | null;
-  /** How many starts before this one crashed before printing a line: see {@link crashedAtStart}. */
+  /** How many starts before this one crashed before printing past the banner: see {@link crashedAtStart}. */
   readonly crashedStarts?: number;
 }
 
-/** How many times an engine that crashes as it starts is started in all. */
-export const ENGINE_STARTS = 3;
-/** The wait before the second start, doubled before each one after it. */
-const START_RETRY_MS = 500;
-
-/** The Windows status of a console closed or sent Ctrl+C, which ends a process without a fault. */
-export const CONSOLE_CLOSED = 0xc000013a;
-
-/**
- * The Windows statuses that end an engine for a reason a second start would meet again: its console
- * closed or Ctrl+C, and a library it needs that is not there.
- */
-const NOT_A_START_RACE = new Set([CONSOLE_CLOSED, 0xc0000135]);
+export { CONSOLE_CLOSED, ENGINE_STARTS };
 
 /**
  * Whether [param run] is an engine that died as it started: ended by a Windows exception status
- * before it printed its banner. A loaded machine makes Godot do that now and then (0xC06D007F, a
- * race in its input library's hook), and a headless call failed on it with "no output at all". It
- * never reached the project, so starting it again repeats nothing.
+ * before it printed a line, or, for the status of the race, after its banner alone. A loaded machine
+ * makes Godot do that now and then (0xC06D007F), and a headless call failed on it with "no output at
+ * all". The engine's other threads run on while Windows reports the crash, so the banner can get out
+ * first. The engine never reached the project, so starting it again repeats nothing.
  */
 export function crashedAtStart(run: EngineRun): boolean {
   return (
-    run.failure === null &&
-    run.exitSignal === null &&
-    diedAsItStarted(run.exitCode, run.log.everything().length === 0)
+    run.failure === null && run.exitSignal === null && diedAsItStarted(run.exitCode, linesOfLog(run.log))
   );
 }
 
 /**
- * Whether an engine that exited with [param code], and that nothing here ended, died as it started:
- * see {@link crashedAtStart}.
+ * Whether the engine behind [param game], a run a caller waits on that this server did not end, died
+ * as it started: within {@link START_WINDOW_MS} of its start, since its output is no proof of how
+ * far a run that lasted got.
  */
-export function diedAsItStarted(code: number | null, printedNothing: boolean): boolean {
-  return code !== null && code >>> 0 >= 0xc0000000 && !NOT_A_START_RACE.has(code >>> 0) && printedNothing;
+export function diedAtStartOf(game: SpawnedGame): boolean {
+  return (
+    game.exitSignal === null &&
+    (game.endedAt ?? Date.now()) - game.startedAt <= START_WINDOW_MS &&
+    diedAsItStarted(game.exitCode, linesOfLog(game.log))
+  );
+}
+
+/**
+ * The lines [param log] holds. It keeps a line with its severity word cut off, so one that was not
+ * info gets it back, and a line that cannot be the banner stays one that is not.
+ */
+function linesOfLog(log: GameLog): string[] {
+  return log
+    .everything()
+    .flatMap((entry) => [
+      entry.severity === 'info' ? entry.text : `${entry.severity}: ${entry.text}`,
+      ...entry.detail,
+    ]);
 }
 
 /**
@@ -108,7 +124,14 @@ interface RunOptions {
    * neither shows nor takes the keyboard.
    */
   readonly desktop?: { readonly directory: string; readonly scratch: string };
+  /** The project the engine runs for, which gives its slot a repository, and high priority where the list names it. */
+  readonly project?: string;
+  /** Takes no engine slot and waits for none, for a short step every other call waits behind. */
+  readonly slotless?: boolean;
 }
+
+/** How often the pid a helper writes for its engine is looked for. */
+const ENGINE_PID_WAIT_MS = 10;
 
 /** How often an engine with a timeout is measured against it. */
 const MEASURE_MS = 1000;
@@ -127,20 +150,23 @@ export async function runEngine(
   options: RunOptions = {},
 ): Promise<EngineRun> {
   const signal = callSignal();
-  if (options.desktop !== undefined) {
+  if (options.desktop !== undefined || process.platform === 'win32') {
     const compiled = await ensureHelperCompiled();
     if (compiled !== null) {
       return {
         log: new GameLog(),
         exitCode: null,
         exitSignal: null,
-        failure: `it could not be started on a desktop of its own: ${compiled}`,
+        failure: `it could not be started${options.desktop === undefined ? '' : ' on a desktop of its own'}: ${compiled}`,
       };
     }
   }
   try {
-    return await inASlot((lock) =>
-      startedUntilItRuns(() => runStarted(executable, args, lock, options, signal), signal, crashedAtStart),
+    return await inASlot(
+      (lock) =>
+        startedUntilItRuns(() => runStarted(executable, args, lock, options, signal), signal, crashedAtStart),
+      options.project,
+      options.slotless,
     );
   } catch (error) {
     const said = errorMessage(error);
@@ -161,36 +187,54 @@ export async function runEngine(
 interface Launch {
   readonly child: ChildProcess;
   readonly files: HelperFiles | null;
+  /** The folder this start made for the helper's files, to be removed once they are read. */
+  readonly scratch: string | null;
 }
 
 function launchOf(
   executable: string,
   args: readonly string[],
-  lock: string,
+  lock: string | null,
   desktop: RunOptions['desktop'],
   signal: AbortSignal | undefined,
 ): Launch {
   const options: SpawnOptions = {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: onTheSlot(process.env, lock),
+    env: lock === null ? process.env : onTheSlot(process.env, lock),
     ...(signal === undefined ? {} : { signal }),
   };
-  if (desktop === undefined) {
-    return { child: spawnHidden(executable, args, options), files: null };
+  if (desktop === undefined && process.platform !== 'win32') {
+    return { child: spawnHidden(executable, args, options), files: null, scratch: null };
   }
-  const started = spawnOnDesktop(
-    {
-      desktop: HIDDEN_DESKTOP,
-      directory: desktop.directory,
-      endsWithHelper: true,
-      scratch: desktop.scratch,
-      exit: join(desktop.scratch, 'exit'),
-    },
-    executable,
-    args,
-    options,
-  );
-  return { child: started.child, files: started.files };
+  // On Windows every engine starts through the helper, which puts it in its named job. Without a
+  // desktop named it stays on the one in use.
+  const scratch = desktop?.scratch ?? scratchDirectory('desktop');
+  let started: ReturnType<typeof spawnOnDesktop>;
+  try {
+    started = spawnOnDesktop(
+      {
+        ...(desktop === undefined ? {} : { desktop: HIDDEN_DESKTOP }),
+        directory: desktop?.directory ?? process.cwd(),
+        endsWithHelper: true,
+        ...(desktop === undefined ? { separateErrors: true } : {}),
+        scratch,
+        exit: join(scratch, 'exit'),
+      },
+      executable,
+      args,
+      options,
+    );
+  } catch (error) {
+    if (desktop === undefined) {
+      discard(scratch);
+    }
+    throw error;
+  }
+  return {
+    child: started.child,
+    files: started.files,
+    scratch: desktop === undefined ? scratch : null,
+  };
 }
 
 /** What the run's handlers share while it lasts. */
@@ -207,7 +251,11 @@ async function killPastTimeout(
   sample: () => Promise<Sample>,
   state: RunState,
   noticeEngine: () => void,
+  engineNoticed: Promise<void>,
 ): Promise<void> {
+  // The engine's own time is counted from the reading that has its pid, so the start through the
+  // helper is not counted against it by the clock.
+  await engineNoticed;
   const spent = new Spent(nowSeconds(), await sample(), state.pid);
   while (!state.closed) {
     await delay(MEASURE_MS);
@@ -224,6 +272,38 @@ async function killPastTimeout(
 }
 
 /**
+ * What the desktop helper says of the run's end, which the engine's own exit does not: it could not
+ * start the engine, or it ended the engine on a box nobody can press. Null for an engine started
+ * without the helper.
+ */
+function desktopFailure(files: HelperFiles | null, log: GameLog, desktop: boolean): string | null {
+  if (files === null) {
+    return null;
+  }
+  const helperSaid = helperFailure(files.error);
+  if (helperSaid !== null) {
+    return `it could not be started${desktop ? ' on a desktop of its own' : ''}: ${helperSaid}`;
+  }
+  const ended = desktopBoxEnding(log.all);
+  const note = ended === null ? childBoxNote(log.all) : null;
+  if (note !== null) {
+    log.record('warning', note);
+  }
+  return ended;
+}
+
+/**
+ * The engine's exit code from [param told], the code the process reported. A helper that could not
+ * start the engine exits with a code of its own, which is no engine's.
+ */
+function engineExitCode(files: HelperFiles | null, told: number | null): number | null {
+  if (files === null) {
+    return told;
+  }
+  return helperFailure(files.error) === null ? helperExit(files.exit, told) : null;
+}
+
+/**
  * Settles on `close` rather than `exit`: the streams can still hold the run's last lines when
  * `exit` fires, and those are the lines a verdict is read from. Node emits `close` after a failed
  * start and after an abort as well, so it is the one place every run ends.
@@ -231,22 +311,26 @@ async function killPastTimeout(
 function runStarted(
   executable: string,
   args: readonly string[],
-  lock: string,
+  lock: string | null,
   options: RunOptions,
   signal: AbortSignal | undefined,
 ): Promise<EngineRun> {
   return new Promise((resolve) => {
     const log = new GameLog();
-    const { child, files } = launchOf(executable, args, lock, options.desktop, signal);
-    belowNormal(child);
-    const whole = holdExit(child.pid);
+    let launched: Launch;
+    try {
+      launched = launchOf(executable, args, lock, options.desktop, signal);
+    } catch (error) {
+      if (!(error instanceof HelperRefused)) {
+        throw error;
+      }
+      resolve({ log, exitCode: null, exitSignal: null, failure: error.message });
+      return;
+    }
+    const { child, files, scratch } = launched;
+    const whole = holdChildExit(child);
     // The engine itself, which on the hidden desktop the helper starts and writes down.
     const engineAt = (): number | undefined => (files === null ? child.pid : helperPid(files.pid));
-    // The lock names this process, and what the engine starts runs on its slot only when it names
-    // the engine too.
-    if (child.pid !== undefined && files === null) {
-      void nameSlotEngineOf(lock, process.pid, child.pid);
-    }
     child.stdout?.on('data', (chunk: Buffer) => {
       log.append('stdout', chunk);
     });
@@ -256,9 +340,6 @@ function runStarted(
     const state: RunState = { pid: engineAt(), failure: null, closed: false };
     const found = (engine: number): void => {
       watching(engine, true);
-      if (files !== null) {
-        void nameSlotEngineOf(lock, process.pid, engine);
-      }
     };
     const noticeEngine = (): void => {
       if (state.pid !== undefined) {
@@ -272,9 +353,17 @@ function runStarted(
     if (state.pid !== undefined) {
       found(state.pid);
     }
+    // Through the helper the engine's pid is written a moment after the start, and the lock and the
+    // timeout both need it.
+    const noticed = (async (): Promise<void> => {
+      while (state.pid === undefined && !state.closed) {
+        await delay(ENGINE_PID_WAIT_MS);
+        noticeEngine();
+      }
+    })();
     const { timeout } = options;
     if (timeout !== undefined && child.pid !== undefined) {
-      void killPastTimeout(child, timeout, options.sample ?? sampled, state, noticeEngine);
+      void killPastTimeout(child, timeout, options.sample ?? sampled, state, noticeEngine, noticed);
     }
     child.on('error', (error) => {
       state.failure ??=
@@ -289,13 +378,13 @@ function runStarted(
       // A process that never started has a libuv error number where its exit code would be.
       const started = child.pid !== undefined;
       const told = started ? whole(code) : null;
-      const helperSaid = files === null ? null : helperFailure(files.error);
-      if (helperSaid !== null) {
-        state.failure ??= `it could not be started on a desktop of its own: ${helperSaid}`;
-      }
+      state.failure ??= desktopFailure(files, log, options.desktop !== undefined);
+      // Read before the helper's files are discarded, since they say whether it started the engine.
+      const exitCode = engineExitCode(files, told);
+      discard(scratch);
       resolve({
         log,
-        exitCode: files === null ? told : helperExit(files.exit, told),
+        exitCode,
         exitSignal: closedBy,
         failure: state.failure,
       });
@@ -318,9 +407,13 @@ export function exitCodeText(code: number | null): string {
   return `exit code 0x${code.toString(16).toUpperCase()}, ${windowsStatusOf(code)?.meaning ?? 'a Windows error status'}`;
 }
 
-/** How [param run] ended, for a sentence: `exit code 3`, `ended by SIGTERM`, or this server's reason. */
+/**
+ * How [param run] ended, for a sentence: `exit code 3`, `ended by SIGTERM`, or this server's reason.
+ */
 export function howItEnded(
-  run: Pick<EngineRun, 'exitCode' | 'exitSignal' | 'failure' | 'crashedStarts'>,
+  run: Pick<EngineRun, 'exitCode' | 'exitSignal' | 'failure' | 'crashedStarts'> & {
+    readonly log?: GameLog;
+  },
 ): string {
   if (run.failure !== null) {
     return run.exitSignal === null ? run.failure : `ended by ${run.exitSignal}, because ${run.failure}`;
@@ -329,7 +422,20 @@ export function howItEnded(
     return `ended by ${run.exitSignal}`;
   }
   const crashed = run.crashedStarts ?? 0;
-  return crashed === 0
-    ? exitCodeText(run.exitCode)
-    : `${exitCodeText(run.exitCode)}, and printed nothing on any of its ${String(crashed + 1)} starts`;
+  const code = exitCodeText(run.exitCode);
+  if (crashed === 0) {
+    return code;
+  }
+  // The earlier starts died as they started, by the rule that started them again. The last one is
+  // read from its own output, since it can have run and printed.
+  const lines = run.log === undefined ? null : linesOfLog(run.log);
+  if (lines === null || !diedAsItStarted(run.exitCode, lines)) {
+    const earlier = crashed === 1 ? 'start' : `${String(crashed)} starts`;
+    return `${code}, and the ${earlier} before it died as ${crashed === 1 ? 'it' : 'they'} started, printing nothing past the banner`;
+  }
+  if (lines.length === 0) {
+    return `${code}, and printed nothing on any of its ${String(crashed + 1)} starts`;
+  }
+  // One line is the banner, and only the status of the race is started again on that.
+  return `${code}, and died as it started on each of its ${String(crashed + 1)} starts, printing nothing past its banner. Either the engine's start race or a library the project loads causes that`;
 }

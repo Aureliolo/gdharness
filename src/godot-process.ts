@@ -30,11 +30,16 @@ export interface GodotProcess {
   /**
    * The project this run was started on, for a run read back off disk.
    *
-   * Two servers on one machine share a runtime directory and so share the note a run leaves
-   * behind. Naming the project in the answer is what lets a caller see that the run being
-   * reported is one of theirs, rather than having it silently reported as this project's.
+   * Every server on one machine shares a runtime directory, and a note names its run's project.
+   * Naming the project in the answer is what lets a caller see that the run being reported is one
+   * of theirs, rather than having it silently reported as this project's.
    */
   projectPath: string | null;
+  /**
+   * The folder this run's `user://` was moved to, when its start named one. With the project it is
+   * the run's place: a start ends the run of its own place and goes beside the runs of the others.
+   */
+  savesIn?: string;
   startedAt: number;
   /**
    * True when `startedAt` is when this server found the run rather than when its start was asked
@@ -63,6 +68,11 @@ export interface GodotProcess {
   profile?: string;
   /** The scene a start of this server ran, which its boot is noted and read under. See `MAIN_SCENE`. */
   bootScene?: string;
+  /**
+   * For a game the editor plays: how long its helper's output was when the play began, so what the
+   * helper says of this game is told from what it said of an earlier one.
+   */
+  helperOutputFrom?: number;
   /**
    * How this server ended the run, when it did: by asking the game to close, through the keeper
    * holding it, by a signal to its pid, or by asking the editor playing it. Said in the stop's
@@ -111,6 +121,11 @@ export interface GodotProcess {
    */
   exitNotTold?: boolean;
   /**
+   * True when the desktop helper could not start the engine. Its own exit code is then in
+   * `exitCode`, which is not the engine's, so an answer gives none.
+   */
+  neverStarted?: boolean;
+  /**
    * The processes that carried a spawned run before `pid`, oldest first, each of which restarted
    * itself into the next (`OS.set_restart_on_exit`), as the keeper wrote them into the run's note.
    */
@@ -120,6 +135,8 @@ export interface GodotProcess {
    * `endedWithoutACode` needs to say whose the missing exit code was.
    */
   pickedUp?: boolean;
+  /** True for an exported build, which runs with no `--path` and no debugger. */
+  exported?: true;
   /** True when the editor was asked to play it, so stopping it is the editor's job too. */
   throughEditor: boolean;
   /**
@@ -170,6 +187,8 @@ export interface GodotProcess {
    * game, which frees it by ending. Given back unhanded when the start's wait ends with no tie.
    */
   slot?: CallSlot;
+  /** The hand of {@link slot} to the game, which the start waits for so that a failure is in its answer. */
+  slotHanded?: Promise<void>;
   /**
    * For a run the editor plays, whether the editor has yet reported it as playing: in its answer
    * to the play, or to a later question. Until it has, the editor saying "not playing" is a play

@@ -31,6 +31,10 @@ interface OutsideSpec {
     readonly projectPath: string;
     /** The project the server that started the run serves, where it names one. */
     readonly servedBy?: string;
+    /** The process of the server that started the run. */
+    readonly serverPid?: number;
+    /** The folder the run's `user://` is moved to, where the start named one. */
+    readonly savesIn?: string;
     /**
      * Where the keeper writes the run's script profile, when the run is profiled: the keeper is the
      * game's debugger then, since it outlives the server that started the run.
@@ -53,13 +57,22 @@ interface OutsideSpec {
     readonly debugged?: boolean;
     /**
      * The engine slot the server took for the run, which the keeper takes over once the game has
-     * started and gives back when the run ends, since the run outlives the server. [member from] is
-     * the pid the lock names until then, and [member by] what the keeper's names it held for.
+     * started and gives back when the run ends, since the run outlives the server.
      */
-    readonly slot?: { readonly lock: string; readonly from: number; readonly by: string };
+    readonly slot?: { readonly lock: string };
   };
   /** A Windows desktop to start it on, where its windows neither show nor take the focus. */
   readonly desktop?: string;
+  /**
+   * A file the desktop helper's output is appended to where there is no run: what the helper says
+   * of a game its process started, such as the box it ended, which nothing else carries.
+   */
+  readonly output?: string;
+  /**
+   * A file the keeper writes the process's exit status into once it has ended, as a whole number,
+   * where there is no run. A run's note carries its exit, and an editor has none.
+   */
+  readonly exitNote?: string;
   /** Windows: show its first window without activating it, so it takes nobody's keyboard. */
   readonly noActivate?: boolean;
 }
@@ -79,6 +92,8 @@ export interface SentSpec {
   readonly envChanges: Readonly<Record<string, string | null>>;
   readonly run?: OutsideSpec['run'];
   readonly desktop?: string;
+  readonly output?: string;
+  readonly exitNote?: string;
   readonly noActivate?: boolean;
 }
 
@@ -174,16 +189,18 @@ function runOf(value: unknown): NonNullable<OutsideSpec['run']> | null {
 
 type OptionalRunFields = Pick<
   NonNullable<OutsideSpec['run']>,
-  'servedBy' | 'profile' | 'engineCalls' | 'breakpoints' | 'debugged'
+  'servedBy' | 'serverPid' | 'savesIn' | 'profile' | 'engineCalls' | 'breakpoints' | 'debugged'
 >;
 
 /** Whether each field of a run part that may be absent is either absent or of its type. */
 function optionalRunFieldsAreTyped(
   value: Readonly<Record<string, unknown>>,
 ): value is Readonly<Record<string, unknown>> & OptionalRunFields {
-  const { servedBy, profile, engineCalls, breakpoints, debugged } = value;
+  const { servedBy, serverPid, savesIn, profile, engineCalls, breakpoints, debugged } = value;
   return (
     (servedBy === undefined || typeof servedBy === 'string') &&
+    (serverPid === undefined || typeof serverPid === 'number') &&
+    (savesIn === undefined || typeof savesIn === 'string') &&
     (profile === undefined || typeof profile === 'string') &&
     (engineCalls === undefined || typeof engineCalls === 'boolean') &&
     (breakpoints === undefined || isStringList(breakpoints)) &&
@@ -196,9 +213,11 @@ function optionalRunFieldsOf(value: Readonly<Record<string, unknown>>): Optional
   if (!optionalRunFieldsAreTyped(value)) {
     return null;
   }
-  const { servedBy, profile, engineCalls, breakpoints, debugged } = value;
+  const { servedBy, serverPid, savesIn, profile, engineCalls, breakpoints, debugged } = value;
   return {
     ...(servedBy === undefined ? {} : { servedBy }),
+    ...(serverPid === undefined ? {} : { serverPid }),
+    ...(savesIn === undefined ? {} : { savesIn }),
     ...(profile === undefined ? {} : { profile }),
     ...(engineCalls === undefined ? {} : { engineCalls }),
     ...(breakpoints === undefined ? {} : { breakpoints }),
@@ -207,13 +226,9 @@ function optionalRunFieldsOf(value: Readonly<Record<string, unknown>>): Optional
 }
 
 /** [param value] as the engine slot a run part hands over, or null when it is not that. */
-function slotOf(
-  value: unknown,
-): { readonly lock: string; readonly from: number; readonly by: string } | null {
-  const { lock, from, by }: Record<string, unknown> = isRecord(value) ? value : {};
-  return typeof lock === 'string' && typeof from === 'number' && typeof by === 'string'
-    ? { lock, from, by }
-    : null;
+function slotOf(value: unknown): { readonly lock: string } | null {
+  const { lock }: Record<string, unknown> = isRecord(value) ? value : {};
+  return typeof lock === 'string' ? { lock } : null;
 }
 
 /** [param value] as a spec, or null when any part of it is not the shape [method sendSpec] writes. */
@@ -221,7 +236,7 @@ function sentSpecOf(value: unknown): SentSpec | null {
   if (!isRecord(value)) {
     return null;
   }
-  const { command, args, envChanges, run, desktop, noActivate } = value;
+  const { command, args, envChanges, run, desktop, noActivate, output, exitNote } = value;
   const changes = envChangesOf(envChanges);
   const ran = run === undefined ? undefined : runOf(run);
   if (
@@ -230,6 +245,8 @@ function sentSpecOf(value: unknown): SentSpec | null {
     changes === null ||
     ran === null ||
     (desktop !== undefined && typeof desktop !== 'string') ||
+    (output !== undefined && typeof output !== 'string') ||
+    (exitNote !== undefined && typeof exitNote !== 'string') ||
     (noActivate !== undefined && typeof noActivate !== 'boolean')
   ) {
     return null;
@@ -240,26 +257,31 @@ function sentSpecOf(value: unknown): SentSpec | null {
     envChanges: changes,
     ...(ran === undefined ? {} : { run: ran }),
     ...(desktop === undefined ? {} : { desktop }),
+    ...(output === undefined ? {} : { output }),
+    ...(exitNote === undefined ? {} : { exitNote }),
     ...(noActivate === undefined ? {} : { noActivate }),
   };
 }
 
-/** What the launcher handed back: the pid of what it started, or why it could not. */
-type Launched = { readonly pid: number } | { readonly error: string };
+/**
+ * What the launcher handed back: the pid of what it started and, for a run a keeper holds, the
+ * keeper's own, or why it could not start.
+ */
+type Launched = { readonly pid: number; readonly keeperPid?: number } | { readonly error: string };
 
 /** Beside the bundle that imports this, which is where the build puts it. */
 export const KEEPER_SCRIPT = fileURLToPath(new URL('./keeper.js', import.meta.url));
 
-/** The one line a launcher or a keeper hands back up: `pid N`, or `error` and why. */
+/** The one line a launcher or a keeper hands back up: `pid N`, `pid N keeper M`, or `error` and why. */
 export function readLaunched(printed: string): Launched {
   const line =
     printed
       .split('\n')
       .find((one) => one.trim() !== '')
       ?.trim() ?? '';
-  const pid = /^pid (\d+)$/.exec(line);
+  const pid = /^pid (\d+)(?: keeper (\d+))?$/.exec(line);
   if (pid?.[1] !== undefined) {
-    return { pid: Number(pid[1]) };
+    return { pid: Number(pid[1]), ...(pid[2] === undefined ? {} : { keeperPid: Number(pid[2]) }) };
   }
   return { error: line.replace(/^error /, '') || 'the launcher said nothing' };
 }
@@ -285,6 +307,8 @@ export async function launchOutsideTheTree(
       envChanges: changesFrom(spec.env, process.env),
       ...(spec.run === undefined ? {} : { run: spec.run }),
       ...(spec.desktop === undefined ? {} : { desktop: spec.desktop }),
+      ...(spec.output === undefined ? {} : { output: spec.output }),
+      ...(spec.exitNote === undefined ? {} : { exitNote: spec.exitNote }),
       ...(spec.noActivate === true ? { noActivate: true } : {}),
     });
     let printed = '';

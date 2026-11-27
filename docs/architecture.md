@@ -151,7 +151,8 @@ gdharness
 |       |-- suite-plan.ts        which suites, their cost, which engine runs what
 |       |-- suite-judge.ts       an engine's output read case by case
 |       |-- suite-inputs.ts      what a suite's engine loaded, for --changed-only
-|       `-- engine-slots.ts      the slots every tool starting an engine shares
+|       |-- engine-slots.ts      the slots every tool starting an engine shares
+|       `-- os-lock.ts           the operating system lock a slot is
 |
 `-- server.ts             the MCP server: one call in, one answer out
     |-- tool-definitions  every tool, op and argument, in one table
@@ -451,13 +452,27 @@ clears the ones set by hand.
 Two projects, two harness sessions, two servers and two editors therefore work at once. A server
 `setup` wrote answers about its own project's game, not whichever game it finds announced. So
 `runtime_*` needs no `projectPath` on a machine running two. One server still serves one editor,
-because the bridge carries a single connection.
+because the bridge carries a single connection. A start naming another project than the editor's
+runs a game of its own in this server and never asks the editor to play, stop, scan or wait.
+
+One server holds every run it started, in start order. A run's place is its project folder and the
+folder its `user://` is moved to, which is the project's own when `savesIn` names none. A start
+ends the run of its own place and goes beside the runs of other places, each with its own engine
+slot and its own run note. A call about a run names it with `pid`. With one run going the call
+needs none, and with several going it is refused with each run's pid, project and scene.
 
 ### Two servers on one project
 
-Two servers on one project is harder, because their games announce the same project. A game the
-editor plays says which editor. The editor addon puts its process id into its own environment as it
-loads. Every game it plays inherits that. The runtime announces it as `editor_pid`.
+A server answers for the games it started, the game the editor plays through it, and the games of a
+server that has died whose project folder is the same, so a client that restarts its server keeps
+its game. It never stops, restarts, waits on or reads the game of another live server. A call that names
+such a game, or would need it, is refused with the project folder whose server holds it. A start
+that would replace the note of a game another live server runs in the same place is refused too. A
+worktree is its own project folder, so it uses its own server.
+
+Their games still announce the same project, so a game the editor plays says which editor. The
+editor addon puts its process id into its own environment as it loads. Every game it plays inherits
+that. The runtime announces it as `editor_pid`.
 
 A game some other server started announces none. So a start waiting for its game's runtime passes
 over a stranger's announcement, however fresh. `editor_status` lists `editorPid` under each runtime
@@ -775,10 +790,25 @@ nothing to follow. The editor `editor_launch` opens goes through the same launch
 
 Both of the game's streams go to a transcript under the runtime directory. Beside it, a note names
 the process and the file. There is one note per project, because every server on the machine shares
-the directory.
+the directory. The note names the process of the server that started the run, which decides who
+may take the run over (see Two servers on one project).
 
-The output goes to a file rather than a pipe. A pipe with no reader fills and then blocks the
-writer, so a game writing into a pipe nobody reads would hang.
+On Linux and macOS the game writes the transcript file itself. A pipe with no reader fills and then
+blocks the writer, so a game writing into a pipe nobody reads would hang.
+
+### The transcript on Windows
+
+On Windows the game writes into a pipe, and the keeper copies it into the transcript. The engine
+flushes after every line there, and a flush to a file costs the game several milliseconds a line. A
+flush to a pipe waits only until the keeper has read the line. A keeper that dies closes the pipe:
+the game runs on, and its later output is lost. A keeper that is alive and not reading holds the
+game at its next line.
+
+So the keeper's repeated write, a profiled run's totals, waits out a reader of its file on a timer.
+Two writes wait with the thread asleep, each only while another server reads its file. The run note
+waits a second at most, at the start, at a restart and at the exit. A profiled run's last totals
+wait up to six seconds as the game exits. The keeper writes them only after it has copied all the
+game's output, so no game waits on them.
 
 ### No console windows
 
@@ -808,6 +838,22 @@ through the desktop helper, which sets the mode first. Either way `SEM_FAILCRITI
 The headless operations a server runs itself start the engine as the server's child. Under Node that
 child still inherits the bit. A project that wants dumps from those runs gdharness under Bun. A
 regression reads each engine's mode from outside it, under both runtimes.
+
+### Engines that die as they start
+
+Godot 4.7.2 on Windows can die with 0xC06D007F in its constructor, in a race of its input library's
+hook. gdharness starts such an engine again, up to three starts, when it printed nothing or only its
+banner. This covers only the engines gdharness starts itself that have this race, such as the official
+4.7.2 build. A game's exported build and an engine started some other way are unchanged.
+
+`editor_run start` starts a kept game again only when it dies inside the wait it already makes for the
+runtime. A start that dies after the call has answered is not started again, and its run note and
+`editor_output` say how it ended.
+
+An editor opened by `editor_launch` is started again only by a call that waits for it, and only when
+it died inside that wait. The open itself returns at once and never starts it again. The keeper notes
+the editor's exit status beside its console, and every refusal that says the editor went names that
+status and what it printed.
 
 ### Writing the note
 
@@ -1313,9 +1359,9 @@ templates directory. That directory holds whichever platforms were installed int
 
 ### The serialiser
 
-The serialiser both readings use is one file, `serialisation.gd`. `bun run sync:gd` copies it into
-each addon, because an addon is installed as a directory and cannot preload out of one. A fixture
-refuses a copy that has drifted.
+The serialiser both readings use is one file, `serialisation.gd`. The build and every suite write a
+copy of it into each addon, because an addon is installed as a directory and cannot preload out of
+one. Git tracks the one beside the operations, and a copy changed by hand stops the build.
 
 What is tagged is what JSON cannot carry. JSON does not refuse such a value. It writes the value's
 own text instead. A `Polygon2D`'s points would come back as the string `"[(1.0, 2.0), (3.0, 4.0)]"`

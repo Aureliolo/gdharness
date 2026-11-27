@@ -10,18 +10,23 @@ import {
   fstatSync,
   openSync,
   readdirSync,
+  readFileSync,
   readSync,
+  renameSync,
   rmSync,
-  writeSync,
+  writeFileSync,
 } from 'node:fs';
-import { availableParallelism, freemem, totalmem } from 'node:os';
+import { availableParallelism, freemem } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import process from 'node:process';
 import type { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive, exitOf } from './alive.js';
+import { copiedInto } from './copied-into.js';
 import {
+  desktopBoxEnding,
   ensureHelperCompiled,
+  HelperRefused,
   HIDDEN_DESKTOP,
   helperExit,
   helperFailure,
@@ -29,20 +34,21 @@ import {
   helperStep,
   spawnOnDesktop,
 } from './desktop.js';
-import { diedAsItStarted, startedUntilItRuns } from './engine-run.js';
+import { startedUntilItRuns } from './engine-run.js';
 import { handedOver, type ShareHandoff, shareMarker, shareText } from './engine-shares.js';
-import { nameSlotEngineOf, onTheSlot, reservedMemory } from './engine-slots.js';
+import { onTheSlot } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { EngineUsageError, errorCode, errorMessage } from './errors.js';
+import { GameLog } from './game-log.js';
 import { mainCheckoutOf } from './harnesses.js';
 import { wholeFlag } from './launch.js';
-import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
+import { logLimitBytes, pastTheLogLimit, readLog } from './log-read.js';
 import { relativeWithin } from './paths.js';
 import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
-import { belowNormal } from './priority.js';
-import { askProcessTable } from './process-table.js';
+import { priorityOf } from './priority.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
-import { type EngineEnd, type RunPrinted, readRun } from './suite-judge.js';
+import { diedAsItStarted, linesAsPrinted } from './start-race.js';
+import { type EngineEnd, type RunPrinted, readRun, SuiteCuts } from './suite-judge.js';
 
 /** Most engines a run starts, whatever the machine has. */
 export const MOST_ENGINES = 4;
@@ -51,16 +57,9 @@ export const SILENCE_FLOOR_SECONDS = 300;
 
 /** The least exit code that is a Windows exception status, such as 0xC0000005, read unsigned. */
 export const WINDOWS_EXCEPTION = 0xc0000000;
-/**
- * Memory left to the rest of the machine, and what an engine is taken to need while no peak is kept
- * for its suites.
- */
-const MEMORY_KEPT = 4 * 1024 ** 3;
-export const MEMORY_PER_ENGINE = 1.5 * 1024 ** 3;
+
 const LOOK_MS = 500;
 
-/** How long Windows is given to say how much it can still commit, on a machine the run may load. */
-const COMMIT_ASK_MS = 15_000;
 /** What the engine prints when an autoload did not start, after which nothing it does can mean anything. */
 const AUTOLOAD_FAILED = 'Failed to instantiate an autoload';
 
@@ -151,9 +150,16 @@ export function homeOf(projectPath: string): string {
 export const KEPT_RUN_DIRECTORIES = 5;
 
 /**
+ * The file a passing run that kept only the logs of its slow cases leaves in its directory. A
+ * directory without it counts as a failed or cut-off run, which is all an older release left.
+ */
+export const SLOW_RUN_MARK = 'slow-run';
+
+/**
  * Removes what earlier runs left in [param runs], each a `<start>-<pid>` directory, other than a
- * run still going and the [param kept] most recent of those that have ended. Answers the directories
- * left because another process holds them, such as an engine that outlived its run.
+ * run still going and the [param kept] most recent of those that have ended. Runs marked with
+ * {@link SLOW_RUN_MARK} and the rest are counted apart, so neither kind pushes out the other. Answers
+ * the directories left because another process holds them, such as an engine that outlived its run.
  */
 export function sweepRunDirectories(runs: string, kept = KEPT_RUN_DIRECTORIES): string[] {
   if (!existsSync(runs)) {
@@ -170,19 +176,25 @@ export function sweepRunDirectories(runs: string, kept = KEPT_RUN_DIRECTORIES): 
       held.push(join(runs, entry));
     }
   };
-  const ended: { entry: string; started: number }[] = [];
+  const ended: { entry: string; started: number; slow: boolean }[] = [];
   for (const entry of readdirSync(runs)) {
     const named = /^(\d+)-(\d+)$/.exec(entry);
     const pid = Number(named?.[2]);
     if (!Number.isInteger(pid)) {
       remove(entry);
     } else if (!alive(pid)) {
-      ended.push({ entry, started: Number(named?.[1]) });
+      ended.push({
+        entry,
+        started: Number(named?.[1]),
+        slow: existsSync(join(runs, entry, SLOW_RUN_MARK)),
+      });
     }
   }
   ended.sort((a, b) => b.started - a.started);
-  for (const { entry } of ended.slice(kept)) {
-    remove(entry);
+  for (const slow of [false, true]) {
+    for (const { entry } of ended.filter((one) => one.slow === slow).slice(kept)) {
+      remove(entry);
+    }
   }
   return held;
 }
@@ -192,143 +204,63 @@ export function heldRunSaid(directory: string): string {
   return `left ${directory}, which another process holds, such as an engine of that run still going`;
 }
 
-/** [param bytes] as gigabytes to one decimal place. */
-export const gigabytes = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
-
 /**
  * How many of the [param most] engines asked for the machine has room for, given its [param
- * processors] and the memory [param available] past what it keeps, with what held it below
- * [param most] when something did, each taken at [param engine]'s bytes.
+ * processors], with what held it below [param most] when something did.
  */
 export function roomFor(
   most: number,
   processors: number,
-  available: number,
-  said = 'of memory free',
   processorsSaid = `the machine has ${plural(processors, 'processor')}`,
-  engine: { readonly bytes: number; readonly said: string } = {
-    bytes: MEMORY_PER_ENGINE,
-    said: 'taken for each engine',
-  },
 ): { engines: number; held: string | undefined } {
-  const byMemory = Math.floor((available - MEMORY_KEPT) / engine.bytes);
-  const engines = Math.max(1, Math.min(most, processors, byMemory));
-  if (engines >= most) {
-    return { engines, held: undefined };
-  }
-  return {
-    engines,
-    held:
-      byMemory < processors
-        ? `the machine has ${gigabytes(Math.max(0, available))} ${said}, ${gigabytes(MEMORY_KEPT)} of it kept for everything else and ${gigabytes(engine.bytes)} ${engine.said}`
-        : processorsSaid,
-  };
+  const engines = Math.max(1, Math.min(most, processors));
+  return engines >= most ? { engines, held: undefined } : { engines, held: processorsSaid };
 }
 
 /**
- * Whether the memory [param available] has room for an engine needing [param need], past what the
- * machine keeps and the [param owed] bytes the going engines have yet to take.
+ * [param run] over every one of [param items], [param at] at most at a time, answered in their
+ * order. It is given its own lane's number, counting from 0.
  */
-export function roomForAnother(available: number, owed: number, need: number): boolean {
-  return available - MEMORY_KEPT - owed >= need;
-}
-
-/** The memory the machine can give engines, how the line on room words it, and why a reading failed. */
-interface MemoryRoom {
-  readonly bytes: number;
-  readonly said: string;
-  readonly unread?: string;
-}
-
-/**
- * The memory the machine can give engines. freemem on macOS counts only the pages nobody holds,
- * a few hundred megabytes on a Mac whose file cache would give way at once, so a run there was held
- * to one engine whatever it asked for. The kernel's own share of memory it counts as free, the
- * percentage memory_pressure prints, includes what it can take back. Windows refuses an allocation
- * at the commit limit rather than at physical memory, and a machine with 23 GB free and 4.9 GB left
- * to commit started sixteen engines that died with STATUS_COMMITMENT_LIMIT, so there the smaller
- * of the two is the room. What other work has reserved on the machine and still owes comes off
- * either ({@link reservedMemory}), since that memory is spoken for before it is taken.
- */
-export async function memoryAvailable(): Promise<MemoryRoom> {
-  const reserved = await reservedMemory();
-  const level = await macMemoryLevel();
-  if (level !== null) {
-    return lessReserved({ bytes: (totalmem() * level) / 100, said: 'of memory free' }, reserved);
-  }
-  return memoryRoomOf(freemem(), await windowsCommitLeft(), reserved);
-}
-
-/**
- * The room [param free] physical bytes and [param commit], what Windows can still commit (null
- * elsewhere, or why it did not say), leave engines: the smaller of the two, less the [param reserved]
- * bytes other work still owes.
- */
-export function memoryRoomOf(free: number, commit: number | string | null, reserved = 0): MemoryRoom {
-  if (typeof commit === 'string') {
-    return lessReserved({ bytes: free, said: 'of memory free', unread: commit }, reserved);
-  }
-  return lessReserved(
-    commit !== null && commit < free
-      ? { bytes: commit, said: 'of memory left to commit' }
-      : { bytes: free, said: 'of memory free' },
-    reserved,
-  );
-}
-
-/** [param room] less [param reserved] bytes, the line saying how much when any is. */
-function lessReserved(room: MemoryRoom, reserved: number): MemoryRoom {
-  return reserved > 0
-    ? { ...room, bytes: room.bytes - reserved, said: `${room.said} after ${gigabytes(reserved)} reserved` }
-    : room;
-}
-
-/**
- * How much more Windows will commit, in bytes, which is what GlobalMemoryStatusEx answers as
- * ullAvailPageFile. Null off Windows, or why Windows did not say.
- */
-export async function windowsCommitLeft(): Promise<number | string | null> {
-  if (process.platform !== 'win32') {
-    return null;
-  }
-  try {
-    const said = await askProcessTable('CommitLeft()', COMMIT_ASK_MS);
-    const bytes = Number(said.trim());
-    return Number.isFinite(bytes) && bytes > 0 ? bytes : `it answered ${JSON.stringify(said.trim())}`;
-  } catch (error) {
-    return errorMessage(error);
-  }
-}
-
-/** The percentage of memory macOS counts as free, or null off macOS or when it would not say. */
-export async function macMemoryLevel(): Promise<number | null> {
-  if (process.platform !== 'darwin') {
-    return null;
-  }
-  try {
-    const level = Number((await runHidden('sysctl', ['-n', 'kern.memorystatus_level'])).stdout.trim());
-    return Number.isFinite(level) && level > 0 && level <= 100 ? level : null;
-  } catch {
-    return null;
-  }
-}
-
-/** [param run] over every one of [param items], [param at] at most at a time, answered in their order. */
 export async function inTurns<T, R>(
   items: readonly T[],
   at: number,
-  run: (item: T, index: number) => Promise<R>,
+  run: (item: T, index: number, lane: number) => Promise<R>,
 ): Promise<R[]> {
   const answers: R[] = [];
   // One iterator for every lane, so each item is taken by whichever lane is free first, and once.
   const queue = items.entries();
-  const lane = async (): Promise<void> => {
+  const lane = async (_: unknown, number: number): Promise<void> => {
     for (const [index, item] of queue) {
-      answers[index] = await run(item, index);
+      answers[index] = await run(item, index, number);
     }
   };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(at, items.length)) }, lane));
   return answers;
+}
+
+/** The file in an engine's run folder that names its lane and its own pid, which is its job's number too. */
+export const LANE_FILE = 'lane.json';
+
+/**
+ * Writes [param lane] and [param pid] to the lane file in [param directory], under a temporary name
+ * and then renamed, so a reader never sees half of it.
+ */
+export function writeLaneFile(directory: string, lane: number, pid: number): void {
+  const file = join(directory, LANE_FILE);
+  const temporary = `${file}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify({ lane, pid })}\n`);
+  renameSync(temporary, file);
+}
+
+/**
+ * Gives [param to] the lane file of [param from], for the folder of a further share an engine is
+ * handed: the engine and its lane are the same one, so the file says the same.
+ */
+export function carryLaneFile(from: string, to: string): void {
+  const said = readFileSync(join(from, LANE_FILE), 'utf8');
+  const temporary = join(to, `${LANE_FILE}.tmp`);
+  writeFileSync(temporary, said);
+  renameSync(temporary, join(to, LANE_FILE));
 }
 
 /** What starting an engine needs, the same for every engine of a run. */
@@ -343,6 +275,8 @@ export interface EngineLaunch {
   readonly cores: number | null;
   /** Where readings of the machine and the engines come from, for a machine held free or crowded. */
   readonly sample?: () => Promise<Sample>;
+  /** The lane the engine runs in, counting from 0, which its `lane.json` names. Lane 0 where unset. */
+  readonly lane?: number;
 }
 
 /**
@@ -385,7 +319,7 @@ export function endingWithRunner(
  * Starts the engine with [param args], both its streams into [param log] through one handle so
  * their lines stay in the order printed (on Windows one pipe, copied into the log), and waits for it, ending it once it has printed nothing for
  * [param silenceSeconds], has run past the run's deadline, has printed more than
- * {@link LOG_LIMIT_BYTES}, or an autoload has failed to start. Its
+ * {@link logLimitBytes}, or an autoload has failed to start. Its
  * user data is a `user` folder in [param directory], so two engines never write one save or
  * settings file.
  *
@@ -393,10 +327,12 @@ export function endingWithRunner(
  * what it had printed. It is asked only once a silence passes [param silenceSeconds], since the log
  * is read again each time.
  *
- * [param holds] is told each reading of what the engine holds.
+ * The lane the engine runs in is [code]launch.lane[/code], written with its pid to `lane.json` in
+ * [param directory] before the engine runs.
  *
- * An engine that dies as it starts, with a Windows exception status before printing a line, is
- * started again, as a headless call's is: a suite run failed on 0xC06D007F with every suite unrun.
+ * An engine that dies as it starts, with a Windows exception status before printing a line (or past
+ * its banner, for 0xC06D007F), is started again, as a headless call's is: a suite run failed on
+ * 0xC06D007F with every suite unrun.
  */
 export async function watchedEngine(
   launch: EngineLaunch,
@@ -406,19 +342,19 @@ export async function watchedEngine(
   log: string,
   silenceSeconds: number,
   silenceIn?: (printed: RunPrinted) => number,
-  holds?: (bytes: number) => void,
   shares?: ShareHandoff,
 ): Promise<EngineEnd> {
   const user = join(directory, 'user');
-  seedPipelineCache(user, launch.projectPath, launch.godotPath);
+  const seeded = await seedPipelineCache(user, launch.projectPath, launch.godotPath);
   try {
     return await startedUntilItRuns(
-      () => engineWatchedOnce(launch, lock, args, directory, log, silenceSeconds, silenceIn, holds, shares),
+      () => engineWatchedOnce(launch, lock, args, directory, log, silenceSeconds, silenceIn, shares),
       undefined,
-      (end) => end.ended === null && end.signal === null && diedAsItStarted(end.code, readLog(log) === ''),
+      (end) =>
+        end.ended === null && end.signal === null && diedAsItStarted(end.code, linesAsPrinted(readLog(log))),
     );
   } finally {
-    await keepPipelineCache(user, launch.projectPath, launch.godotPath);
+    await keepPipelineCache(user, launch.projectPath, launch.godotPath, undefined, seeded);
   }
 }
 
@@ -430,15 +366,20 @@ async function engineWatchedOnce(
   log: string,
   silenceSeconds: number,
   silenceIn?: (printed: RunPrinted) => number,
-  holds?: (bytes: number) => void,
   shares?: ShareHandoff,
 ): Promise<EngineEnd> {
   const user = join(directory, 'user');
   const env = onTheSlot({ ...process.env, APPDATA: user, XDG_DATA_HOME: user }, lock);
   const output = openSync(log, 'w');
-  const started = await startEngine({ launch, args, directory, output, env });
+  const lane = launch.lane ?? 0;
+  const started = await startEngine({ launch, args, directory, lane, output, env });
   if (started.kind === 'refused') {
     return started.end;
+  }
+  // Windows has the helper write it before the engine runs. Elsewhere the pid is known as soon as
+  // the start returns.
+  if (process.platform !== 'win32' && started.child.pid !== undefined) {
+    writeLaneFile(directory, lane, started.child.pid);
   }
   const { child, stop, piped } = started;
   launch.running.add(stop);
@@ -460,7 +401,7 @@ async function engineWatchedOnce(
   const reading = openSync(log, 'r');
   const engine = engineAt(started);
   if (engine !== undefined) {
-    foundEngine(lock, engine);
+    foundEngine(engine);
   }
   let watch: Watch | undefined;
   try {
@@ -476,12 +417,11 @@ async function engineWatchedOnce(
       outcome,
       silenceSeconds,
       silenceIn,
-      holds,
       sample,
       running: new Spent(nowSeconds(), first, engine),
       quiet: new Spent(nowSeconds(), first, engine),
       pid: engine,
-      peakBytes: 0,
+      priority: undefined,
       size: 0,
       // The end of what was scanned, so a marker split between two reads is still found.
       carried: '',
@@ -491,6 +431,7 @@ async function engineWatchedOnce(
       shareNumber: 0,
       shareFrom: 0,
       shareTail: Buffer.alloc(0),
+      suites: new SuiteCuts(),
       deciding: null,
       failure: undefined,
     };
@@ -519,8 +460,9 @@ async function engineWatchedOnce(
     told: await exited,
     copied,
     output,
+    log,
     outcome,
-    peakBytes: watch.peakBytes,
+    priority: watch.priority,
   });
 }
 
@@ -550,6 +492,7 @@ interface EngineStart {
   readonly launch: EngineLaunch;
   readonly args: readonly string[];
   readonly directory: string;
+  readonly lane: number;
   readonly output: number;
   readonly env: NodeJS.ProcessEnv;
 }
@@ -572,7 +515,7 @@ async function startEngine(start: EngineStart): Promise<Started> {
 
 /** The engine started through the helper, on a desktop of its own. */
 async function startOnHiddenDesktop(start: EngineStart): Promise<Started> {
-  const { launch, args, directory, env } = start;
+  const { launch, args, directory, lane, env } = start;
   const where = 'on a desktop of its own';
   const compiled = await ensureHelperCompiled();
   if (compiled !== null) {
@@ -588,16 +531,25 @@ async function startOnHiddenDesktop(start: EngineStart): Promise<Started> {
     scratch: directory,
     stop: join(directory, 'stop'),
     exit: join(directory, 'exit'),
+    lane: { file: join(directory, LANE_FILE), number: lane },
     ...(launch.cores === null ? {} : { affinity: (1n << BigInt(launch.cores)) - 1n }),
   };
   // A pipe, copied into the log here: an engine on Windows spends 1.5 to 4 ms on every line it
   // writes to a file and 0.04 ms on one written to a pipe, and gdUnit4 prints a dozen a case. The
   // helper hands the engine its stdout for both streams, so their lines stay in order.
-  const onDesktop = spawnOnDesktop(how, launch.godotPath, args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env,
-    cwd: directory,
-  });
+  let onDesktop: ReturnType<typeof spawnOnDesktop>;
+  try {
+    onDesktop = spawnOnDesktop(how, launch.godotPath, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+      cwd: directory,
+    });
+  } catch (error) {
+    if (error instanceof HelperRefused) {
+      return { kind: 'refused', end: { code: null, signal: null, ended: error.message } };
+    }
+    throw error;
+  }
   const helped = onDesktop.child;
   return {
     kind: 'started',
@@ -627,7 +579,6 @@ function startOnThisDesktop(start: EngineStart): StartedEngine {
     cwd: launch.projectPath,
     detached: true,
   });
-  belowNormal(child);
   return {
     kind: 'started',
     child,
@@ -644,13 +595,9 @@ function engineAt(started: StartedEngine): number | undefined {
   return started.helper === null ? started.child.pid : helperPid(started.helper.pid);
 }
 
-/**
- * Names [param engine] in the lock as well, since the lock names this process, and what the engine
- * starts runs on its slot only when the lock names the engine.
- */
-function foundEngine(lock: string, engine: number): void {
-  watching(engine, true, true);
-  void nameSlotEngineOf(lock, process.pid, engine);
+/** Includes [param engine] in the machine's readings, which its timeouts count by. */
+function foundEngine(engine: number): void {
+  watching(engine, true);
 }
 
 /** What the watch of one engine keeps from one look to the next. */
@@ -666,12 +613,12 @@ interface Watch {
   readonly outcome: { ended: string | null };
   readonly silenceSeconds: number;
   readonly silenceIn: ((printed: RunPrinted) => number) | undefined;
-  readonly holds: ((bytes: number) => void) | undefined;
   readonly sample: () => Promise<Sample>;
   readonly running: Spent;
   readonly quiet: Spent;
   pid: number | undefined;
-  peakBytes: number;
+  /** The engine's priority as last read while it ran, which a log kept for a slow case records. */
+  priority: string | undefined;
   size: number;
   carried: string;
   allowed: { size: number; seconds: number };
@@ -683,6 +630,8 @@ interface Watch {
   shareFrom: number;
   /** The end of what was scanned, in case a share's marker is split between two reads. */
   shareTail: Buffer;
+  /** The suites the log has opened, so an engine ended for printing too much names the one running. */
+  readonly suites: SuiteCuts;
   /** Settles once the run has answered with the next share, while the engine waits for it. */
   deciding: Promise<void> | null;
   /** Why handing over a share failed, thrown once the engine has ended. */
@@ -694,15 +643,13 @@ async function lookAtTheEngine(watch: Watch): Promise<void> {
   if (watch.pid === undefined) {
     watch.pid = engineAt(watch.started);
     if (watch.pid !== undefined) {
-      foundEngine(watch.lock, watch.pid);
+      foundEngine(watch.pid);
     }
   }
-  const taken = await watch.sample();
-  const holding = watch.pid === undefined ? undefined : taken.held?.get(watch.pid);
-  if (holding !== undefined && holding > 0) {
-    watch.peakBytes = Math.max(watch.peakBytes, holding);
-    watch.holds?.(holding);
+  if (watch.pid !== undefined) {
+    watch.priority = priorityOf(watch.pid) ?? watch.priority;
   }
+  const taken = await watch.sample();
   watch.running.counted(taken, watch.pid);
   watch.quiet.counted(taken, watch.pid);
   const at = nowSeconds();
@@ -751,6 +698,7 @@ function scanWhatTheLogGained(watch: Watch, now: number, at: number): void {
       watch.started.stop();
     }
     watch.carried = scanned.slice(-AUTOLOAD_FAILED.length);
+    watch.suites.take(chunk.subarray(0, got));
     if (watch.shares !== undefined && watch.deciding === null) {
       noticeShareEnd(watch, chunk.subarray(0, got), offset);
     }
@@ -758,8 +706,8 @@ function scanWhatTheLogGained(watch: Watch, now: number, at: number): void {
   }
   watch.size = now;
   watch.quiet.restart(at);
-  if (watch.outcome.ended === null && watch.size - watch.shareFrom > LOG_LIMIT_BYTES) {
-    watch.outcome.ended = `the engine printed more than the ${String(LOG_LIMIT_BYTES / 1024 / 1024)} MiB a log may hold, so it was ended`;
+  if (watch.outcome.ended === null && watch.size - watch.shareFrom > logLimitBytes()) {
+    watch.outcome.ended = pastTheLogLimit(watch.suites.suite);
     watch.started.stop();
   }
 }
@@ -804,7 +752,7 @@ function handedTheNext(watch: Watch, to: number, code: number): void {
     code,
     signal: null,
     ended: null,
-    ...(watch.peakBytes > 0 ? { peakBytes: watch.peakBytes } : {}),
+    ...(watch.priority === undefined ? {} : { priority: watch.priority }),
   };
   const from = watch.shareFrom;
   watch.deciding = shares
@@ -812,7 +760,6 @@ function handedTheNext(watch: Watch, to: number, code: number): void {
     .then((next) => {
       if (next !== null) {
         watch.shareFrom = to;
-        watch.peakBytes = 0;
       }
       handedOver(shares.directory, number + 1, next?.args ?? null);
     })
@@ -861,13 +808,17 @@ interface EngineFinish {
   readonly told: { readonly code: number | null; readonly signal: NodeJS.Signals | null };
   readonly copied: Promise<void> | null;
   readonly output: number;
+  readonly log: string;
   readonly outcome: { ended: string | null };
-  readonly peakBytes: number;
+  readonly priority: string | undefined;
 }
+
+/** How much of a log is read for the helper's word on a message box: the lines before it and the one it ends on. */
+const BOX_READ_BYTES = 64 * 1024;
 
 /** How the engine ended, once its process has exited and its streams are copied into the log. */
 async function endOfTheEngine(finish: EngineFinish): Promise<EngineEnd> {
-  const { started, told, copied, output, outcome, peakBytes } = finish;
+  const { started, told, copied, output, log, outcome, priority } = finish;
   const { helper } = started;
   const code = helper === null ? told.code : helperExit(helper.exit, told.code);
   const { signal } = told;
@@ -882,53 +833,19 @@ async function endOfTheEngine(finish: EngineFinish): Promise<EngineEnd> {
   if (failed !== null && helper !== null) {
     outcome.ended ??= `the engine could not be started ${helper.how}: ${failed}`;
   }
+  if (helper !== null && outcome.ended === null) {
+    const printed = new GameLog();
+    printed.append('stdout', readLog(log, BOX_READ_BYTES));
+    printed.finish();
+    outcome.ended = desktopBoxEnding(printed.all);
+  }
   return {
     code,
     signal,
     ended: outcome.ended,
     ...(freeBytes === undefined ? {} : { freeBytes }),
-    ...(peakBytes > 0 ? { peakBytes } : {}),
+    ...(priority === undefined ? {} : { priority }),
   };
-}
-
-/**
- * How long the streams of an engine that has exited are drained for: a process it started and
- * handed them to holds them open, and the run would otherwise wait on that process.
- */
-const DRAIN_MS = 5000;
-
-/**
- * Writes everything [param streams] carry into [param output] as it arrives, and settles once all
- * have ended, or [param DRAIN_MS] after [param exited] settles for those still held open. A write
- * that fails stops the writing, not the reading, so the engine is never left blocked on a full pipe.
- */
-function copiedInto(output: number, streams: readonly Readable[], exited: Promise<unknown>): Promise<void> {
-  let writing = true;
-  const ended = streams.map(
-    (stream) =>
-      new Promise<void>((settle) => {
-        stream.on('data', (chunk: Buffer) => {
-          if (!writing) {
-            return;
-          }
-          try {
-            writeSync(output, chunk);
-          } catch {
-            // The log then ends short, and the run is judged on what it holds.
-            writing = false;
-          }
-        });
-        stream.once('close', settle);
-      }),
-  );
-  const all = Promise.all(ended).then(() => undefined);
-  const drained = exited.then(() => delay(DRAIN_MS, undefined, { ref: false }));
-  return Promise.race([all, drained]).then(() => {
-    writing = false;
-    for (const stream of streams) {
-      stream.destroy();
-    }
-  });
 }
 
 /** Ends [param child] and everything it started: Godot's console build is a wrapper around the engine. */

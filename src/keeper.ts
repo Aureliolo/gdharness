@@ -15,14 +15,24 @@
 import { appendFileSync, closeSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { exitOf } from './alive.js';
-import { ensureHelperCompiled, helperExit, helperFailure, helperStep, spawnOnDesktop } from './desktop.js';
-import { giveBackSlot, handSlot, nameSlotEngine, ownStart } from './engine-slots.js';
-import { crashesReported, letWindowsReportCrashes } from './error-mode.js';
+import { copiedInto } from './copied-into.js';
+import {
+  ensureHelperCompiled,
+  HelperRefused,
+  helperExit,
+  helperFailure,
+  helperStep,
+  spawnOnDesktop,
+} from './desktop.js';
+import { takenOverSlot } from './engine-slots.js';
+import { letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
 import { raisedMark } from './game-log.js';
-import { type KeeperListening, listenForTheServer } from './keeper-channel.js';
+import { endedOnce, type KeeperListening, listenForTheServer } from './keeper-channel.js';
+import type { OsLock } from './os-lock.js';
 import {
   KEEPER_SCRIPT,
   readLaunched,
@@ -31,8 +41,6 @@ import {
   sendSpec,
   withChanges,
 } from './outside.js';
-import { belowNormal } from './priority.js';
-import { startTimesOf } from './process-children.js';
 import {
   amendRunRecord,
   type RestartedFrom,
@@ -43,14 +51,25 @@ import {
 import { discard, scratchDirectory } from './scratch.js';
 import {
   ProfileObserver,
-  type ProfileTotals,
+  profileFileWriter,
   profileFrameFunctions,
   withEngineArguments,
   writeProfileFile,
 } from './script-profile.js';
 import { type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
-import { followSuccessor } from './successor.js';
-import { holdExit, prepareWholeExits, type WholeExit } from './whole-exit.js';
+import { type ExitWatch, followSuccessor, watchExit } from './successor.js';
+import { holdChildExit, holdExit, prepareWholeExits, type WholeExit } from './whole-exit.js';
+
+/**
+ * A started target: its process, its pid and its whole exit code. [param copied] settles once what
+ * the target wrote to its pipes is in the file, and is there only for a target given pipes.
+ */
+interface StartedGame {
+  readonly child: ChildProcess;
+  readonly pid: number;
+  readonly whole: WholeExit;
+  readonly copied?: Promise<void> | undefined;
+}
 
 /**
  * The target started detached, so it is in no job object and no process group of this process.
@@ -68,7 +87,7 @@ async function startDirectly(
   detached = true,
   errors: number | 'ignore' = output,
   directory: string = process.cwd(),
-): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
+): Promise<StartedGame | { error: string }> {
   return await new Promise((resolve) => {
     const child = (hidden ? spawnHidden : spawnShown)(spec.command, spec.args, {
       stdio: ['ignore', output, errors],
@@ -76,7 +95,6 @@ async function startDirectly(
       env: withChanges(process.env, spec.envChanges),
       cwd: directory,
     });
-    belowNormal(child);
     const whole = holdExit(child.pid);
     child.once('error', (error: Error) => {
       resolve({ error: error.message });
@@ -96,20 +114,60 @@ async function startDirectly(
  * activation: the child is the process that waits for it and exits with its code, and the pid is
  * the target's own, read from the file that process writes once the target has started.
  *
- * Windows PowerShell started detached exits at once and runs nothing, so the helper is this
- * process's own child, hidden, and in the job object Node gives its children: it goes when this
- * process does. The job lets its members' children leave it silently, so the target is in no job
- * and outlives both. So only a keeper starts one, since it waits for as long as the target runs.
- * A launcher that exited after the pid took the helper with it, and a process it had started on a
- * desktop of its own could no longer start one of its own there, which is what an editor does when
- * it plays a game. A start without activation also needs its helper to hold the foreground.
+ * The helper is this process's own, so a keeper's lasts as long as its target, and it holds the
+ * desktop a process the target starts on a desktop of its own needs, as an editor does when it plays
+ * a game. The target's job is named and only counts, so the target's lifetime is its own and it runs
+ * on when the helper goes. A start without activation needs the helper to hold the foreground.
  */
 async function startThroughHelper(
   spec: SentSpec,
   output: number | 'ignore',
   stopFile: string,
   exitFile: string,
-): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
+): Promise<StartedGame | { error: string }> {
+  try {
+    return await startedThroughHelper(spec, output, stopFile, exitFile);
+  } catch (error) {
+    // A system that will not run the helper program is a start that failed, and no defect.
+    if (error instanceof HelperRefused) {
+      return { error: error.message };
+    }
+    throw error;
+  }
+}
+
+/**
+ * Null once [param child] has spawned or ended, or why it could not be. A start the helper answers
+ * before it is given to it never spawns, and ends with its reason in the helper's error file.
+ */
+function spawnedOrEnded(child: ChildProcess): Promise<string | null> {
+  return new Promise((resolve) => {
+    child.once('error', (error: Error) => {
+      resolve(error.message);
+    });
+    child.once('spawn', () => {
+      resolve(child.pid === undefined ? 'the operating system gave it no pid' : null);
+    });
+    child.once('exit', () => {
+      resolve(null);
+    });
+  });
+}
+
+/**
+ * [param output] is where the game's output is written, and 'ignore' where it has none. The game is
+ * given pipes for it and this process writes the file, since a game on Windows flushes a file to
+ * disk after every line it writes. This process owns [param output] from here and closes it once the
+ * pipes have ended.
+ */
+async function startedThroughHelper(
+  spec: SentSpec,
+  output: number | 'ignore',
+  stopFile: string,
+  exitFile: string,
+): Promise<StartedGame | { error: string }> {
+  const piped = output !== 'ignore';
+  let copying = false;
   const scratch = scratchDirectory('desktop');
   const where =
     spec.desktop !== undefined
@@ -140,106 +198,78 @@ async function startThroughHelper(
       spec.command,
       spec.args,
       {
-        stdio: ['ignore', output, 'ignore'],
+        stdio: ['ignore', piped ? 'pipe' : 'ignore', piped ? 'pipe' : 'ignore'],
         env: withChanges(process.env, spec.envChanges),
         cwd: tmpdir(),
       },
     );
     const { child } = onDesktop;
-    belowNormal(child);
-    const whole = holdExit(child.pid);
-    const spawned = await new Promise<string | null>((resolve) => {
-      child.once('error', (error: Error) => {
-        resolve(error.message);
-      });
-      child.once('spawn', () => {
-        resolve(child.pid === undefined ? 'the operating system gave it no pid' : null);
-      });
-    });
+    const whole = holdChildExit(child);
+    const spawned = await spawnedOrEnded(child);
     if (spawned !== null) {
       return { error: spawned };
     }
-    const exited = { now: false };
-    child.once('exit', () => {
-      exited.now = true;
-    });
-    for (let waited = 0; waited < DESKTOP_START_MS; waited += 50) {
-      const pid = onDesktop.pid();
-      if (pid !== undefined) {
-        return { child, pid, whole };
-      }
-      if (exited.now) {
-        const why = helperFailure(onDesktop.files.error) ?? 'it exited saying nothing';
-        return { error: `it could not be started ${where}: ${why}` };
-      }
-      await delay(50);
-    }
-    child.kill();
-    return {
-      error: `it was not started ${where} within ${DESKTOP_START_MS} ms, and ${helperStep(onDesktop.files.step)}`,
-    };
+    // Reading at once, since a game that fills the pipe's buffer waits for it to be read.
+    const copied = output === 'ignore' ? undefined : copiedIntoFile(output, child);
+    copying = copied !== undefined;
+    const named = await pidFromTheHelper(onDesktop, where);
+    return 'error' in named ? named : { child, pid: named.pid, whole, copied };
   } finally {
+    if (piped && !copying) {
+      closeSync(output);
+    }
     discard(scratch);
   }
 }
 
-/** How often a profiled run's file is written at most while frames arrive. */
-const PROFILE_WRITE_MS = 500;
+/** The pid the helper of [param onDesktop] writes for its target, or why none came within the start's time. */
+async function pidFromTheHelper(
+  onDesktop: ReturnType<typeof spawnOnDesktop>,
+  where: string,
+): Promise<{ pid: number } | { error: string }> {
+  const { child } = onDesktop;
+  for (let waited = 0; waited < DESKTOP_START_MS; waited += 50) {
+    const pid = onDesktop.pid();
+    if (pid !== undefined) {
+      return { pid };
+    }
+    if (child.exitCode !== null || child.signalCode !== null) {
+      const why = helperFailure(onDesktop.files.error) ?? 'it exited saying nothing';
+      return { error: `it could not be started ${where}: ${why}` };
+    }
+    await delay(50);
+  }
+  child.kill();
+  return {
+    error: `it was not started ${where} within ${DESKTOP_START_MS} ms, and ${helperStep(onDesktop.files.step)}`,
+  };
+}
 
-/** How many times the write as the game exits is tried before what it carried is given up. */
-const LAST_WRITE_TRIES = 5;
+/** Whether [param stream] is one of a child's, which are null where the child was given none. */
+function isStream(stream: Readable | null): stream is Readable {
+  return stream !== null;
+}
 
-/**
- * The profiler of a profiled run, writing what it sums to [param path]: when the game connects, at
- * most every `PROFILE_WRITE_MS` while frames arrive, and once more as the game exits, so a server
- * reading the file mid-run is at most that far behind and one reading it after the exit has the lot.
- */
+/** What [param child] writes to its pipes, written to [param output], which is closed once they end. */
+function copiedIntoFile(output: number, child: ChildProcess): Promise<void> {
+  return copiedInto(output, [child.stdout, child.stderr].filter(isStream), exitOf(child)).then(() => {
+    closeSync(output);
+  });
+}
+
+/** The profiler of a profiled run, writing what it sums to [param path] as the game runs and exits. */
 function profiledBy(
   path: string,
   projectPath: string,
   engineCalls: boolean,
 ): { observer: ProfileObserver; finish: () => void } {
-  let latest: ProfileTotals | null = null;
-  let timer: NodeJS.Timeout | null = null;
-  // A write a reader held off past its wait is tried again later rather than dropped: the totals it
-  // carried are only rewritten when the next frame arrives, and a game that has quit sends none.
-  const write = (): void => {
-    timer = null;
-    if (latest !== null && !writeProfileFile(path, { ...latest, connected: true })) {
-      timer = setTimeout(write, PROFILE_WRITE_MS);
-    }
-  };
-  const observer = new ProfileObserver(
-    (totals) => {
-      const first = latest === null;
-      latest = totals;
-      if (first) {
-        write();
-      } else {
-        timer ??= setTimeout(write, PROFILE_WRITE_MS);
-      }
-    },
-    profileFrameFunctions(projectPath),
-    engineCalls,
-  );
+  const writer = profileFileWriter(path);
+  const observer = new ProfileObserver(writer.changed, profileFrameFunctions(projectPath), engineCalls);
   writeProfileFile(path, { connected: false, listeningSince: Date.now() });
   return {
     observer,
     finish: () => {
-      if (timer !== null) {
-        clearTimeout(timer);
-      }
-      const last = observer.totals() ?? latest;
-      latest = last;
-      if (last === null) {
-        return;
-      }
-      // The keeper exits after this, so there is no later write to fall back on, and the engine's
-      // own totals arrive only now. Each try waits out a held file for a while of its own.
-      let tries = 0;
-      while (!writeProfileFile(path, { ...last, connected: true }) && tries < LAST_WRITE_TRIES) {
-        tries += 1;
-      }
+      writer.finish(observer.totals());
     },
   };
 }
@@ -255,8 +285,7 @@ const DRAIN_MS = 2000;
 const DESKTOP_START_MS = 60_000;
 
 /**
- * Through the helper where Windows is asked for a desktop or a start without activation, which Node
- * cannot name when it starts a process, and directly otherwise. [param stopFile] is where a helper
+ * Through the helper on Windows, and directly otherwise. [param stopFile] is where a helper
  * is told to end what it started, and is empty for a start nothing will be asked to end.
  * [param exitFile] is where the helper writes the whole exit code, and is empty for none.
  */
@@ -266,25 +295,25 @@ async function startDetached(
   hidden: boolean,
   stopFile = '',
   exitFile = '',
-): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
+): Promise<StartedGame | { error: string }> {
   return throughTheHelper(spec)
     ? await startThroughHelper(spec, output, stopFile, exitFile)
     : await startDirectly(spec, output, hidden);
 }
 
 /**
- * Also wherever this process could not clear the bit that keeps a crash from being reported, since
- * the helper clears it in itself before it starts anything.
+ * Every start on Windows, since the helper puts the process in the job its processor time is read
+ * from, and clears the bit that keeps a crash from being reported where this process could not.
  */
 function throughTheHelper(spec: SentSpec): boolean {
-  return needsItsHelperKept(spec) || (process.platform === 'win32' && !crashesReported());
+  return needsItsHelperKept(spec) || process.platform === 'win32';
 }
 
 /**
  * Whether [param spec] needs its helper kept for as long as it runs, which only a keeper does: one
  * on a desktop of its own, for the desktop's sake, and one started without activation, whose helper
- * holds the foreground while it starts. A helper there only for the error mode may go once the
- * target has started, which it outlives.
+ * holds the foreground while it starts. A launcher that starts neither exits once the pid is known,
+ * and the helper it started detached stays with the target.
  */
 function needsItsHelperKept(spec: SentSpec): boolean {
   return process.platform === 'win32' && (spec.desktop !== undefined || spec.noActivate === true);
@@ -292,7 +321,7 @@ function needsItsHelperKept(spec: SentSpec): boolean {
 
 async function launch(): Promise<void> {
   const spec = await receivedSpec();
-  if (spec.run === undefined && !needsItsHelperKept(spec)) {
+  if (spec.run === undefined && !needsItsHelperKept(spec) && spec.exitNote === undefined) {
     const started = await startDetached(spec, 'ignore', true);
     if ('error' in started) {
       process.stdout.write(`error ${started.error}\n`);
@@ -322,7 +351,11 @@ async function launch(): Promise<void> {
       return;
     }
     const launched = readLaunched(printed);
-    process.stdout.write('pid' in launched ? `pid ${launched.pid}\n` : `error ${launched.error}\n`);
+    process.stdout.write(
+      'pid' in launched
+        ? `pid ${launched.pid}${launched.keeperPid === undefined ? '' : ` keeper ${launched.keeperPid}`}\n`
+        : `error ${launched.error}\n`,
+    );
     keeper.unref();
     process.exit(0);
   });
@@ -361,7 +394,6 @@ function amendNoteIfItCan(record: RunRecord): void {
 }
 
 type KeptRun = NonNullable<SentSpec['run']>;
-type KeptSlot = NonNullable<KeptRun['slot']>;
 type Started = Awaited<ReturnType<typeof startDetached>>;
 type Followed = NonNullable<Awaited<ReturnType<typeof followSuccessor>>>;
 
@@ -391,7 +423,6 @@ interface Following {
   readonly command: string;
   readonly exitNotes: string | null;
   readonly transcript: string | undefined;
-  readonly slot: KeptSlot | undefined;
   readonly ender: Ender;
 }
 
@@ -440,28 +471,27 @@ async function startTheGame(
   own: string | null;
   stopFile: string;
   exitFile: string;
-  keeperStarted: Promise<number> | undefined;
   spawnedAt: number;
 }> {
-  const transcript = run === undefined ? 'ignore' : openSync(run.transcript, 'a');
+  const outputFile = run === undefined ? spec.output : run.transcript;
+  const transcript = outputFile === undefined ? 'ignore' : openSync(outputFile, 'a');
   // Private to this keeper, for the file a helper watches for its stop.
   const own = run !== undefined && throughTheHelper(spec) ? scratchDirectory('keeper-stop') : null;
   const stopFile = own === null ? '' : join(own, 'stop');
   const exitFile = own === null ? '' : join(own, 'exit');
   let started: Started;
-  // Read beside the start rather than after it: on Windows it is a query of its own.
-  const keeperStarted = run?.slot === undefined ? undefined : ownStart();
   // Before the game exists, so anything listed as started after it can be the game's own.
   const spawnedAt = Date.now();
   try {
     started = await startDetached(toStart, transcript, run === undefined, stopFile, exitFile);
   } finally {
-    // The game holds its own copy from here on.
-    if (transcript !== 'ignore') {
+    // The game holds its own copy from here on, unless it was given pipes and this process writes
+    // the file, which closes it.
+    if (transcript !== 'ignore' && !throughTheHelper(toStart)) {
       closeSync(transcript);
     }
   }
-  return { started, own, stopFile, exitFile, keeperStarted, spawnedAt };
+  return { started, own, stopFile, exitFile, spawnedAt };
 }
 
 /** The note a run starts with, or null for a start that is no run. */
@@ -482,7 +512,10 @@ function startingNote(
     projectPath: run.projectPath,
     keeperPid: process.pid,
     ...(run.servedBy === undefined ? {} : { servedBy: run.servedBy }),
+    ...(run.serverPid === undefined ? {} : { serverPid: run.serverPid }),
+    ...(run.savesIn === undefined ? {} : { savesIn: run.savesIn }),
     ...(run.profile === undefined ? {} : { profile: run.profile }),
+    ...(run.debugged === false ? { exported: true as const } : {}),
     arguments: args,
     command: spec.command,
   };
@@ -527,44 +560,34 @@ async function sayPid(pid: number): Promise<void> {
     process.stdout.once('error', () => {
       resolve();
     });
-    process.stdout.end(`pid ${pid}\n`, resolve);
+    process.stdout.end(`pid ${pid} keeper ${process.pid}\n`, resolve);
   });
 }
 
 /**
- * After the pid has gone back, since on Windows reading this process's start is a query of its
- * own, and a start held up by it answered after a game that announces at once had done so.
- * The pid in the lock is this process's, since a game that restarts itself comes back under
- * another, so the label says whose it is: a wait would otherwise name it as the game's. The game
- * is named beside it, so what the game starts runs on its slot rather than taking a second.
+ * Takes over the slot the server gave up as the pid went back to it, and holds it for the game's
+ * life. The lock is held by this process, which lives as long as the game does, so the operating
+ * system frees it however the keeper ends. A slot another taker got first leaves the game on none.
  */
-async function handTheSlot(
-  slot: KeptSlot | undefined,
-  keeperStarted: Promise<number> | undefined,
-  pid: number,
-): Promise<void> {
-  if (slot === undefined || keeperStarted === undefined) {
-    return;
-  }
-  const gameStarted = (await startTimesOf([pid])).get(pid);
-  handSlot(slot.lock, slot.from, {
-    pid: process.pid,
-    started: await keeperStarted,
-    by: `${slot.by}, through the keeper process that runs it`,
-    ...(gameStarted === undefined ? {} : { engine: { pid, started: gameStarted } }),
-  });
+async function takeTheSlot(slot: { readonly lock: string } | undefined): Promise<OsLock | null> {
+  return slot === undefined ? null : await takenOverSlot(slot.lock);
 }
 
-/** The look for a successor of [param pid], unless the game said it does not restart. */
+/**
+ * The look for a successor of [param pid], unless the game said it does not restart. It is dated
+ * against [param watch]'s kernel exit time where there is one, since the sighting [param exitedAt]
+ * comes late on a loaded machine.
+ */
 function lookForSuccessor(
   following: Following,
   pid: number,
   notBefore: number,
   exitedAt: number,
+  watch?: ExitWatch,
 ): Promise<Followed | null> | null {
   return restartSaid(following.exitNotes, pid) === false
     ? null
-    : followSuccessor(pid, following.command, notBefore, exitedAt, following.transcript);
+    : followSuccessor(pid, following.command, notBefore, exitedAt, following.transcript, watch);
 }
 
 /** One process in a chain of restarts, from the game's first to the one it restarted into. */
@@ -592,9 +615,6 @@ async function followRestart(
     restartedFrom: [...(note.restartedFrom ?? []), restartedFromOf(ended)],
   };
   amendNoteIfItCan(moved);
-  if (following.slot !== undefined) {
-    nameSlotEngine(following.slot.lock, process.pid, { pid: next.pid, started: next.startedAt });
-  }
   following.ender.end = () => {
     try {
       process.kill(next.pid);
@@ -649,6 +669,19 @@ function recordTheEnd(ended: KeptEnd): void {
   }
 }
 
+/** Writes how the process exited into [param file], for a reader of a process that has no run note. */
+function noteTheExit(file: string | undefined, pid: number, code: number | null): void {
+  if (file === undefined || code === null) {
+    return;
+  }
+  try {
+    // With the pid, so a reader never takes the note of an editor before for this one's.
+    writeFileSync(file, `${String(pid)} ${String(code >>> 0)}`);
+  } catch {
+    // The reader then says the exit was not recorded.
+  }
+}
+
 async function keep(): Promise<void> {
   const spec = await receivedSpec();
   const run = spec.run;
@@ -657,17 +690,14 @@ async function keep(): Promise<void> {
   const debuggerPeer = await openDebuggerFor(run, profiled);
   const exitNotes = run === undefined ? null : scratchDirectory('keeper-exit');
   const toStart = specToStart(spec, exitNotes, debuggerPeer);
-  const { started, own, stopFile, exitFile, keeperStarted, spawnedAt } = await startTheGame(
-    spec,
-    toStart,
-    run,
-  );
+  const { started, own, stopFile, exitFile, spawnedAt } = await startTheGame(spec, toStart, run);
   if ('error' in started) {
     debuggerPeer?.close();
     process.stdout.write(`error ${started.error}\n`);
     process.exit(1);
   }
-  const { child, pid, whole } = started;
+  const { child, pid, whole, copied } = started;
+  const watch = run === undefined ? undefined : watchExit(pid, spawnedAt);
   const record = startingNote(run, spec, pid, toStart.args);
   if (record !== null) {
     // Before the pid goes back, and in the same turn as the exit is listened for: a game that ends at
@@ -675,14 +705,16 @@ async function keep(): Promise<void> {
     writeNoteIfItCan(record);
   }
   const exited = exitOf(child);
-  const ender: Ender = { stop: false, end: endingTheGame(child, stopFile) };
+  const ender: Ender = { stop: false, end: endedOnce(endingTheGame(child, stopFile)) };
   const listening = record === null ? null : await listenAndNote(record, ender, debuggerPeer);
   await sayPid(pid);
-  const slot = run?.slot;
-  await handTheSlot(slot, keeperStarted, pid);
+  const slot = await takeTheSlot(run?.slot);
   const told = await exited;
+  // Before the exit is noted: whoever reads the note then reads a transcript with the game's last lines.
+  await copied;
   const code = exitFile === '' ? whole(told.code) : helperExit(exitFile, whole(told.code));
   const exitedAt = Date.now();
+  noteTheExit(spec.exitNote, pid, code);
   const note: RunRecord | null =
     record === null ? null : listening === null ? record : { ...record, keeper: listening.address };
   if (note !== null) {
@@ -690,10 +722,15 @@ async function keep(): Promise<void> {
   }
   // The game's restart, if it made one, is not this process's child, so the handle is no way to end it.
   ender.end = () => 'gone';
-  const following: Following = { command: spec.command, exitNotes, transcript: run?.transcript, slot, ender };
+  const following: Following = {
+    command: spec.command,
+    exitNotes,
+    transcript: run?.transcript,
+    ender,
+  };
   // Looked for at once, beside the drain: a successor that ends before the listing sees it is not
   // followed, and the run ends with the first process's exit.
-  const looked = note === null ? null : lookForSuccessor(following, pid, spawnedAt, exitedAt);
+  const looked = note === null ? null : lookForSuccessor(following, pid, spawnedAt, exitedAt, watch);
   // The profile is finished from everything the game sent, which is read after its exit is told.
   if (debuggerPeer !== null) {
     await debuggerPeer.drained(DRAIN_MS);
@@ -705,9 +742,7 @@ async function keep(): Promise<void> {
     following,
   );
   recordTheEnd(last);
-  if (slot !== undefined) {
-    giveBackSlot(slot.lock, process.pid);
-  }
+  slot?.release();
   debuggerPeer?.close();
   listening?.close();
   discard(own, exitNotes);

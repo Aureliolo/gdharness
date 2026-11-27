@@ -10,7 +10,7 @@
 | `bun run lint`                                            | Biome, types, dead code and markdownlint.                                                                                                  |
 | `bun run format:check`                                    | Biome and Prettier.                                                                                                                        |
 | `bun run lint:gd`, `bun run format:gd:check`              | The pinned gdstyle with `gdstyle.toml`, on every script under `src/godot` and `test/support/gd`.                                           |
-| `bun run lint:gd:complexity`                              | lizard, failing on any GDScript function above complexity 15. Biome holds the TypeScript to the same ceiling.                              |
+| `bun run lint:gd:complexity`                              | lizard. It fails any GDScript function above complexity 15. Biome holds the TypeScript to the same ceiling.                                |
 | `uv run yamllint --strict .`                              | The `yaml` job.                                                                                                                            |
 | `bun run format`, `bun run lint:fix`, `bun run format:gd` | Write the fixes.                                                                                                                           |
 
@@ -30,9 +30,11 @@
 
 Set up with `bun install`, `bun scripts/install-gdstyle.ts` and `uv sync --locked`. The second puts
 the pinned gdstyle in `tools` under gdharness's cache folder, beside the engine slots, where the
-GDScript gates look for it. The third puts the pinned yamllint and lizard in `.venv`. `uv run` takes
-that copy before any on `PATH`. `gdstyle.toml` holds the settings of the owner's game projects,
-where a change to them is made first. Its comments are written for this public repository.
+GDScript gates look for it. The third puts the pinned yamllint and lizard in `.venv`, which `uv run`
+takes before any on `PATH`.
+
+`gdstyle.toml` holds the settings of the owner's game projects, where a change to them is made
+first. Its comments are written for this public repository.
 
 ## Engines and fixtures
 
@@ -40,6 +42,12 @@ Build before running a suite, because the suites start servers from the bundle. 
 need `GODOT_PATH` and the gdUnit fixture `GDUNIT4_PATH`. Without them those cases skip and say so.
 The engine legs set `GDHARNESS_REQUIRE_GODOT=1`, which turns those skips into failures. Windowed
 regressions skip unless `GDHARNESS_ALLOW_WINDOWS` is set.
+
+The suites take four engine slots, and fewer where the machine has fewer processors.
+`GDHARNESS_TEST_ENGINES`, set to a whole number above 0 when a suite starts, caps that count. Unset
+or set to anything else, it sets no cap. The machine's `GODOT_ENGINE_SLOT_COUNT` does not cap the
+suites. A fixture that needs a set number of engines at once sets its own count, which the cap
+does not change.
 
 `bun scripts/install-godot.ts` and `bun scripts/install-gdunit4.ts` fetch the pinned versions into
 the same cache folder and print where they landed. CI keeps them in the runner's temporary folder.
@@ -85,14 +93,17 @@ the headless engine operations. Both are GDScript. `test/` holds the suites, wit
 
 ### CI and local runs
 
-- CI runs the suites, since the repository is public. Push and read every suite CI runs before
-  calling a change done: `test:ci`, `test:integration`, `test:metadata` and `test:packaging`,
-  fifteen files in all, plus the engine and editor legs. `build-and-test` leaves the regressions and
-  `test:integration` to the engine legs, which run them with Godot, unless the legs are skipped.
-- Locally, run the regressions and editor cases the change touches. A change that passes the
-  regressions can still fail `test/bridge.ts`, because the suites call the same code in different
-  ways.
-- Locally, run engines headless and leave the windowed cases to CI. Do not set
+- CI runs the suites, since the repository is public. Before calling a change done, push and read
+  every suite CI runs: `test:ci`, `test:integration`, `test:metadata` and `test:packaging`, fifteen
+  files in all, plus the engine and editor legs.
+- A pull request runs the engine legs on Linux and Windows only. macOS runs on the release pull
+  request and on `main` after a merge, so a macOS-only fault shows up there.
+- `build-and-test` leaves the regressions and `test:integration` to the engine legs, which run them
+  with Godot, unless the legs are skipped.
+- Locally, start an engine only to debug a failing test, or to show a new test fails with its fix
+  reverted. Every other engine-backed test runs in CI: push, then read the legs. Static gates and
+  tests that start no engine run locally.
+- Run engines headless and leave the windowed cases to CI. Do not set
   `GDHARNESS_ALLOW_WINDOWS` on a desktop someone is using.
 - Do not call `editor_run start` through a local probe editor, because a headless editor still opens
   a window for the game it plays. Measure played-game behaviour with the `withAPlayingEditor` fixture,
@@ -122,20 +133,31 @@ A release that changes nothing a game runs, such as a description alone, waits f
 
 ### Whose issues
 
-Issues from the owner, reports from the owner's downstream projects and your own findings are
+Issues from the owner, faults from the owner's downstream projects and your own findings are
 implemented directly. Read an issue filed by anyone else and reproduce it if that is cheap. Put the
 finding to the owner with a recommendation instead of a pull request. Tell them apart by the issue's
 author, not its content.
 
+### Which findings get fixed
+
+A fault is fixed when a user hit it: a game's report, a CI failure or a run that went wrong. A fault
+a check or probe found that no user hit is named in the check report and is not filed. It neither
+fails the check nor holds a release. Run no probe passes that look for faults no user met.
+
+### Feature requests
+
+A request for something new is built only when the caller is blocked without it and cannot do the
+job with what exists or in its own code. Otherwise answer with the way that works and build nothing.
+
 ### Versions
 
-**Every release is a patch.** A patch raises only the last number. Fixes, additions nothing has to
-adapt to, new arguments, new answer fields, new tools and new ops are all patches. This is the
-owner's standing rule.
+**Every release is a patch**, the owner's standing rule. A patch raises only the last number. That
+covers fixes, new arguments, new answer fields, new tools, new ops and any addition nothing has to
+adapt to.
 
 A wrong answer corrected is a patch even when the output changes shape. Never leave an answer wrong
-to protect a caller who parsed it. Never keep a tool lying because a fix would be breaking. The
-surface is worth less than the answers being right. `.github/CONTRIBUTING.md` states this
+to protect a caller who parsed it, or keep a tool lying because a fix would be breaking. Right
+answers matter more. `.github/CONTRIBUTING.md` states this
 publicly, so keep the two in step.
 
 ### Minor and major

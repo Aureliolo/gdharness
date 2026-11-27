@@ -43,6 +43,16 @@ func _run() -> void:
 		"": "PowerShell had not begun the client",
 		"began 1100\n":
 		"PowerShell began the client after 100 ms and was still loading UI Automation",
+		"began 1100\nassemblies 1400\n":
+		(
+			"PowerShell began the client after 100 ms and loaded UI Automation's assemblies in 300"
+			+ " ms, and was still setting up the description reader and the JSON serialiser"
+		),
+		"began 1100\nassemblies 1400\nloaded 1600\n":
+		(
+			"PowerShell began the client after 100 ms and loaded UI Automation in 500 ms, and the "
+			+ "first walk of the windows had not ended"
+		),
 		"began 1100\nloaded 1600\n":
 		(
 			"PowerShell began the client after 100 ms and loaded UI Automation in 500 ms, and the "
@@ -71,6 +81,15 @@ func _run() -> void:
 		var said: String = Accessibility._reached(progress, 1000, 2000)
 		if said != reached[progress]:
 			failures.append("marks %s are said as: %s" % [JSON.stringify(progress), said])
+	var stopped: String = Accessibility._stopped(45017, "PowerShell had not begun the client", 1)
+	if stopped != (
+		"UI Automation had not read the tree after 45017 ms, so it was stopped: PowerShell had not"
+		+ " begun the client. The game ran 1 frame in that time."
+	):
+		failures.append("a stopped client is said as: %s" % stopped)
+	var many: String = Accessibility._stopped(45017, "PowerShell had not begun the client", 1080)
+	if not many.ends_with("client. The game ran 1080 frames in that time."):
+		failures.append("frames are counted in the plural: %s" % many)
 	var took: Dictionary = Accessibility._took(
 		"began 1100\nloaded 1600\nwalked 3 1700\n", 1000, 2000
 	)

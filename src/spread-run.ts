@@ -22,7 +22,6 @@ import {
   heldRunSaid,
   inTurns,
   KEPT_RUN_DIRECTORIES,
-  memoryAvailable,
   plural,
   resPathOf,
   roomFor,
@@ -32,7 +31,7 @@ import {
   WINDOWS_EXCEPTION,
   watchedEngine,
 } from './engine-launch.js';
-import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
+import { EngineSlots, machineSlots } from './engine-slots.js';
 import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE } from './game-log.js';
 import { wholeFlag } from './launch.js';
@@ -266,14 +265,9 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
   mkdirSync(shareDirectory, { recursive: true });
   const chosen = machineSlots({ directory: options.slotsDirectory, count: options.slotCount });
   const slotCount = chosen.count;
-  const slots = new EngineSlots(
-    chosen.directory,
-    slotCount,
-    { pid: process.pid, started: await ownStart(), by: `gdharness spread of ${options.projectPath}` },
-    (line) => {
-      console.log(`[spread] ${line}`);
-    },
-  );
+  const slots = new EngineSlots(chosen.directory, slotCount, (line) => {
+    console.log(`[spread] ${line}`);
+  });
   const launch: EngineLaunch = {
     godotPath,
     projectPath: options.projectPath,
@@ -291,9 +285,9 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
   process.once('SIGINT', interrupted);
   process.once('SIGTERM', interrupted);
   try {
-    const workers = await workerCountFor(options, slotCount);
-    const engine = (name: string, share: string): Promise<EngineLeft> =>
-      enginePlayed(launch, slots, options, runDirectory, name, [
+    const workers = workerCountFor(options, slotCount);
+    const engine = (name: string, lane: number, share: string): Promise<EngineLeft> =>
+      enginePlayed(launch, slots, options, runDirectory, name, lane, [
         ...options.benchArguments,
         share,
         `${INTO}${shareDirectory}`,
@@ -310,9 +304,10 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
       left = await inTurns(
         Array.from({ length: workers }, (_, index) => index),
         workers,
-        async (index) => {
+        async (index, _at, lane) => {
           const worker = await engine(
             `worker-${String(index)}`,
+            lane,
             `${SHARE}${String(index)}/${String(workers)}`,
           );
           done += 1;
@@ -334,7 +329,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
     if (faults.length > 0) {
       return failed(faults, left, runDirectory, 'so nothing was gathered');
     }
-    const gather = await engine('gather', `${GATHER}${String(workers)}`);
+    const gather = await engine('gather', 0, `${GATHER}${String(workers)}`);
     console.log(readLog(gather.log).replace(CONTROL_SEQUENCE, '').trimEnd());
     const gatherFaults = engineFaults(gather, options.godotVersion);
     const gatheredFile = join(shareDirectory, 'gathered.arms');
@@ -368,14 +363,13 @@ function armsInFile(file: string): ArmPlayed[] | null {
 }
 
 /** The workers the run uses: the number asked for, or as many as the machine has room for. */
-async function workerCountFor(options: SpreadOptions, slotCount: number): Promise<number> {
+function workerCountFor(options: SpreadOptions, slotCount: number): number {
   if (options.workers !== null) {
     console.log(`${options.scene} over ${plural(options.workers, 'worker')}.`);
     return options.workers;
   }
-  const memory = await memoryAvailable();
   const processors = options.cores ?? availableParallelism();
-  const room = roomFor(slotCount, processors, memory.bytes, memory.said);
+  const room = roomFor(slotCount, processors);
   console.log(
     `${options.scene} over ${plural(room.engines, 'worker')}${room.held === undefined ? '' : `, since ${room.held}`}.`,
   );
@@ -389,6 +383,7 @@ async function enginePlayed(
   options: SpreadOptions,
   runDirectory: string,
   name: string,
+  lane: number,
   benchArguments: readonly string[],
 ): Promise<EngineLeft> {
   const directory = join(runDirectory, name);
@@ -407,7 +402,7 @@ async function enginePlayed(
   const lock = await slots.take();
   const began = Date.now();
   try {
-    const end = await watchedEngine(launch, lock, args, directory, log, options.silenceSeconds);
+    const end = await watchedEngine({ ...launch, lane }, lock, args, directory, log, options.silenceSeconds);
     return { name, log, end, seconds: (Date.now() - began) / 1000 };
   } finally {
     slots.release(lock);

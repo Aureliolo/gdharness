@@ -31,9 +31,11 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import fc from 'fast-check';
 import { extract } from '../scripts/install-godot.js';
+import { syncSharedGdscript } from '../scripts/sync-shared-gd.js';
 import { declaredClasses, declaredClassLines } from '../src/class-cache.js';
+import { GodotDAPClient } from '../src/dap_client.js';
 import { openTheEditor } from '../src/editor-open.js';
-import { EngineSlots, ownStart, takenOverUnderSteal } from '../src/engine-slots.js';
+import { EngineSlots } from '../src/engine-slots.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { type Frame, FrameReader, frame, MAX_MESSAGE_BYTES, OversizedStreamError } from '../src/framing.js';
 import { answersTo, GameLog, type LogEntry, type Severity } from '../src/game-log.js';
@@ -47,9 +49,11 @@ import {
 } from '../src/godot-variant.js';
 import { MalformedReportError, parseJUnit } from '../src/junit.js';
 import { listenForTheServer } from '../src/keeper-channel.js';
+import { GodotLSPClient, LSPTimeout, normalizeLSPError } from '../src/lsp_client.js';
+import { tryOsLock } from '../src/os-lock.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
+import { PendingRequests } from '../src/pending-requests.js';
 import { keepPipelineCache } from '../src/pipeline-cache.js';
-import { startTimesOf } from '../src/process-children.js';
 import { VERSION_MARKER } from '../src/project-walk.js';
 import { isRecord } from '../src/records.js';
 import { applyRewrites } from '../src/rename.js';
@@ -85,19 +89,11 @@ import {
   type CasesBySuite,
   type DeclaredSuite,
   dealt,
-  peakOf,
   type SuiteTimes,
   type Unit,
   unitsOf,
 } from '../src/suite-plan.js';
-import {
-  HandedSlot,
-  MemoryGate,
-  ordered,
-  type RunOrder,
-  rerunAfterStarving,
-  runShares,
-} from '../src/suite-run.js';
+import { HandedSlot, ordered, type RunOrder, runShares } from '../src/suite-run.js';
 import { inTurnFor, tryTake } from '../src/write-turns.js';
 import { greeting } from './support/greeting.js';
 import { bandWalk, PORT_BAND } from './support/server.js';
@@ -1095,14 +1091,10 @@ function junkIsNeverAReport(): void {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The waits of a run for a machine slot and for memory
+// The waits of a run for a machine slot
 // ---------------------------------------------------------------------------------------------
 
-const GIB = 1024 ** 3;
-const ENGINE_BYTES = 1.5 * GIB;
-const KEPT_BYTES = 4 * GIB;
 const IDLE_STEPS_BEFORE_HUNG = 100;
-const SETTLE_ROUNDS_BEFORE_STUCK = 1000;
 
 /** Slots handed on in the order they were asked for, taking and giving back with no folder behind. */
 class StandInSlots {
@@ -1149,10 +1141,6 @@ class StandInSlots {
     this.free += 1;
     this.waiting.shift()?.();
   }
-
-  markWaiting(): () => void {
-    return () => undefined;
-  }
 }
 
 interface RunSetup {
@@ -1160,14 +1148,7 @@ interface RunSetup {
   readonly outsideHolds: boolean;
   readonly lanes: number;
   readonly suites: number;
-  readonly freeGiB: number;
-  /** What each suite was seen to hold, in GiB, in suite order. */
-  readonly peaksGiB: readonly number[];
-  /** The lanes the run is raised by, one answer each, up to the ceiling of {@link RISE_CEILING}. */
-  readonly rises?: readonly number[];
 }
-
-const RISE_CEILING = 6;
 
 interface Ran {
   readonly index: number;
@@ -1178,22 +1159,14 @@ interface StartedRun {
   readonly slots: StandInSlots;
   readonly settled: () => boolean;
   readonly ran: () => Ran[] | undefined;
-  readonly judgeHung: () => void;
 }
 
-/** The engines memory has room for as a run begins, which is what a run held by memory starts with. */
-function enginesByMemory(freeGiB: number): number {
-  return Math.max(1, Math.floor((freeGiB * GIB - KEPT_BYTES) / ENGINE_BYTES));
-}
-
-/**
- * Suites of one 40 s case each, which `unitsOf` keeps whole, so each is a share of its own or a part
- * of one. Suite `at` was seen to hold `peaksGiB[at]`.
- */
-function suitesOf(
-  count: number,
-  peaksGiB: readonly number[],
-): { units: ReturnType<typeof unitsOf>; declared: CasesBySuite; times: SuiteTimes } {
+/** Suites of one 40 s case each, which `unitsOf` keeps whole, so each is a share of its own or a part of one. */
+function suitesOf(count: number): {
+  units: ReturnType<typeof unitsOf>;
+  declared: CasesBySuite;
+  times: SuiteTimes;
+} {
   const paths = Array.from({ length: count }, (_, at) => `res://suite_${String(at)}.gd`);
   const suites: DeclaredSuite[] = paths.map((path) => ({
     path,
@@ -1204,10 +1177,7 @@ function suitesOf(
     accessible: false,
   }));
   const times: SuiteTimes = Object.fromEntries(
-    paths.map((path, at) => [
-      path,
-      { seconds: 40, cases: { test_one: 40 }, peak: (peaksGiB[at] ?? 1.5) * GIB },
-    ]),
+    paths.map((path) => [path, { seconds: 40, cases: { test_one: 40 } }]),
   );
   return {
     units: unitsOf(suites, times),
@@ -1229,7 +1199,7 @@ function takeFreeSlots(slots: StandInSlots, count: number): string[] {
 }
 
 /** Starts the run the setup describes, with the scheduler deciding when each wait ends. */
-function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number; above?: boolean }): StartedRun {
+function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number }): StartedRun {
   const slots = new StandInSlots(setup.slotCount);
   if (setup.outsideHolds && setup.slotCount > 1) {
     slots.takeNow();
@@ -1237,74 +1207,27 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number; abo
       slots.release('outside');
     });
   }
-  // Each going engine tells what its share was seen to hold at a point the scheduler picks, and the
-  // memory read falls by what the engines have told.
-  const going = new Map<number, { readonly need: number; held: number }>();
-  let hung = false;
-  const told = (): number => [...going.values()].reduce((sum, one) => sum + one.held, 0);
-  const free = (): Promise<number> =>
-    hung ? Promise.reject(new Error('judged hung')) : Promise.resolve(setup.freeGiB * GIB - told());
-  const gate = new MemoryGate(slots, free, 1);
-  const taken = takeFreeSlots(slots, Math.min(setup.lanes, enginesByMemory(setup.freeGiB)));
-  const { units, declared, times } = suitesOf(setup.suites, setup.peaksGiB);
-  // The lanes the run was last raised to, which no more engines than may go at once.
-  let lanesNow = setup.lanes;
-  const rises = [...(setup.rises ?? [])];
-  const raised =
-    setup.rises === undefined
-      ? undefined
-      : {
-          ceiling: RISE_CEILING,
-          past: async (above: number, signal: AbortSignal): Promise<number> => {
-            const by = rises.shift();
-            if (by === undefined) {
-              await new Promise<void>((_, refused) => {
-                signal.addEventListener('abort', () => {
-                  refused(new Error('the asking was ended'));
-                });
-              });
-            }
-            await s.schedule(Promise.resolve(), 'a rise is answered');
-            signal.throwIfAborted();
-            lanesNow = Math.min(RISE_CEILING, above + (by ?? 1));
-            return lanesNow;
-          },
-        };
+  const going = new Set<number>();
+  const taken = takeFreeSlots(slots, setup.lanes);
+  const { units, declared } = suitesOf(setup.suites);
   const run = (
     plan: { readonly suites: ReadonlyArray<{ readonly path: string }> },
     index: number,
-    _lock: string,
-    holds?: (bytes: number) => void,
   ): Promise<Ran> => {
     const suites = plan.suites.map((suite) => suite.path);
-    const need = peakOf(suites, times, ENGINE_BYTES).bytes;
-    const owed = [...going.values()].reduce((sum, one) => sum + Math.max(0, one.need - one.held), 0);
-    if (going.size > 0) {
-      assert.ok(
-        setup.freeGiB * GIB - told() - KEPT_BYTES - owed >= need,
-        `engine ${String(index)} started needing ${String(need / GIB)} GiB without room`,
-      );
-    }
-    const engine = { need, held: 0 };
-    going.set(index, engine);
+    going.add(index);
     peak.engines = Math.max(peak.engines, going.size);
-    assert.ok(going.size <= lanesNow, `${String(going.size)} engines going on ${String(lanesNow)} lanes`);
-    if (going.size > setup.lanes) {
-      peak.above = true;
-    }
-    void s.schedule(Promise.resolve(), `engine ${String(index)} tells`).then(() => {
-      if (going.get(index) === engine) {
-        engine.held = need;
-        holds?.(need);
-      }
-    });
+    assert.ok(
+      going.size <= setup.lanes,
+      `${String(going.size)} engines going on ${String(setup.lanes)} lanes`,
+    );
     return s.schedule(Promise.resolve({ index, suites }), `engine ${String(index)} ends`).finally(() => {
       going.delete(index);
     });
   };
   let result: Ran[] | undefined;
   let settled = false;
-  void runShares(slots, units, declared, setup.lanes, taken, times, run, undefined, gate, raised)
+  void runShares(slots, units, declared, setup.lanes, taken, run)
     .then(
       (ran) => {
         result = ran;
@@ -1314,14 +1237,7 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number; abo
     .finally(() => {
       settled = true;
     });
-  return {
-    slots,
-    settled: () => settled,
-    ran: () => result,
-    judgeHung: () => {
-      hung = true;
-    },
-  };
+  return { slots, settled: () => settled, ran: () => result };
 }
 
 function advanceToNextTimer(): void {
@@ -1331,8 +1247,8 @@ function advanceToNextTimer(): void {
 }
 
 /**
- * Steps a run: the gate's next look, one await so the lanes the look woke run on, then the
- * scheduler's next task. Answers whether the run ended before 100 steps in a row had nothing to run.
+ * Steps a run: one await so the lanes a slot woke run on, then the scheduler's next task. Answers
+ * whether the run ended before 100 steps in a row had nothing to run.
  */
 async function stepUntilEnded(s: fc.Scheduler, started: StartedRun): Promise<boolean> {
   let idle = 0;
@@ -1349,19 +1265,7 @@ async function stepUntilEnded(s: fc.Scheduler, started: StartedRun): Promise<boo
   return started.settled();
 }
 
-/** Makes the gate's reading fail so a hung run ends, and moves the clock until it has. */
-async function endHungRun(started: StartedRun): Promise<void> {
-  started.judgeHung();
-  for (let rounds = 0; !started.settled(); rounds += 1) {
-    if (rounds >= SETTLE_ROUNDS_BEFORE_STUCK) {
-      throw new Error('a run judged hung never ended');
-    }
-    advanceToNextTimer();
-    await Promise.resolve();
-  }
-}
-
-async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
+async function noOrderOfSlotWaitsHangsARun(): Promise<void> {
   const peak = { engines: 0 };
   jest.useFakeTimers();
   try {
@@ -1372,15 +1276,9 @@ async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
         fc.boolean(),
         fc.integer({ min: 2, max: 3 }),
         fc.integer({ min: 2, max: 5 }),
-        fc.constantFrom(4.5, 5, 6.5, 8),
-        fc.array(fc.constantFrom(0.5, 1.5, 3), { minLength: 5, maxLength: 5 }),
-        async (s, slotCount, outsideHolds, lanes, suites, freeGiB, peaksGiB) => {
-          if (enginesByMemory(freeGiB) >= lanes) {
-            return;
-          }
-          const started = startRun(s, { slotCount, outsideHolds, lanes, suites, freeGiB, peaksGiB }, peak);
+        async (s, slotCount, outsideHolds, lanes, suites) => {
+          const started = startRun(s, { slotCount, outsideHolds, lanes, suites }, peak);
           if (!(await stepUntilEnded(s, started))) {
-            await endHungRun(started);
             throw new Error(
               `hung: ${String(suites)} suites over ${String(lanes)} lanes, ${String(slotCount)} slots`,
             );
@@ -1389,7 +1287,7 @@ async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
           const ran = started.ran() ?? [];
           assert.deepEqual(
             ran.flatMap((engine) => engine.suites).toSorted(),
-            suitesOf(suites, peaksGiB)
+            suitesOf(suites)
               .units.map((unit) => unit.suite)
               .toSorted(),
           );
@@ -1402,49 +1300,6 @@ async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
     jest.useRealTimers();
   }
   assert.ok(peak.engines >= 2, `at most ${String(peak.engines)} engine ran at once`);
-}
-
-async function noOrderOfRisesLosesASuite(): Promise<void> {
-  const peak: { engines: number; above?: boolean } = { engines: 0 };
-  jest.useFakeTimers();
-  try {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.scheduler(),
-        fc.integer({ min: 1, max: 3 }),
-        fc.integer({ min: 2, max: 3 }),
-        fc.integer({ min: 2, max: 6 }),
-        fc.constantFrom(5, 6.5, 8, 16),
-        fc.array(fc.constantFrom(0.5, 1.5, 3), { minLength: 6, maxLength: 6 }),
-        fc.array(fc.integer({ min: 1, max: 3 }), { maxLength: 3 }),
-        async (s, slotCount, lanes, suites, freeGiB, peaksGiB, rises) => {
-          const started = startRun(
-            s,
-            { slotCount, outsideHolds: false, lanes, suites, freeGiB, peaksGiB, rises },
-            peak,
-          );
-          if (!(await stepUntilEnded(s, started))) {
-            await endHungRun(started);
-            throw new Error(
-              `hung: ${String(suites)} suites over ${String(lanes)} lanes raised by ${rises.join(', ')}`,
-            );
-          }
-          await s.waitIdle();
-          assert.deepEqual(
-            (started.ran() ?? []).flatMap((engine) => engine.suites).toSorted(),
-            suitesOf(suites, peaksGiB)
-              .units.map((unit) => unit.suite)
-              .toSorted(),
-          );
-          assert.equal(started.slots.freeCount, slotCount);
-        },
-      ),
-      { numRuns: 150, seed: 42 },
-    );
-  } finally {
-    jest.useRealTimers();
-  }
-  assert.ok(peak.above === true, 'no run ever had more engines going than the lanes it began on');
 }
 
 /** A stand-in `hold` that takes the blocks named, records each ask and answers after [param turns] microtask turns. */
@@ -1728,7 +1583,9 @@ async function theLargerKeptCacheSurvivesConcurrentKeeps(): Promise<void> {
   const child = resolve(import.meta.dir, 'support', 'keep-cache.ts');
   await fc.assert(
     fc.asyncProperty(
-      fc.array(fc.integer({ min: 1, max: 80 }), { minLength: 2, maxLength: 4 }),
+      // At least two files each, so every keep is larger than the first and takes the lock: a keep
+      // with nothing to add never looks at it, and the dead keep's lock would rightly stay.
+      fc.array(fc.integer({ min: 2, max: 80 }), { minLength: 2, maxLength: 4 }),
       async (counts) => {
         const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-keep-'));
         try {
@@ -2533,118 +2390,38 @@ function suitesFollowTheOrder(order: RunOrder, suites: readonly string[], select
   }
 }
 
-interface FinishedEngine {
-  readonly index: number;
-  readonly peakBytes?: number;
-  readonly verdict: { readonly passed: boolean; readonly starved: boolean };
-  readonly again?: boolean;
-}
+type SlotOffer = { readonly kind: 'give'; readonly lock: string } | { readonly kind: 'ended' };
 
 /**
- * Failed engines run again only once one of them ran out of memory, one at a time, in the order they
- * ran. Engines that passed are never run again and stay where they were.
- */
-async function failedEnginesRunAgainOneAtATime(): Promise<void> {
-  const engine = fc.record({
-    passed: fc.boolean(),
-    starved: fc.boolean(),
-    delay: fc.nat({ max: 3 }),
-    againPasses: fc.boolean(),
-  });
-  await fc.assert(
-    fc.asyncProperty(fc.array(engine, { maxLength: 8 }), async (drawn) => {
-      const ran: FinishedEngine[] = drawn.map((one, index) => ({
-        index,
-        verdict: { passed: one.passed, starved: one.starved },
-      }));
-      let going = 0;
-      const calls: number[] = [];
-      const said: string[] = [];
-      const result = await rerunAfterStarving(
-        ran,
-        (line) => said.push(line),
-        async (engineRan) => {
-          going += 1;
-          assert.equal(going, 1, 'engines run again one at a time');
-          calls.push(engineRan.index);
-          const one = drawn[engineRan.index];
-          for (let tick = 0; tick < (one?.delay ?? 0); tick += 1) {
-            await Promise.resolve();
-          }
-          going -= 1;
-          return {
-            index: engineRan.index,
-            verdict: { passed: one?.againPasses === true, starved: false },
-            again: true,
-          };
-        },
-      );
-      const failed = ran.filter((one) => !one.verdict.passed).map((one) => one.index);
-      const rerun = ran.some((one) => one.verdict.starved) && failed.length > 0;
-      assert.deepEqual(calls, rerun ? failed : [], 'every failed engine runs again once, in index order');
-      assert.equal(said.length, rerun ? 1 : 0);
-      assert.equal(result.length, ran.length);
-      for (const [at, one] of ran.entries()) {
-        const now = result[at];
-        assert.equal(now?.index, one.index);
-        if (!rerun || one.verdict.passed) {
-          assert.equal(now, one, 'an engine that passed stays as it was');
-        }
-      }
-    }),
-    { numRuns: 200 },
-  );
-}
-
-type SlotOffer = { readonly kind: 'give' | 'lend'; readonly lock: string } | { readonly kind: 'ended' };
-
-/**
- * The compile check takes the first slot offered while it still wants one, from a lane giving back
- * or lending it. A later offer, and any offer after the check ended, is refused, and a lend settles
- * once the check has ended.
+ * The compile check takes the first slot offered while it still wants one. A later offer, and any
+ * offer after the check ended, is refused.
  */
 async function theCompileCheckTakesOnlyTheFirstSlotOffered(): Promise<void> {
   const offer: fc.Arbitrary<SlotOffer> = fc.oneof(
-    fc.record({ kind: fc.constantFrom('give', 'lend'), lock: fc.constantFrom('0.lock', '1.lock', '2.lock') }),
+    fc.record({ kind: fc.constant('give' as const), lock: fc.constantFrom('0.lock', '1.lock', '2.lock') }),
     fc.constant({ kind: 'ended' as const }),
   );
   await fc.assert(
-    fc.asyncProperty(fc.boolean(), fc.array(offer, { maxLength: 8 }), async (inALane, offers) => {
-      const handed = new HandedSlot(inALane);
+    fc.asyncProperty(fc.array(offer, { maxLength: 8 }), async (offers) => {
+      const handed = new HandedSlot();
       let first: string | undefined;
-      let firstKind: 'give' | 'lend' | undefined;
       let ended = false;
-      const lends: Promise<void>[] = [];
-      let settledLends = 0;
       for (const step of offers) {
         if (step.kind === 'ended') {
           handed.ended();
           ended = true;
           continue;
         }
-        const takes: boolean = !ended && first === undefined && (step.kind === 'give' || inALane);
-        if (step.kind === 'give') {
-          assert.equal(handed.give(step.lock), takes, 'only the first give while wanted is taken');
-        } else {
-          lends.push(
-            handed.lend(step.lock).then(() => {
-              settledLends += 1;
-            }),
-          );
-          await Promise.resolve();
-        }
+        const takes: boolean = !ended && first === undefined;
+        assert.equal(handed.give(step.lock), takes, 'only the first give while wanted is taken');
         if (takes) {
           first = step.lock;
-          firstKind = step.kind;
         }
       }
       if (first !== undefined) {
         assert.equal(await handed.lock, first, 'the lock is the first one offered');
       }
-      assert.equal(handed.lent, firstKind === 'lend', 'a lend is told it was taken');
       handed.ended();
-      await Promise.all(lends);
-      assert.equal(settledLends, lends.length, 'every lend settles once the check has ended');
     }),
     { numRuns: 200 },
   );
@@ -2656,45 +2433,33 @@ async function theCompileCheckTakesOnlyTheFirstSlotOffered(): Promise<void> {
 
 /**
  * The slot an engine's parent holds is lent to one engine of this process at a time, however many
- * takes begin together, and is lent again once given back. The look at the process tree is a stand-in
- * that takes as many turns as the draw says.
+ * takes begin together, and is lent again once given back.
  */
-async function anInheritedSlotServesOneTakeAtATime(): Promise<void> {
+function anInheritedSlotServesOneTakeAtATime(): void {
   const round = fc.record({
     takes: fc.integer({ min: 1, max: 4 }),
-    ticks: fc.array(fc.nat({ max: 4 }), { minLength: 4, maxLength: 4 }),
     giveBackInherited: fc.boolean(),
   });
-  await fc.assert(
-    fc.asyncProperty(fc.array(round, { minLength: 1, maxLength: 4 }), async (rounds) => {
+  fc.assert(
+    fc.property(fc.array(round, { minLength: 1, maxLength: 4 }), (rounds) => {
       const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-inherit-'));
+      const lentPath = join(root, 'lent.lock');
+      const lent = tryOsLock(lentPath);
+      assert.ok(lent, 'the slot to lend is taken');
+      const before = process.env['GODOT_ENGINE_HELD'];
+      process.env['GODOT_ENGINE_HELD'] = lentPath;
       try {
-        const slots = new EngineSlots(join(root, 'slots'), 8, {
-          pid: process.pid,
-          started: await ownStart(),
-        });
-        let turns: number[] = [];
-        Reflect.set(slots, 'inheritedLock', async (): Promise<string | null> => {
-          for (let tick = 0; tick < (turns.shift() ?? 0); tick += 1) {
-            await Promise.resolve();
-          }
-          return 'inherited.lock';
-        });
+        const slots = new EngineSlots(join(root, 'slots'), 8);
         let inheritedHeld = false;
         for (const [at, one] of rounds.entries()) {
-          turns = [...one.ticks];
-          const asked: Promise<string | null>[] = [];
-          for (let take = 0; take < one.takes; take += 1) {
-            asked.push(slots.takeFree());
-          }
-          const got = await Promise.all(asked);
-          const inherited = got.filter((lock) => lock === 'inherited.lock').length;
+          const got = Array.from({ length: one.takes }, () => slots.takeFree());
+          const inherited = got.filter((lock) => lock === lentPath).length;
           assert.equal(
             inherited,
             inheritedHeld ? 0 : 1,
             `round ${String(at)}: ${JSON.stringify(got.map((lock) => (lock === null ? null : basename(lock))))}`,
           );
-          const real = got.filter((lock): lock is string => lock !== null && lock !== 'inherited.lock');
+          const real = got.filter((lock): lock is string => lock !== null && lock !== lentPath);
           assert.equal(new Set(real).size, real.length, 'no two takes hold one slot');
           assert.equal(real.length, one.takes - inherited);
           inheritedHeld = true;
@@ -2702,12 +2467,18 @@ async function anInheritedSlotServesOneTakeAtATime(): Promise<void> {
             slots.release(lock);
           }
           if (one.giveBackInherited) {
-            slots.release('inherited.lock');
+            slots.release(lentPath);
             inheritedHeld = false;
           }
         }
         slots.releaseAll();
       } finally {
+        if (before === undefined) {
+          delete process.env['GODOT_ENGINE_HELD'];
+        } else {
+          process.env['GODOT_ENGINE_HELD'] = before;
+        }
+        lent.release();
         sweep(root);
       }
     }),
@@ -2715,69 +2486,56 @@ async function anInheritedSlotServesOneTakeAtATime(): Promise<void> {
   );
 }
 
-/** Leaves a steal file as another taker's, made just now or long ago. */
-function placeStealFile(steal: string, kind: 'none' | 'fresh' | 'old'): void {
-  if (kind === 'none') {
-    return;
-  }
-  writeFileSync(steal, '');
-  if (kind === 'old') {
-    const longAgo = new Date(Date.now() - 3_600_000);
-    utimesSync(steal, longAgo, longAgo);
-  }
-}
+type SlotStep =
+  | { readonly kind: 'take'; readonly taker: 0 | 1 }
+  | { readonly kind: 'release'; readonly taker: 0 | 1; readonly which: number };
 
-function madeAsOurs(path: string): boolean {
-  try {
-    writeFileSync(path, 'mine', { flag: 'wx' });
-    return true;
-  } catch {
-    return false;
+/** One step of the slot takers, checked against what the takers hold between them. */
+function applySlotStep(takers: readonly EngineSlots[], held: string[][], count: number, one: SlotStep): void {
+  const mine = held[one.taker] ?? [];
+  const taker = takers[one.taker];
+  assert.ok(taker);
+  if (one.kind === 'take') {
+    const total = held.flat().length;
+    const lock = taker.takeFree();
+    assert.equal(lock !== null, total < count, `${String(total)} of ${String(count)} held`);
+    if (lock !== null) {
+      assert.ok(!held.flat().includes(lock), 'no lock is held twice');
+      mine.push(lock);
+    }
+  } else if (mine.length > 0) {
+    const [lock] = mine.splice(one.which % mine.length, 1);
+    assert.ok(lock);
+    taker.release(lock);
   }
 }
 
 /**
- * A take-over reads the lock again under the steal file. A lock replaced by a live holder between
- * the first look and the steal file is left alone, a steal file another taker holds blocks it, and
- * the steal file this call made is always given back.
+ * Two takers of one directory never hold one lock between them, a take finds a slot exactly when
+ * fewer than the count are held, and a slot given back is taken again.
  */
-async function aTakeOverRereadsTheLockUnderTheStealFile(): Promise<void> {
-  const scene = fc.record({
-    replacedBeforeSteal: fc.boolean(),
-    stealBefore: fc.constantFrom('none', 'fresh', 'old'),
-    retake: fc.boolean(),
-  });
-  await fc.assert(
-    fc.asyncProperty(scene, async ({ replacedBeforeSteal, stealBefore, retake }) => {
-      const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-steal-'));
+function twoTakersNeverHoldOneSlot(): void {
+  const step: fc.Arbitrary<SlotStep> = fc.oneof(
+    fc.record({ kind: fc.constant('take' as const), taker: fc.constantFrom<0 | 1>(0, 1) }),
+    fc.record({
+      kind: fc.constant('release' as const),
+      taker: fc.constantFrom<0 | 1>(0, 1),
+      which: fc.nat({ max: 5 }),
+    }),
+  );
+  fc.assert(
+    fc.property(fc.integer({ min: 1, max: 4 }), fc.array(step, { maxLength: 30 }), (count, steps) => {
+      const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-takers-'));
       try {
-        const lock = join(root, 'held.lock');
-        const steal = `${lock}.steal`;
-        writeFileSync(lock, 'stale');
-        placeStealFile(steal, stealBefore);
-        let looks = 0;
-        const taken = await takenOverUnderSteal(
-          lock,
-          () => {
-            looks += 1;
-            const stale = readFileSync(lock, 'utf8') === 'stale';
-            if (looks === 1 && replacedBeforeSteal) {
-              // Another taker replaces the lock after this look judged it.
-              writeFileSync(lock, 'fresh');
-            }
-            return Promise.resolve(stale);
-          },
-          madeAsOurs,
-          retake,
-        );
-        const expected = stealBefore === 'none' && !replacedBeforeSteal;
-        assert.equal(taken, expected, JSON.stringify({ looks, stealBefore, replacedBeforeSteal }));
-        const left = existsSync(lock) ? readFileSync(lock, 'utf8') : null;
-        // A steal file another taker holds blocks this one. One left long ago is removed, and the
-        // take is left to the next look. A lock made fresh since the look stays.
-        const wanted = replacedBeforeSteal ? 'fresh' : stealBefore === 'none' && retake ? 'mine' : 'stale';
-        assert.equal(left, stealBefore === 'none' && !replacedBeforeSteal && !retake ? null : wanted);
-        assert.equal(existsSync(steal), stealBefore === 'fresh', `the ${stealBefore} steal file`);
+        const directory = join(root, 'slots');
+        const takers = [new EngineSlots(directory, count), new EngineSlots(directory, count)];
+        const held: string[][] = [[], []];
+        for (const one of steps) {
+          applySlotStep(takers, held, count, one);
+        }
+        for (const taker of takers) {
+          taker.releaseAll();
+        }
       } finally {
         sweep(root);
       }
@@ -2873,6 +2631,8 @@ async function fakeGame(mode: GameMode, pid: number): Promise<FakeGame> {
 
 const DEAD_PID = 2 ** 31 - 1;
 const SHORT_WAIT_MS = 80;
+/** A wait no answer is expected to outlast, for a request the game or the refused port settles itself. */
+const SETTLED_WAIT_MS = 10_000;
 
 type Ended = 'answers' | 'closes' | 'errors';
 
@@ -2897,14 +2657,14 @@ async function everyEndOfARequestIsSaid(): Promise<void> {
   await fc.assert(
     fc.asyncProperty(scene, async (drawn) => {
       if (drawn.kind === 'closedPort') {
-        await aClosedPortIsSaid(drawn.alive);
+        await aClosedPortIsSaid(drawn.alive, 0);
         return;
       }
       const mode = drawn.kind === 'mode' ? drawn.mode : 'silent';
       const game = await fakeGame(mode, process.pid);
       try {
         if (drawn.kind === 'mode') {
-          await modeIsSaid(game, drawn.mode);
+          await modeIsSaid(game, drawn.mode, 0);
         } else {
           await lateAnswerIsKept(game, drawn.how, drawn.end);
         }
@@ -2916,13 +2676,64 @@ async function everyEndOfARequestIsSaid(): Promise<void> {
   );
 }
 
-/** A port nobody listens on is a game that has ended once its process is gone, and is dialled for the wait while it lives. */
-async function aClosedPortIsSaid(processLives: boolean): Promise<void> {
+/** Every way a game can end a request is run on every run, whatever the draw above picks. */
+async function everyModeIsSaidOnEveryRun(): Promise<void> {
+  for (const mode of ['answers', 'errors', 'wrongProtocol', 'closes', 'resets', 'silent'] as const) {
+    const game = await fakeGame(mode, process.pid);
+    try {
+      await modeIsSaid(game, mode, 0);
+    } finally {
+      await game.close();
+    }
+  }
+  await aClosedPortIsSaid(false, 0);
+  await aClosedPortIsSaid(true, 0);
+}
+
+/** A process that is held still for longer than a wait still gets the reply its game or its refused port gives. */
+async function aStalledProcessGetsTheSameReplies(): Promise<void> {
+  const stall = 3 * SHORT_WAIT_MS;
+  await aClosedPortIsSaid(false, stall);
+  await aClosedPortIsSaid(true, stall);
+  for (const mode of ['answers', 'errors', 'wrongProtocol', 'closes', 'resets'] as const) {
+    const game = await fakeGame(mode, process.pid);
+    try {
+      await modeIsSaid(game, mode, stall);
+    } finally {
+      await game.close();
+    }
+  }
+}
+
+/**
+ * A port nobody listens on is a game that has ended once its process is gone, told at the first
+ * refusal, and is dialled for the wait while it lives. The clocks are fake and move only by hand, so
+ * neither the wait nor a redial can run before the refusal however slowly this process is scheduled.
+ */
+async function aClosedPortIsSaid(processLives: boolean, stallMs: number): Promise<void> {
   const game = await fakeGame('silent', processLives ? process.pid : DEAD_PID);
   await game.close();
-  const began = Date.now();
-  const reply = await runtimeRequest(game.endpoint, 'ping', {}, SHORT_WAIT_MS);
-  if (reply.ok) {
+  const got: { reply?: RuntimeReplyOf } = {};
+  jest.useFakeTimers();
+  try {
+    const asked = runtimeRequest(game.endpoint, 'ping', {}, SHORT_WAIT_MS).then((reply) => {
+      got.reply = reply;
+    });
+    stallTheLoop(stallMs);
+    // The wait's own timer is the one pending until a refusal has been dialled again.
+    await realTick(() => got.reply !== undefined || jest.getTimerCount() > 1);
+    if (processLives) {
+      assert.equal(got.reply, undefined, 'a live process is dialled again rather than told as ended');
+      jest.advanceTimersByTime(SHORT_WAIT_MS);
+    } else {
+      assert.ok(got.reply !== undefined, 'a gone process is told at its first refusal, not dialled again');
+    }
+    await asked;
+  } finally {
+    jest.useRealTimers();
+  }
+  const reply = got.reply;
+  if (reply === undefined || reply.ok) {
     assert.fail('a port nobody listens on answered');
   }
   assert.equal(reply.reason, 'refused');
@@ -2930,12 +2741,44 @@ async function aClosedPortIsSaid(processLives: boolean): Promise<void> {
     reply.message,
     processLives ? /is running but nothing answered on its port: it refused/ : /has ended: its port refused/,
   );
-  const took = Date.now() - began;
-  assert.ok(processLives ? took >= SHORT_WAIT_MS - 20 : took < SHORT_WAIT_MS, `${String(took)}ms`);
 }
 
-async function modeIsSaid(game: FakeGame, mode: GameMode): Promise<void> {
-  const reply = await runtimeRequest(game.endpoint, 'ping', {}, SHORT_WAIT_MS);
+/** Holds this process still for [param ms], as a loaded machine does between a request and the game's reply. */
+function stallTheLoop(ms: number): void {
+  if (ms > 0) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  }
+}
+
+/**
+ * A request whose wait runs out on a game that holds it. The timer is advanced by hand once the
+ * game has read the request, so the wait cannot end before the connect however loaded the machine is.
+ */
+async function askUntilTheWaitRuns(
+  game: FakeGame,
+  command: string,
+  afterTheWait?: 'keep' | ((late: RuntimeReplyOf) => void),
+): Promise<RuntimeReplyOf> {
+  jest.useFakeTimers();
+  try {
+    const asked = runtimeRequest(game.endpoint, command, {}, SHORT_WAIT_MS, afterTheWait);
+    await realTick(() => game.held.length > 0);
+    jest.advanceTimersByTime(SHORT_WAIT_MS);
+    return await asked;
+  } finally {
+    jest.useRealTimers();
+  }
+}
+
+async function modeIsSaid(game: FakeGame, mode: GameMode, stallMs: number): Promise<void> {
+  let reply: RuntimeReplyOf;
+  if (mode === 'silent') {
+    reply = await askUntilTheWaitRuns(game, 'ping');
+  } else {
+    const asked = runtimeRequest(game.endpoint, 'ping', {}, SETTLED_WAIT_MS);
+    stallTheLoop(stallMs);
+    reply = await asked;
+  }
   if (mode === 'answers') {
     if (!reply.ok) {
       assert.fail(`another id is skipped and the reply to this one is taken: ${reply.message}`);
@@ -2962,11 +2805,9 @@ async function modeIsSaid(game: FakeGame, mode: GameMode): Promise<void> {
 /** A request whose wait ran out is answered at once, and what the game does next is kept or handed over. */
 async function lateAnswerIsKept(game: FakeGame, how: 'keep' | 'function', end: Ended): Promise<void> {
   const handed: RuntimeReplyOf[] = [];
-  const reply = await runtimeRequest(
-    game.endpoint,
+  const reply = await askUntilTheWaitRuns(
+    game,
     'slow',
-    {},
-    SHORT_WAIT_MS,
     how === 'keep' ? 'keep' : (late) => handed.push(late),
   );
   if (reply.ok) {
@@ -3391,59 +3232,6 @@ async function aLateWaitEndsAfterHalfAnHour(): Promise<void> {
   );
 }
 
-/**
- * A process's start is read once for ten seconds. A look inside that window uses the reading, and
- * the first look at or past it reads again.
- */
-async function aProcessStartIsReadAgainOnlyAfterTenSeconds(): Promise<void> {
-  const child = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
-  const pid = child.pid;
-  assert.ok(typeof pid === 'number', 'the fixture needs a live process');
-  const began = (await startTimesOf([pid])).get(pid);
-  assert.ok(began !== undefined, 'and its start');
-  const root = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-start-'));
-  try {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.array(fc.constantFrom(0, 1, 9999, 10_000, 10_001, 25_000), { minLength: 1, maxLength: 8 }),
-        async (gaps) => {
-          const slots = new EngineSlots(root, 2, { pid: process.pid, started: began });
-          const file = join(root, 'spare.json');
-          const real = Date.now();
-          jest.useFakeTimers();
-          try {
-            let now = real;
-            let readAt: number | undefined;
-            for (const gap of gaps) {
-              now += gap;
-              jest.setSystemTime(now);
-              writeFileSync(file, JSON.stringify({ spare: 1, pid, started: began, written: now }));
-              assert.equal(await slots.countIn(file, 'spare'), 1, 'the file is read as live');
-              if (readAt === undefined || now - readAt >= 10_000) {
-                readAt = now;
-              }
-              const starts: unknown = Reflect.get(slots, 'starts');
-              assert.ok(starts instanceof Map, 'the readings are kept');
-              const reading: unknown = starts.get(pid);
-              assert.equal(
-                isRecord(reading) ? reading['readAt'] : undefined,
-                readAt,
-                `looks ${JSON.stringify(gaps)}`,
-              );
-            }
-          } finally {
-            jest.useRealTimers();
-          }
-        },
-      ),
-      { numRuns: 25 },
-    );
-  } finally {
-    child.kill();
-    sweep(root);
-  }
-}
-
 let strangerRuns = 0;
 
 interface JudgedFile {
@@ -3635,6 +3423,7 @@ interface BridgeStep {
     | 'tick'
     | 'drop'
     | 'quiet'
+    | 'fault'
     | 'staleClose'
     | 'idle';
   key: number;
@@ -3659,6 +3448,7 @@ const bridgeStep: fc.Arbitrary<BridgeStep> = fc.record({
     'drop' as const,
     'quiet' as const,
     'quiet' as const,
+    'fault' as const,
     'staleClose' as const,
     'staleClose' as const,
     'idle' as const,
@@ -3679,9 +3469,11 @@ function bridgeOutcome(error: unknown): string {
   const said = error instanceof Error ? error.message : String(error);
   const known: Record<string, string> = {
     'Godot is not connected': 'not-connected',
-    'Godot disconnected during request': 'dropped',
     'GodotBridge stopped': 'stopped',
   };
+  if (said.startsWith('Godot disconnected during request')) {
+    return 'dropped';
+  }
   if (said.startsWith('The editor answered')) {
     return 'unreadable';
   }
@@ -3821,11 +3613,25 @@ function connectBridgeSocket(model: BridgeModel): void {
 }
 
 function dropBridgeSocket(model: BridgeModel): void {
+  endBridgeSocket(model, (sock) => {
+    sock.terminate();
+  });
+}
+
+/** The socket errors as it closes, which ws does when the peer resets it. */
+function faultBridgeSocket(model: BridgeModel): void {
+  endBridgeSocket(model, (sock) => {
+    sock.readyState = 2;
+    sock.emit('error', new Error('read ECONNRESET'));
+  });
+}
+
+function endBridgeSocket(model: BridgeModel, end: (sock: StandInEditor) => void): void {
   const sock = model.holds;
   if (sock === null) {
     return;
   }
-  sock.terminate();
+  end(sock);
   // A call held when an editor that wrote its idle record goes was turned away, not run.
   const outcome = model.greeted && model.idle ? 'closing' : 'dropped';
   for (const call of model.calls) {
@@ -3890,6 +3696,7 @@ const BRIDGE_STEPS: Record<BridgeStep['kind'], (model: BridgeModel, step: Bridge
   tick: tickBridge,
   drop: dropBridgeSocket,
   quiet: goQuiet,
+  fault: faultBridgeSocket,
   staleClose: closeAReplacedSocket,
   idle: writeIdleRecord,
 };
@@ -3903,9 +3710,13 @@ async function checkBridgeModel(model: BridgeModel): Promise<void> {
     assert.equal(wire.has(call.tag), call.wasSent, `request ${String(call.tag)} is sent exactly when served`);
     assert.equal(call.got, call.state === 'settled' ? call.expected : null, `request ${String(call.tag)}`);
   }
-  const pending: unknown = Reflect.get(model.bridge, 'pendingRequests');
-  assert.ok(pending instanceof Map);
-  assert.equal(pending.size, model.calls.filter((call) => call.state === 'sent').length, 'pending requests');
+  const pending: unknown = Reflect.get(model.bridge, 'pending');
+  assert.ok(pending instanceof PendingRequests);
+  assert.equal(
+    pending.waiting().length,
+    model.calls.filter((call) => call.state === 'sent').length,
+    'pending requests',
+  );
   assert.equal(model.bridge.isConnected(), bridgeConnected(model));
 }
 
@@ -3955,6 +3766,473 @@ async function everyBridgeRequestSettlesOnceWithItsOwnAnswer(): Promise<void> {
     );
   } finally {
     jest.useRealTimers();
+    quiet.mockRestore();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The language server and debug adapter clients
+// ---------------------------------------------------------------------------------------------
+
+type FramedKind = 'lsp' | 'dap';
+
+/** A request is long enough to outlast a run, so only an end the model draws settles it. */
+const FRAMED_WAIT_MS = 60_000;
+/** A request the peer is never going to answer. */
+const FRAMED_SHORT_WAIT_MS = 60;
+
+interface FramedStep {
+  kind:
+    | 'request'
+    | 'answer'
+    | 'late'
+    | 'stray'
+    | 'serverRequest'
+    | 'unanswered'
+    | 'close'
+    | 'reset'
+    | 'oversized'
+    | 'clientClose'
+    | 'answerAsLetGo'
+    | 'stopAsLetGo'
+    | 'dialLetGo';
+  at: number;
+  how: 'ok' | 'fail';
+}
+
+const framedStep: fc.Arbitrary<FramedStep> = fc.record({
+  kind: fc.constantFrom(
+    'request' as const,
+    'request' as const,
+    'request' as const,
+    'answer' as const,
+    'answer' as const,
+    'late' as const,
+    'stray' as const,
+    'serverRequest' as const,
+    'unanswered' as const,
+    'close' as const,
+    'reset' as const,
+    'oversized' as const,
+    'clientClose' as const,
+    'answerAsLetGo' as const,
+    'stopAsLetGo' as const,
+    'dialLetGo' as const,
+  ),
+  at: fc.nat(),
+  how: fc.constantFrom('ok' as const, 'fail' as const),
+});
+
+/** A listener that records which connection each request came in on and says nothing unasked. */
+interface FramedPeer {
+  readonly port: number;
+  readonly connections: Socket[];
+  /** Where each request, by the name it was sent under, came in and under which number. */
+  readonly seen: Map<string, { readonly connection: number; readonly id: number }>;
+  stop(): Promise<void>;
+}
+
+/** The name and number a frame asks under, or null for one that asks nothing. */
+function requestIn(heard: Frame): { name: string; id: number } | null {
+  if (heard.kind !== 'message' || !isRecord(heard.value)) {
+    return null;
+  }
+  const name = heard.value['method'] ?? heard.value['command'];
+  const id = heard.value['id'] ?? heard.value['seq'];
+  return typeof name === 'string' && typeof id === 'number' ? { name, id } : null;
+}
+
+async function framedPeer(): Promise<FramedPeer> {
+  const connections: Socket[] = [];
+  const seen = new Map<string, { readonly connection: number; readonly id: number }>();
+  const server = createServer((socket) => {
+    const connection = connections.length;
+    connections.push(socket);
+    const reader = new FrameReader();
+    socket.on('error', () => undefined);
+    socket.on('data', (chunk: Buffer) => {
+      for (const heard of reader.push(chunk)) {
+        const asked = requestIn(heard);
+        if (asked !== null) {
+          seen.set(asked.name, { connection, id: asked.id });
+        }
+      }
+    });
+  });
+  await new Promise<void>((listening) => server.listen(0, '127.0.0.1', listening));
+  const address = server.address();
+  return {
+    port: typeof address === 'object' && address !== null ? address.port : 0,
+    connections,
+    seen,
+    stop: () =>
+      new Promise<void>((stopped) => {
+        for (const socket of connections) {
+          socket.destroy();
+        }
+        server.close(() => {
+          stopped();
+        });
+      }),
+  };
+}
+
+/** What a client of either protocol is asked, through the one call both build their requests with. */
+interface FramedClient {
+  ask(name: string, waitMs: number): Promise<unknown>;
+  close(): Promise<void>;
+  /** The socket the client holds, or null. */
+  held(): unknown;
+  /** Whether the client takes the game to be stopped, which only a debug adapter can. */
+  knowsAStop(): boolean;
+  /** How many requests the held connection's table is waiting on. */
+  waiting(): number;
+}
+
+function framedClient(kind: FramedKind, port: number): FramedClient {
+  const client =
+    kind === 'lsp' ? new GodotLSPClient(port, '127.0.0.1') : new GodotDAPClient(port, '127.0.0.1');
+  const send: unknown = Reflect.get(client, 'sendRequest');
+  assert.ok(typeof send === 'function', 'both clients build a request in sendRequest');
+  return {
+    ask: async (name, waitMs) => (await Reflect.apply(send, client, [name, {}, waitMs])) as unknown,
+    close: () => (client instanceof GodotLSPClient ? client.disconnect() : client.abandon()),
+    held: () => Reflect.get(client, 'socket') as unknown,
+    knowsAStop: () => client instanceof GodotDAPClient && client.whereItStopped() !== null,
+    waiting: () => {
+      const table: unknown = Reflect.get(client, 'requests');
+      assert.ok(table instanceof PendingRequests);
+      return table.waiting().length;
+    },
+  };
+}
+
+interface FramedRequest {
+  readonly tag: number;
+  readonly name: string;
+  connection: number;
+  id: number;
+  state: 'waiting' | 'settled';
+  expected: string;
+  got: string | null;
+}
+
+interface FramedModel {
+  readonly kind: FramedKind;
+  readonly peer: FramedPeer;
+  readonly client: FramedClient;
+  readonly requests: FramedRequest[];
+}
+
+/**
+ * The way a request of either client ended, in the words the model draws its ends in. A language
+ * server's end is read as its tools word it, so an end that names no next step is not a close.
+ */
+function framedOutcome(kind: FramedKind, error: unknown): string {
+  const said = error instanceof Error ? error.message : String(error);
+  if (error instanceof LSPTimeout || said.startsWith('DAP request timed out')) {
+    return 'timeout';
+  }
+  if (kind === 'lsp') {
+    const told = normalizeLSPError(error, 0);
+    if (told.startsWith('Godot LSP is unavailable on port')) {
+      return 'closed';
+    }
+  }
+  const name = kind === 'lsp' ? 'LSP' : 'DAP';
+  if (said === 'DAP connection closed') {
+    return 'closed';
+  }
+  if (said === 'The DAP connection was let go before it opened') {
+    return 'unopened';
+  }
+  if (said.startsWith(`Godot ${name} connection error: `) || said.startsWith('DAP connection error: ')) {
+    return 'reset';
+  }
+  if (said.startsWith(`Godot ${name} stream exceeded`)) {
+    return 'oversized';
+  }
+  const failed = /no (\d+)$/.exec(said);
+  return failed?.[1] === undefined ? `other: ${said}` : `fail:${failed[1]}`;
+}
+
+/** What the peer writes to answer request [param id], or a number nothing asked with. */
+function framedAnswer(kind: FramedKind, request: { name: string; id: number }, how: 'ok' | 'fail'): Buffer {
+  const tag = Number(request.name.slice(1));
+  if (kind === 'lsp') {
+    return frame(
+      how === 'ok'
+        ? { jsonrpc: '2.0', id: request.id, result: { tag } }
+        : { jsonrpc: '2.0', id: request.id, error: { code: -32601, message: `no ${String(tag)}` } },
+    );
+  }
+  return frame({
+    seq: 1,
+    type: 'response',
+    request_seq: request.id,
+    command: request.name,
+    success: how === 'ok',
+    ...(how === 'ok' ? { body: { tag } } : { message: `no ${String(tag)}` }),
+  });
+}
+
+function settleFramed(request: FramedRequest, outcome: string): void {
+  request.state = 'settled';
+  request.expected = outcome;
+}
+
+/** Sends request [param name] and returns once the peer has it, so the connection it went out on is known. */
+async function askFramed(model: FramedModel, waitMs: number): Promise<FramedRequest> {
+  const request = sendFramed(model, waitMs);
+  await arrivedFramed(model, request);
+  return request;
+}
+
+/** Sends a request and returns at once, before the client has dialled. */
+function sendFramed(model: FramedModel, waitMs: number): FramedRequest {
+  const tag = model.requests.length;
+  const request: FramedRequest = {
+    tag,
+    name: `m${String(tag)}`,
+    connection: -1,
+    id: -1,
+    state: 'waiting',
+    expected: '',
+    got: null,
+  };
+  model.requests.push(request);
+  model.client.ask(request.name, waitMs).then(
+    (value) => {
+      assert.equal(request.got, null, 'a request settles once');
+      request.got = `ok:${JSON.stringify(value)}`;
+    },
+    (error: unknown) => {
+      assert.equal(request.got, null, 'a request settles once');
+      request.got = framedOutcome(model.kind, error);
+    },
+  );
+  return request;
+}
+
+/** Waits for the peer to have [param request], and notes the connection it went out on. */
+async function arrivedFramed(model: FramedModel, request: FramedRequest): Promise<void> {
+  await eventually(() => model.peer.seen.has(request.name));
+  const arrived = model.peer.seen.get(request.name);
+  assert.ok(arrived !== undefined);
+  request.connection = arrived.connection;
+  request.id = arrived.id;
+}
+
+function framedWaiting(model: FramedModel): FramedRequest[] {
+  return model.requests.filter((request) => request.state === 'waiting');
+}
+
+/** The connection the client holds: the newest one the peer still has open, or undefined with none. */
+function framedHeldBy(model: FramedModel): { socket: Socket; number: number } | undefined {
+  const number = model.peer.connections.length - 1;
+  const socket = model.peer.connections[number];
+  return socket === undefined || socket.destroyed ? undefined : { socket, number };
+}
+
+function framedAnswers(model: FramedModel, step: FramedStep): Promise<void> {
+  const waiting = framedWaiting(model);
+  const request = waiting[step.at % Math.max(waiting.length, 1)];
+  if (request !== undefined) {
+    answerFramed(model, request, step.how);
+  }
+  return Promise.resolve();
+}
+
+/** The peer answers [param request] on the connection it came in on. */
+function answerFramed(model: FramedModel, request: FramedRequest, how: 'ok' | 'fail'): void {
+  model.peer.connections[request.connection]?.write(framedAnswer(model.kind, request, how));
+  settleFramed(
+    request,
+    how === 'ok' ? `ok:${JSON.stringify({ tag: request.tag })}` : `fail:${String(request.tag)}`,
+  );
+}
+
+function framedAnswersAgain(model: FramedModel, step: FramedStep): Promise<void> {
+  const answered = model.requests.filter(
+    (request) =>
+      request.state === 'settled' && model.peer.connections[request.connection]?.destroyed === false,
+  );
+  const request = answered[step.at % Math.max(answered.length, 1)];
+  if (request !== undefined) {
+    model.peer.connections[request.connection]?.write(framedAnswer(model.kind, request, step.how));
+  }
+  return Promise.resolve();
+}
+
+function framedAnswersNothingAsked(model: FramedModel, step: FramedStep): Promise<void> {
+  framedHeldBy(model)?.socket.write(framedAnswer(model.kind, { name: 'm-1', id: 900_000 + step.at }, 'ok'));
+  return Promise.resolve();
+}
+
+/** The language server's own request, which carries a number of its own count: one a waiting request may share. */
+function framedServerAsks(model: FramedModel, step: FramedStep): Promise<void> {
+  const waiting = framedWaiting(model);
+  const request = waiting[step.at % Math.max(waiting.length, 1)];
+  if (request === undefined || model.kind !== 'lsp') {
+    return Promise.resolve();
+  }
+  model.peer.connections[request.connection]?.write(
+    frame({ jsonrpc: '2.0', id: request.id, method: 'workspace/applyEdit', params: {} }),
+  );
+  return Promise.resolve();
+}
+
+async function framedAsksOnce(model: FramedModel): Promise<void> {
+  await askFramed(model, FRAMED_WAIT_MS);
+}
+
+async function framedWaitsOut(model: FramedModel): Promise<void> {
+  settleFramed(await askFramed(model, FRAMED_SHORT_WAIT_MS), 'timeout');
+}
+
+/** Ends the connection the client holds from the peer's side, which every request on it is told of. */
+function framedPeerEnds(end: 'closed' | 'reset' | 'oversized'): (model: FramedModel) => Promise<void> {
+  return async (model) => {
+    const held = framedHeldBy(model);
+    if (held === undefined) {
+      return;
+    }
+    for (const request of framedWaiting(model)) {
+      if (request.connection === held.number) {
+        settleFramed(request, end);
+      }
+    }
+    if (end === 'closed') {
+      held.socket.destroy();
+    } else if (end === 'reset') {
+      held.socket.resetAndDestroy();
+    } else {
+      held.socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'));
+    }
+    await eventually(() => model.client.held() === null);
+  };
+}
+
+/**
+ * The client lets go of its connection and a request is made beside it. The peer closes its half
+ * when the client ends, so a request still waiting reads as a close.
+ */
+async function framedClientCloses(model: FramedModel): Promise<void> {
+  const closing = model.client.close();
+  for (const request of framedWaiting(model)) {
+    settleFramed(request, 'closed');
+  }
+  await askFramed(model, FRAMED_WAIT_MS);
+  await closing;
+}
+
+/**
+ * The client lets go of its connection, and the peer answers a request on it before it reads the
+ * end, as a busy Godot does. That answer still reaches its request.
+ */
+async function framedAnswerAsLetGo(model: FramedModel, step: FramedStep): Promise<void> {
+  const held = framedHeldBy(model);
+  const onHeld = framedWaiting(model).filter((request) => request.connection === held?.number);
+  const request = onHeld[step.at % Math.max(onHeld.length, 1)];
+  if (request === undefined || model.client.held() === null) {
+    return;
+  }
+  const closing = model.client.close();
+  answerFramed(model, request, step.how);
+  for (const other of framedWaiting(model)) {
+    settleFramed(other, 'closed');
+  }
+  await closing;
+}
+
+/**
+ * The held debug adapter connection says the game stopped as the client lets go of it. The client
+ * reads it during the close, and the connection it dials next was never told of that stop.
+ */
+async function framedStopAsLetGo(model: FramedModel): Promise<void> {
+  const held = framedHeldBy(model);
+  if (model.kind === 'dap' && held !== undefined && model.client.held() !== null) {
+    held.socket.write(
+      frame({ seq: 1, type: 'event', event: 'stopped', body: { reason: 'breakpoint', threadId: 1 } }),
+    );
+  }
+  await framedClientCloses(model);
+  assert.equal(model.client.knowsAStop(), false, 'a stop the let-go connection said is not kept');
+}
+
+/** The client lets go while it dials, and the next request opens a connection of its own. */
+async function framedDialLetGo(model: FramedModel): Promise<void> {
+  if (model.client.held() !== null) {
+    return;
+  }
+  const dialling = sendFramed(model, FRAMED_WAIT_MS);
+  await model.client.close();
+  if (model.kind === 'dap') {
+    settleFramed(dialling, 'unopened');
+  } else {
+    // A language server client has no socket until it connects, so there is nothing to let go of.
+    await arrivedFramed(model, dialling);
+  }
+  await askFramed(model, FRAMED_WAIT_MS);
+}
+
+const FRAMED_STEPS: Record<FramedStep['kind'], (model: FramedModel, step: FramedStep) => Promise<void>> = {
+  request: framedAsksOnce,
+  answer: framedAnswers,
+  late: framedAnswersAgain,
+  stray: framedAnswersNothingAsked,
+  serverRequest: framedServerAsks,
+  unanswered: framedWaitsOut,
+  close: framedPeerEnds('closed'),
+  reset: framedPeerEnds('reset'),
+  oversized: framedPeerEnds('oversized'),
+  clientClose: framedClientCloses,
+  answerAsLetGo: framedAnswerAsLetGo,
+  stopAsLetGo: framedStopAsLetGo,
+  dialLetGo: framedDialLetGo,
+};
+
+/** Waits for every request the model has settled to have settled, then holds each to its own end. */
+async function checkFramedModel(model: FramedModel): Promise<void> {
+  await eventually(() =>
+    model.requests.every((request) => request.state === 'waiting' || request.got !== null),
+  );
+  for (const request of model.requests) {
+    assert.equal(
+      request.got,
+      request.state === 'settled' ? request.expected : null,
+      `request ${String(request.tag)}`,
+    );
+  }
+  assert.equal(model.client.waiting(), framedWaiting(model).length, 'requests the client waits on');
+}
+
+async function everyFramedRequestSettlesOnceWithItsOwnAnswer(kind: FramedKind): Promise<void> {
+  const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  try {
+    await fc.assert(
+      fc.asyncProperty(fc.array(framedStep, { maxLength: 15 }), async (steps) => {
+        const peer = await framedPeer();
+        const model: FramedModel = { kind, peer, client: framedClient(kind, peer.port), requests: [] };
+        try {
+          for (const step of steps) {
+            await FRAMED_STEPS[step.kind](model, step);
+            await checkFramedModel(model);
+          }
+          await model.client.close();
+          for (const request of framedWaiting(model)) {
+            settleFramed(request, 'closed');
+          }
+          await checkFramedModel(model);
+          assert.equal(model.client.waiting(), 0, 'nothing waits once the client is closed');
+        } finally {
+          await model.client.close();
+          await peer.stop();
+        }
+      }),
+      { numRuns: 25 },
+    );
+  } finally {
     quiet.mockRestore();
   }
 }
@@ -4391,7 +4669,8 @@ const classStep: fc.Arbitrary<ClassStep> = fc.record({
       of: fc.integer({ min: 0, max: 3 }),
     }),
   ),
-  folder: fc.constantFrom('', 'a/', 'b/c/'),
+  // Folders a code point sort orders otherwise than the editor: letter case, a leading `_`, digits.
+  folder: fc.constantFrom('', 'a/', 'b/c/', 'C/', '_d/', 'd9/', 'd10/'),
 });
 
 function classPathOf(scripts: readonly ClassScript[], slot: number): string {
@@ -4480,18 +4759,42 @@ function writeClassScripts(root: string, scripts: readonly ClassScript[]): void 
   }
 }
 
+/**
+ * The editor's order of two of the model's names: a leading `_` first, then letter case ignored and
+ * digits read as numbers, which is what FileNoCaseComparator makes of them.
+ */
+function editorNameOrder(a: string, b: string): number {
+  const key = (name: string): string =>
+    `${name.startsWith('_') ? '0' : '1'}${name.toLowerCase().replace(/\d+/g, (digits) => digits.padStart(6, '0'))}`;
+  return key(a) < key(b) ? -1 : 1;
+}
+
+/** The engine's scan order of two model paths: a folder's subfolders before its own files, each by name. */
+function scanOrder(a: string, b: string): number {
+  const left = a.split('/');
+  const right = b.split('/');
+  const at = left.findIndex((part, index) => part !== right[index]);
+  const leftIsFolder = at < left.length - 1;
+  if (leftIsFolder !== at < right.length - 1) {
+    return leftIsFolder ? -1 : 1;
+  }
+  return editorNameOrder(left[at] ?? '', right[at] ?? '');
+}
+
+/**
+ * Where two scripts declare one class_name, the engine keeps the one its scan registers last, since
+ * each registration replaces the path held for the name.
+ */
 function theScanHoldsTheClasses(root: string, scripts: readonly ClassScript[], when: string): void {
   const declared = new Map<string, string>();
   const lines = new Map<string, { path: string; extends: string }>();
-  scripts.forEach((script, slot) => {
-    if (script.exists && script.name !== null) {
-      declared.set(script.name, classPathOf(scripts, slot));
-      lines.set(script.name, {
-        path: classPathOf(scripts, slot),
-        extends: classBaseOf(scripts, slot, [slot]),
-      });
-    }
-  });
+  const named = scripts
+    .flatMap((script, slot) => (script.exists && script.name !== null ? [{ name: script.name, slot }] : []))
+    .toSorted((a, b) => scanOrder(classPathOf(scripts, a.slot), classPathOf(scripts, b.slot)));
+  for (const { name, slot } of named) {
+    declared.set(name, classPathOf(scripts, slot));
+    lines.set(name, { path: classPathOf(scripts, slot), extends: classBaseOf(scripts, slot, [slot]) });
+  }
   assert.deepEqual(declaredClasses(root), declared, `${when}: the classes and where they are`);
   assert.deepEqual(
     new Map(
@@ -4592,10 +4895,10 @@ async function openAsked(project: string): Promise<string> {
   return outcome.refused;
 }
 
-function setRestartNote(project: string, underway: boolean): void {
+async function setRestartNote(project: string, underway: boolean): Promise<void> {
   rmSync(restartNotePath(project), { force: true });
   if (underway) {
-    noteRestartBegun({
+    await noteRestartBegun({
       projectPath: project,
       editorPid: null,
       ports: { lsp: 6005, dap: 6006 },
@@ -4646,7 +4949,7 @@ async function everyOpenEnds(): Promise<void> {
           }
           if (step.under !== held.restarting) {
             held.restarting = step.under;
-            setRestartNote(project, held.restarting);
+            await setRestartNote(project, held.restarting);
           }
           await opensAreRefusedWithTheirCause(project, step, held);
         }
@@ -4658,6 +4961,7 @@ async function everyOpenEnds(): Promise<void> {
   );
 }
 
+syncSharedGdscript();
 framesRoundTripUnderAnyChunking();
 everyHeaderSpellingIsRead();
 junkNeverEscapesTheContract();
@@ -4676,8 +4980,7 @@ damagedArchivesFailCleanly();
 logsReadTheSameInAnyPieces();
 reportsRoundTrip();
 junkIsNeverAReport();
-await noOrderOfSlotAndMemoryWaitsHangsARun();
-await noOrderOfRisesLosesASuite();
+await noOrderOfSlotWaitsHangsARun();
 await theWalkGivesOnlyWhatItHolds();
 await writersTakeTurnsInTheOrderTheyAsked();
 aPlanDependsOnItsUnitsAlone();
@@ -4691,18 +4994,20 @@ aFoldedErrorCostsTheSameAtEveryFrame();
 aWideFoldSpreadsNoList();
 theDebuggerStreamIsCutProof();
 aSuiteOrderKeepsEveryUnitAndRepeats();
-await failedEnginesRunAgainOneAtATime();
 await theCompileCheckTakesOnlyTheFirstSlotOffered();
-await anInheritedSlotServesOneTakeAtATime();
-await aTakeOverRereadsTheLockUnderTheStealFile();
+anInheritedSlotServesOneTakeAtATime();
+twoTakersNeverHoldOneSlot();
 await everyEndOfARequestIsSaid();
+await everyModeIsSaidOnEveryRun();
+await aStalledProcessGetsTheSameReplies();
 await onlyTheFiftyLastLateAnswersAreKept();
 await aStrangerIsJudgedOnceAndForTheFileAsWritten();
 await theKeeperAnswersEachConnectionOnce();
 await noMoreThanFourConnectionsWaitForOneGame();
 await aLateWaitEndsAfterHalfAnHour();
-await aProcessStartIsReadAgainOnlyAfterTenSeconds();
 await everyBridgeRequestSettlesOnceWithItsOwnAnswer();
+await everyFramedRequestSettlesOnceWithItsOwnAnswer('lsp');
+await everyFramedRequestSettlesOnceWithItsOwnAnswer('dap');
 aMoveLeavesEveryFileAtOnePath();
 await aSequenceOfRenamesKeepsEveryReference();
 theClassesFollowEveryChangeOfTheScripts();

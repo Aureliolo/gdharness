@@ -23,14 +23,13 @@ when the command line itself is wrong.
 
 ## Engine options
 
-- `--engines N`: the engines a run starts with at once, 4 by default, and the most at once unless a
-  gate's lanes file names more. A run handed out a share at a time starts an engine again only for
-  a lane whose engine ended (it crashed or was ended), whose lane was told to stop, or that waited
-  for a slot, so in total it may start more engines than this.
+- `--engines N`: the engines a run starts with at once, 4 by default, and the most at once. A run
+  handed out a share at a time starts an engine again only for a lane whose engine ended (it
+  crashed or was ended) or that waited for a slot, so in total it may start more engines than this.
 - `--slots DIR`: the slot directory, the machine's own by default (see
   [Engine slots](#engine-slots)).
-- `--slot-count N`: how many slots that directory has. By default it is half the processors, at
-  least one.
+- `--slot-count N`: how many slots that directory has, unless its `count` file says otherwise. By
+  default it is half the processors, at least one.
 - `--cores N`: hold every engine, the import's included, to the first N processors, and start no
   more than N engines. Linux uses `taskset` and Windows holds the engine before it starts, while
   macOS cannot and holds only the number of engines.
@@ -80,6 +79,25 @@ when the command line itself is wrong.
 - `--verbose`: start every engine with Godot's `--verbose` to name a leak at exit, where the engine
   otherwise prints only two counts. The verdict counts the objects left alive by class and names
   the resources still in use, the project's own before its addons'.
+- `--engine-arg ARG`: hand every engine of the run one entry of the flags `project_test`'s
+  `engineArgs` takes, repeated for each entry. A flag and its value are two entries, so
+  `--engine-arg --fixed-fps --engine-arg 60 --engine-arg --time-scale --engine-arg 20` runs every
+  frame at 1/60 s of game time, twenty times faster. A fixed step makes the speed apply the same on
+  every run, since headless frames are otherwise timed by the wall clock. A flag `project_test`
+  refuses is refused here before any engine starts, in this option's words. That includes `--quiet`,
+  which silences the lines the verdict is read from, and `--write-movie`. A pass kept for
+  `--changed-only` counts only for the same flags. Under `--fixed-fps` a headless engine's game
+  time runs ahead of the clock, so the run says that gdUnit4's timeouts and every game-time wait
+  run out early.
+- `--keep-slower-than SECONDS`: keep the log of each engine that ran a case slower than `SECONDS`,
+  a plain decimal above 0 such as `10`, `2.5` or `.5`, in a passing run too. The time is gdUnit4's
+  own, from the JUnit report. The run names each such case with its time, the engine,
+  the engine's slot, the engine process's priority and the kept log, and the result holds the same
+  as `slowCases`. A passing run keeps only the logs of those engines, and its directory holds a
+  `slow-run` file. A later run removes a slow run's directory once five newer slow runs have kept
+  one, and a failed run's once five newer runs have failed. Neither kind counts against the other,
+  and a directory without the file, as an older release left, counts as a failed run. A line with
+  no time, such as an older gdUnit4 prints, never counts as slow.
 - `--result FILE`: write the run's result to `FILE` as JSON, for a gate that acts on more than the
   exit code. [The result file](#the-result-file) lists what it holds.
 - `--runner`: print the path of the shipped runner and exit.
@@ -99,10 +117,18 @@ longer holds. That is when one of these holds:
 ## The pipeline cache
 
 Each engine gets a `user://` of its own, so a game's saves stay apart from the player's. Godot keeps
-its pipeline cache there, in `user://shader_cache`. Each engine starts with the cache the project's
-last run left, when the same engine build made it, so a drawing suite does not build every pipeline
-again. The largest cache a run leaves is kept in gdharness's cache folder, one per project. The
-cache of a project that is gone is removed.
+its shader cache there, in `user://shader_cache`, and the Vulkan driver's pipeline cache in
+`user://vulkan/pipelines.*.cache`. The editor's `.editor.cache` file is left out. Each engine starts
+with the caches the project's last run left, when the same engine build made them, so a drawing suite
+does not build every shader and pipeline again. The largest shader cache a run leaves is kept
+in gdharness's cache folder, one per project. Each pipeline file is kept by name, and a file the
+run's engine wrote replaces the kept one of that name whenever the bytes differ, since an engine that
+refuses a seeded file after a driver update writes a smaller valid one. A file the run was seeded
+with and its engine left alone, as in a headless run, leaves the kept one alone. Of two runs at once,
+the keep that finishes last wins each pipeline file it wrote, so pipelines only the earlier run built
+are built again by the next run. A project whose name or user folder setting changed, in
+`project.godot` or `override.cfg`, gets no seed from the old cache, and its next run's cache replaces
+it. The cache of a project that is gone is removed.
 
 ## The result file
 
@@ -119,6 +145,14 @@ output can still read it there. It holds:
   `before()`. Both are null when none of its cases began.
 - `engines`: each engine, with the fields below.
 - `logs`: the directory every engine's output is kept under.
+- `slowCases`: present when `--keep-slower-than` was given and engines ran, empty when no case was
+  slow. Each case slower than the limit, slowest first, has the `suite`, the `case` as gdUnit4
+  printed it, `seconds`, the `engine` index, its `slot`, its `priority` and its `log`. `slot` is
+  the engine slot's number, or null. `priority` is read from the engine's process while it ran: a
+  Windows priority class such as `normal`, or the nice value such as `nice 0` on Linux and
+  macOS. It is null when the engine ended before it was read. `log` names the kept file itself.
+  Take the path from the field and never build it. `seconds` is exact, and the report prints it to
+  the millisecond.
 - `enginesAsked`.
 - `slotsFree`: how many of the slots its lanes take were free as it began. Fewer than the lanes
   means the engines were handed the suites a share at a time.
@@ -134,11 +168,11 @@ output can still read it there. It holds:
   and for a share in a reused engine the time that share's suites took to compile.
 - `passed` and `windowed`.
 - `suites`: the suites it was handed.
-- `peakBytes`: the most memory it was read holding, or null when it was never read.
 - `log`: the file its output is kept in.
 
-`log` and `logs` are null once a passing run has removed them. A run that failed its import, or had
-nothing left to run under `--changed-only`, writes empty `suites` and `engines`.
+`log` and `logs` are null once a passing run has removed them, except for the engines of
+`slowCases`. A run that failed its import, or had nothing left to run under `--changed-only`,
+writes empty `suites` and `engines`.
 
 ### Refused runs and unwritten results
 
@@ -158,6 +192,13 @@ A suite is a script under one of the test directories whose chain of `extends` r
 `GdUnitTestSuite`. The chain may name a class, a `res://` path or a path relative to the script.
 The suite also declares a function starting `test_`, or inherits one from a script of the project.
 Those functions are the cases it is expected to run, which is how a case that never ran is noticed.
+
+A case, a row or a whole suite skipped with `do_skip` never ran either, though gdUnit4 prints it
+passed and exits 0. The run fails and lists each skip with its `skip_reason`, and a suite skipped
+whole is listed case by case. `project_test` answers them under `casesSkipped`. `gdharness test`
+counts only the cases that ran. No option allows a skip. Both tools take each reason from the JUnit
+report gdUnit4 wrote, as it wrote it. A run that wrote no report is failed for that, and lists no
+skip.
 
 A project keeps folders out of every search by listing them in `gdharness/tests/not_searched`, a
 `PackedStringArray` of `res://` paths in `project.godot`. Benches written as suites and run by hand
@@ -182,15 +223,14 @@ the gate deals:
   "res://tests/a_test.gd": {
     "seconds": 12.4,
     "cases": { "test_x": 5.1, "test_y": 7.0 },
-    "rows": { "test_y": [3.4, 3.6] },
-    "peak": 1610612736
+    "rows": { "test_y": [3.4, 3.6] }
   }
 }
 ```
 
 `seconds` is the suite run whole, with its `before` and `after`. `cases` holds each function, with
 the rows of a parameterised one added together. `rows` holds what each row of a parameterised case
-took, from row 0. `peak` is the most memory, in bytes, an engine holding the suite was seen to hold.
+took, from row 0.
 A run that closes the suite replaces it.
 
 ### Missing and stale times
@@ -199,7 +239,7 @@ A case never timed is taken to cost the median of the cases that have been, or 0
 has. Each run that writes the file drops a suite the project no longer has, deleted or renamed. It
 also drops a case its suite no longer declares and takes its seconds off the suite's. A run that
 printed only some rows of a case, because it was dealt them or cut short, keeps the old times of
-the rest. A suite with no peak kept counts as 1.5 GB.
+the rest.
 
 ### Splitting a suite
 
@@ -207,10 +247,6 @@ A suite is dealt out case by case when it has more than one case and costs more 
 must also cost more than an engine's even share of the run. That share is the cost of every suite
 over the engines there is room for. An engine holding part of such a suite skips the rest. The run
 names each suite it dealt out that way.
-
-A run following a gate's lanes file takes that share over the pool's lock count where it is above
-the engines there is room for, and never over more than its processors. A few long suites then have
-the units the run grows on.
 
 A suite within its share is balanced by the rest.
 
@@ -240,32 +276,14 @@ Units are dealt slowest first, each to the engine with the least so far. Each en
 suites cheapest first, so its slowest suite does not run while the other engines are starting. A
 run starts no more engines than the smallest of these:
 
-- `--engines`, or the lanes a gate's file names where that is more.
+- `--engines`.
 - The machine's processors, or `--cores`.
-- What its free memory allows past 4 GB, at the largest peak kept for any suite of the run.
 - What it takes to keep each engine busy for as long as the slowest unit or 5 seconds, whichever
   is longer. One more is added for each unit with a case never timed.
 
 The median is only a guess at what an untimed case costs. It guesses worst for a suite just split
 out of a slow one, and for every suite on a project's first run. A run held below `--engines` by
-processors or memory says which on its first line.
-
-### Free memory
-
-On macOS the free memory is the share the system itself counts as free, which includes the cache it
-can give back. On Windows it is the smaller of the physical memory free and what the system can
-still commit. An allocation fails at the commit limit however much physical memory is free. An
-engine's own figure is what Windows has committed to it, and its resident memory on Linux and macOS.
-
-Memory that other work has reserved machine-wide and still owes comes off that figure, and the
-line on room says how much. The reservations are the `reserved/*.json` marks in the machine's slots
-folder, each `{"pid", "started", "owed"}` with `owed` in bytes. A mark counts while its holder lives,
-by the rule a slot lock follows. The holder sets `GODOT_ENGINE_RESERVED` to its mark's path for
-everything it starts, nested holders joined by the platform's path-list separator, and a mark named
-there counts nothing, so a run inside a reservation does not wait on it. Paths compare resolved,
-and without case on Windows. While a reservation counts and the room is short of one engine, the
-run's first engine waits too, once per run, and starts anyway after 10 minutes. The run prints one
-line saying it waits and how much is reserved.
+processors says so on its first line.
 
 ### When some slots are held
 
@@ -274,15 +292,12 @@ gate's export, say). Then the run says how many were free and hands the work out
 
 Each slot it holds starts an engine on a share. An engine starts in each other slot as that slot
 comes free. An engine that finishes its share while shares remain runs the next in the same
-process, so a share after the first pays no engine start. A lane that is told to stop (see
-[a gate's lanes file](#a-gates-lanes-file)), or whose engine crashed or was ended, takes its next
-share in an engine started for it. An engine is reused only when memory does not hold the run. In a
-run held by memory each share gets an engine of its own, admitted for that share.
+process, so a share after the first pays no engine start. A lane whose engine crashed or was ended
+takes its next share in an engine started for it.
 
 Each share is judged on the lines the engine printed for it, with its own cases, failures,
-timeouts, deadline and peak memory. A share in an engine that ran out of memory runs again alone,
-and only that share does. What the engine reports as leaked at exit
-is attributed to the share it ran last.
+timeouts and deadline. A share in an engine that ran out of memory fails and is not run
+again. What the engine reports as leaked at exit is attributed to the share it ran last.
 
 The run and the engine pass shares through the folder named by `--shares-in` (see
 [Starting the runner yourself](#starting-the-runner-yourself)). A share in an engine already
@@ -305,19 +320,6 @@ The shares shrink as the work runs out. A slot freed partway through takes on pa
 left, rather than a part fixed when the run began. Once everything is handed out, the run stops
 waiting for slots.
 
-### When memory is short
-
-Memory is handed out the same way. The memory free as a run begins may hold it below the engines
-the processors allow. Then the run deals for those engines, says how many memory had room for and
-hands the work out a share at a time.
-
-Before each engine starts, the memory free is read again. The engine starts once that covers the
-most its share's suites were seen to hold. Each engine going counts at what its share was seen to
-hold, less what it holds now. The run's first engine always starts.
-
-A share waiting for memory keeps a mark in the slots' `waiting` folder, as a wait for a slot does.
-It takes its slot first and keeps it while it waits, so an engine memory admits never waits for a slot.
-
 ## What fails a run
 
 - A case that failed, or that failed and then passed on a retry.
@@ -327,7 +329,7 @@ It takes its slot first and keeps it while it waits, so an engine memory admits 
 - A suite that never started, never finished, or finished without running every case it declares.
 - A case that ran without being planned, or a suite the engine ran without being handed it.
 - A suite that reports a failure while all its cases passed, which is a failing `before` or `after`.
-- A run that printed no summary or ran no case, or a script gdUnit4 could not load.
+- A run that wrote no JUnit report or ran no case, or a script gdUnit4 could not load.
 - A script under the folders searched for suites that declares `test_` functions but extends
   nothing that reaches `GdUnitTestSuite`. gdUnit4 runs none of its cases and says nothing, so the
   run names the script beside the suites it did run.
@@ -402,13 +404,20 @@ longer reads the runner's mark.
 
 ## What a failed run prints
 
-Each failure is printed with the lines that show it. Those are a failing case's report, each
-unexpected error and the line after it, and the run's summary. When an engine was cut short and
-none of that explains it, its last 60 lines are printed.
+Each failing case is named with the message gdUnit4's JUnit report holds for it. The lines printed
+beside it are each unexpected error and the line after it, and the run's summary. When an engine
+was cut short and none of that explains it, its last 60 lines are printed.
 
 The engine's whole output stays in `.godot/gdharness/test-runs/<start>-<pid>/engine-<n>/engine.log`,
 which the output names. The file opens with the engine's verdict, so it says why even for an engine
 that printed nothing.
+
+On Windows every engine runs in a job named `gdharness-engine-<pid>`, which holds the engine and
+everything it starts, so a reader can open it by name and total their processor time. Beside each
+`engine.log` is a `lane.json`, `{"lane": 0, "pid": 1234}`, written before the engine runs. It names
+the lane the engine ran in, counting from 0, and the engine's own pid, which the job is named after.
+An engine handed a further share has the same file in each share's folder, and logs copied to the
+main checkout take it with them.
 
 A project that is a worktree of another checkout has the logs of a failed run copied to the same
 place under the main checkout. The output names the copy and then the worktree's own. A gate
@@ -420,7 +429,8 @@ A run over several engines says what each took beside what it was dealt. That te
 from a slow suite. A run of several suites names its five slowest. The last lines count the
 problems and name the run's directory.
 
-A run that passes leaves no logs. A failed run keeps its logs until five later runs have failed. The
+A run that passes leaves no logs, unless `--keep-slower-than` kept the logs of its slow cases. A
+failed run keeps its logs until five later runs have failed, however many slow runs follow. The
 run that tries to reproduce a crash then does not remove the log that explains it. `--print-output`
 prints every engine's output before the verdict, whether the run passed or not.
 
@@ -581,11 +591,11 @@ however busy the machine is. Its ending says how it was counted.
 
 ### Running out of memory
 
-When an engine runs out of memory, every engine that failed runs again, one at a time, and those
-runs are the ones judged. Running out shows as the allocator's null, an image decode failing,
-godot-sandbox failing to allocate a sandbox, or Windows' `STATUS_NO_MEMORY` or
-`STATUS_COMMITMENT_LIMIT`. One that fails again is headed as run again alone. The line gives the
-most each engine held in this run, or unread.
+An engine that runs out of memory fails, and the run fails with it. No engine is run again. The run
+says an engine ran out of memory.
+
+Running out shows as the allocator's null, an image decode failing, godot-sandbox failing to
+allocate a sandbox, or Windows' `STATUS_NO_MEMORY` or `STATUS_COMMITMENT_LIMIT`.
 
 ## Leaving out what passed
 
@@ -690,13 +700,31 @@ inside them or outside.
 ## Engine slots
 
 The slots are files in one directory, shared by every tool on the machine that starts an engine,
-for every project. The gates of several games, a benchmark and a build running at once then start
+for every project. Several games' test runs, a benchmark and a build running at once then start
 no more engines between them than there are slots.
+
+A slot is held by an operating system lock on its file, for as long as the engine runs. The process
+that lives as long as the engine holds it, which is the server or the keeper of a game the keeper
+runs. The system frees the lock when that process ends, however it ends. Nothing is written to a
+slot file and nothing is read from one.
 
 The MCP server's own engines take them too. Each headless operation, script check, export,
 `project_test` run and `editor_run check` waits for a slot before its engine starts. So does a game
 started with `editor_run start`, whether the server starts it or the editor plays it. The game
 keeps the slot for as long as it runs.
+
+An import takes none. That covers every `project_import` op and its status reads, the import
+another call starts first, the class cache rebuild an import or an operation runs first, and the
+engines of `gdharness setup`, `runtime`, `upgrade` and `uninstall`. They are short steps every
+other call waits behind. A test run's own engines, and the import passes it hands to its suites,
+still take a slot. Inside an engine's slot (`GODOT_ENGINE_HELD`) an import runs on that slot as any
+engine does.
+
+These engines of one project run one at a time across the machine, since each writes the project's
+`.godot`. Each takes the project's lock, `<directory>/projects/<key>.lock`, an operating system lock
+as a slot's is, and waits while another process holds it. The key is the first 16 hex digits of the
+SHA-256 of the project's resolved path, lower-cased on Windows. An engine for another project does
+not wait. A tool call waiting for the lock is told as for a slot, below.
 
 ### Games and their slots
 
@@ -707,14 +735,16 @@ nothing would see it end. An editor, and a game played from it by hand, take non
 
 ### Waiting for a slot
 
+A take opens each slot file in turn and keeps the first it can lock. When none is free it looks
+again about once a second.
+
 A wait for a slot is announced. A tool call that asked for progress hears it at once and every 20
 seconds after. A call that waited a second or more in all is answered with an `engine_slot_wait`
-block. It holds `waitedMs` and a note naming who held the slots when it first waited.
+block. It holds `waitedMs` and a note saying that every slot was in use when it first waited.
 
 `gdharness test` and `gdharness spread` print a line once the wait passes 2 seconds, and again
 every 20 seconds while it lasts. It is one line however many of its engines are waiting. Every
-other command prints it to standard error. The line names the directory and the count. A gate gone
-quiet because the machine's other runs hold every slot then says so.
+other command prints it to standard error. The line names the directory and the count.
 
 ### The directory and the count
 
@@ -725,217 +755,81 @@ They are the same for every tool on the machine. The directory is the first of t
 3. `%LOCALAPPDATA%\gdharness\slots` on Windows.
 4. `~/.cache/gdharness/slots` everywhere else.
 
-The count is `GODOT_ENGINE_SLOT_COUNT` when that is set, a whole number above 0. Otherwise it is
-half the processors the machine offers, rounded down, held to the physical memory above 16 GiB at
-1.5 GiB an engine, and at least one. A command's `--slots` and `--slot-count` come before both.
+The count is the file `<directory>/count` when it holds a whole number above 0. Without one it is
+`GODOT_ENGINE_SLOT_COUNT` when that is set, a whole number above 0. Otherwise it is half the
+processors the machine offers, rounded down, and at least one. A command's `--slots` and
+`--slot-count` come before the variable and the processors, and the file before all of them. The
+file is read at each take, the variable once per process.
 
-`--engines` is how many engines one run would like, and is not the slot count. A gate passes
-`--engines` for the lanes its run begins on, and names a lanes file where the run may grow. It
-passes the machine's directory and count for the slots.
+`--engines` is how many engines one run would like, and is not the slot count.
 
-### Taking a slot from your own tool
+### Taking a slot from another program
 
-A tool of a game's own that starts engines takes slots the same way, in the steps below.
+A program that wants to count against the same slots locks the same files, the same way. The slots
+are `<directory>/<n>.lock` for `n` from 0 below the count. Try each in turn and keep the first you
+lock without waiting. Hold it, open, for as long as your engine runs. When none is free, look again
+about a second later.
 
-### Step 1: create a lock
+Open the file for reading and writing, creating it when it is missing, and write nothing to it.
+The lock each system takes, and so the one to take, is:
 
-- A slot is `<directory>/<n>.lock`, for `n` from 0 below the slot count.
-- To take one, create the file exclusively (`O_CREAT | O_EXCL`, Python's `open(path, "x")`). Write
-  `{"pid": <your pid>, "started": <your process's start time>}` into it.
-- The time is in milliseconds since the epoch, as the operating system reports it.
-- An optional `"by"` says what took the slot, such as the tool and its project. A run waiting for a
-  slot names each holder by it, or by its pid when it is missing.
+| System  | The lock                                                           |
+| ------- | ------------------------------------------------------------------ |
+| Windows | `LockFileEx`, exclusive and failing at once, from byte 0, length 1 |
+| Linux   | `fcntl` record lock (`F_OFD_SETLK`), exclusive, the whole file     |
+| macOS   | `flock`, exclusive and failing at once, the whole file             |
 
-### Step 2: find a free lock
+On Linux a `flock` does not exclude an `fcntl` lock, so the program must use `fcntl`. Python's
+`fcntl.lockf` takes a record lock over the whole file that excludes it. In Python:
 
-When every slot exists, read each one. A lock whose holder's start time cannot be read is held. Any
-other lock is free in these cases:
+```python
+import os
+import sys
 
-- No process has its pid.
-- The process with that pid started more than 2000 ms away from `started`.
-- The file is still empty or unreadable 10 seconds after it was last written.
 
-### Step 3: take a free lock over
+def try_lock(path):
+    """Locks the slot file. Returns the descriptor holding the lock, or None
+    when another process holds it. Close the descriptor to free the slot."""
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT)
+    try:
+        if sys.platform == "win32":
+            import msvcrt
 
-- First create `<n>.lock.steal` exclusively. Holding it, read the lock again, and if it is still
-  free remove it, create it as in step 1 and remove the steal file.
-- If the steal file cannot be created, someone else is taking the lock over. Remove the steal file
-  only if it is more than 10 seconds old.
-- On Windows a lock another process holds open cannot be removed. Leave it, since that process
-  still has the slot.
-- When nothing is free, look again 50 ms later.
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        elif sys.platform == "darwin":
+            import fcntl
 
-### Step 4: mark the wait
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            import fcntl
 
-From the first look that finds every slot held until the take ends, however it ends, keep a mark of
-the wait.
+            fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(descriptor)
+        return None
+    return descriptor
+```
 
-- The mark is `<directory>/waiting/<pid>-<n>.json`, with `n` unique within your process.
-- Make it exclusively as a lock is. Create the folder first if it is missing.
-- It holds what your lock will, plus `taker` (`gate`, `timing`, `tier` or `other`, as below) and
-  `since`. That is when the take began to wait, in seconds since the epoch.
-- A wait for memory rather than a slot names `taker` `memory`.
+The regression suite runs this snippet against gdharness's lock on every system CI uses, in both
+directions.
 
-### Step 5: take in order
-
-Take in the order you began to wait. At each look, read every live mark but your own and `memory`
-ones.
-
-- The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that are not games
-  and have waited two minutes or more. The second is everyone else, games included.
-- The first group is ahead of the second. Within each group, those whose `since` is earlier are
-  ahead of you, the earliest first.
-- A mark naming no `since` waits since its file was made, and one naming another `taker` is `other`.
-- Give each, in turn, the first free slot of those it may take now (below, aged by its own `since`)
-  not given to one before it. Leave those slots alone.
-- You may take a slot you have left for 5 seconds, since one ahead takes a slot within a moment of
-  its coming free. From then on, leave that waiter nothing, unless it has looked since. A waiter
-  says it looks by touching `<mark name without .json>.seen` beside its mark at each look, and
-  removes the file with its mark. Count the 5 seconds from the later of the first time you left it
-  a slot and its last look. A mark with no such file looks since it was made.
-- A mark may also hold `wants`, a whole number above 1, for a taker waiting for that many slots at
-  once. It is ahead that many times for its first 300 seconds of waiting, and once after. Any other
-  `wants` counts as 1.
-- A program inside a timing or a heavy job is lent the job's slot in `GODOT_ENGINE_TIMED`. It runs one
-  engine at a time on that slot and takes no other while the job lives. While the slot is in use it
-  waits for it alone and puts down no waiting mark.
-- A waiter that leaves a free slot untaken is waiting for something else, such as memory.
-- A `timing` taker leaves no slot to those ahead, because its queue has already given it its turn.
-
-### Step 6: give the slot back
-
-- When done, remove the lock, but only if it still names your pid.
-- At each take, remove every `<n>.lock` numbered at or past the slot count whose holder has gone,
-  under its steal file as in step 3.
-- Only a taker given a larger slot count makes those locks. Takers with the normal count never look
-  at them, so nobody else frees them.
+Read the count as described above, at every take. A program started inside an engine's slot that
+runs one engine on it, instead of taking a second slot, reads `GODOT_ENGINE_HELD` as the next
+section says.
 
 ### A slot lent to a child
 
-gdharness starts every engine it holds a slot for with `GODOT_ENGINE_HELD` set to that slot's lock
-path. A taker started under it runs one engine on that slot rather than take a second one. That
-holds only while the slot is the engine's, in one of two ways:
-
-- The slot's live holder is the nearest process above the taker running another executable. The
-  search passes over launchers of the taker's own (a `bun` under `bun run`).
-- The lock names that process under `engine`, `{"pid", "started"}` as a holder is written, with a
-  start within 2000 ms.
+gdharness starts every engine it holds a slot for with `GODOT_ENGINE_HELD` set to that slot's file
+path. A taker started under it runs one engine on that slot rather than take a second one, while
+some process still holds a lock on that file. A variable left behind by an engine that has ended
+names nothing. Any further take of that taker takes a slot of its own.
 
 ### Holders that are not the engine
 
-A holder that is not the engine writes `engine` once it has the engine's pid. Such a holder is the
-keeper of a game, or a server waiting on an engine it started. It writes `engine` again when a game
-restarts itself into another. A game an editor plays inherits the editor's environment while the
-lock names the editor, so it takes a slot of its own. The taker never gives the lent slot back,
-because it stays its holder's.
-
-### Gates come first
-
-Each gate in the machine's queue, waiting for its seat or holding it, keeps a mark from its arrival
-to its release. The mark is `<directory>/queued/<its ticket>.json` and holds what a lock does. An
-empty `<its ticket>.json.seated` sits beside it once the gate has its seat.
-
-A mark is live by the rule a lock is held by. One not yet written names nobody and is passed over.
-One whose holder has gone is removed with its `.seated` file.
-
-### The kept slots
-
-The last `kept = max(2, floor(count / 4))` slots are kept for engines outside a gate, 4 of 16.
-
-### Which slots each engine takes
-
-A process runs inside a gate when `GODOT_ENGINE_SHARE` and `GODOT_ENGINE_SHARE_COUNT` are both
-set. Each kind of engine takes:
-
-- A gate's engine takes only the slots below `count - kept`, and slot 0 at least, whatever the queue
-  holds. A gate's seat counts only these slots, so work in the kept ones never holds a seat back.
-- A timing's engine, one with `GODOT_ENGINE_TIMED` set, takes any slot.
-- An engine with `GODOT_ENGINE_TIER` set (`fast` or `full` for a gate's own step, `ship` for a build
-  or upload) takes any slot, whatever the queue holds. It tries the gates' slots from the top first.
-- Any other engine takes any slot while no mark is live, and only the kept slots while one is. It
-  also takes the gates' slots, from the top, while some are spare (see Spare slots of the gates).
-- After two minutes of waiting, one that is not a game takes any slot, so gates never hold it back
-  for good.
-
-### A starved measurement's claim
-
-A measurement that has waited two hours for its turn writes `<directory>/starved.json` as
-`{"pid", "started", "what", "starved"}`, `starved` in seconds. While it stands, an engine outside a
-gate takes no slot and waits, saying `held for <what>, a measurement starved <hours> h`. A gate's,
-a timing's and a tier's engines are not held.
-
-The claimer's own engines are not held either, nor those of a process that carries
-`GODOT_ENGINE_STARVING` as `<pid>:<started>` of the claim. A claim whose claimer has gone is removed
-by the rule a lock is freed by.
-
-### Spare slots of the gates
-
-The queue writes `<directory>/spare.json` as `{"spare", "pid", "started", "written"}`, `written` in
-milliseconds since the epoch. `spare` counts the gates' free slots no queued gate can take now, from
-the queue's seats, pool and memory. The file is written through a `.part` file and a rename, at
-every change and every five seconds while a gate waits. A missing file counts as none, as does one
-older than ten seconds or written by a holder that has gone. A game never takes a spare slot, since
-it holds one as long as it plays.
-
-### A gate's lanes file
-
-- `GODOT_ENGINE_SHARE` is the path of the gate's pool, a slots folder the gate holds alone.
-  `GODOT_ENGINE_SHARE_COUNT` is its number of lock numbers, never the share. A paced run makes no
-  lock there. The program pacing it holds one for each lane.
-- That program sets `GODOT_ENGINE_LANES`, for what it starts, to a file in the pool holding
-  `{"lanes", "pid", "started", "written"}`. `lanes` is a whole number of 1 or more and `written` is
-  in milliseconds. It is written at each change and every five seconds.
-- The run begins on `--engines` and holds up to `lanes` lanes, fewer only for want of work, memory,
-  processors or free machine slots. A file missing, older than ten seconds or written by a process
-  that has gone tells nothing, and the lanes the run has go on. With the variable unset or empty the
-  run holds `--engines`.
-- A lane reads the number again after each wait (for a slot, for the compile check, for memory) and
-  right before it draws a share. A lane numbered at or past it gives its machine slot back to the
-  machine, waits for the number to grow, and takes a slot again when it does. Lanes count from 0.
-  It ends once every share is handed out. An engine already running finishes its share first. A
-  run with several lanes follows the file this way even when it began on every lane it may have.
-- A run that can grow makes `<lanes file>.follows` as a lock is made, and takes one whose holder has
-  gone over under its steal file. Until a live mark stands, the writer holds no more than the
-  number it told. A run that cannot grow reads the number for a fall and makes no mark. A run reads
-  the number for a fall whether or not it holds the mark, and rises only while it holds it.
-- The run removes its mark at once when it reaches its ceiling of processors, pool count or work,
-  and otherwise once every share is handed out.
-- The engine that compiles every script together counts as one of the lanes. It runs in a lane's
-  slot before that lane's first suites, and waits for memory as a suite's engine does.
-
-### Games and the kept slots
-
-A game `editor_run` started is one of those other engines. Its lock carries `"game": true`, which
-stays when its keeper takes the lock over. Games hold at most `min(floor(kept / 2), kept - 1)` of
-the kept slots between them (2 of 16) before a game's start waits.
-
-An engine outside a gate tries the highest-numbered slot first. The gates' slots then stay free
-longest. A take works out again at every look which slots it may try. A slot it already holds is
-kept to its end, whatever arrives in the queue.
-
-### Removing locks on Windows
-
-On Windows, Python opens a file without delete sharing. A lock or mark open in another process
-cannot be removed until it is closed. gdharness retries a refused removal for a second, and a
-game's own tool that removes them should do the same.
-
-### Reading the wait marks
-
-The marks let a gate that counts its own time tell a wait for slots others hold from its own work.
-`gdharness test`, `gdharness spread` and the server's own engines keep one whenever they wait. A
-reader skips a mark that is still empty or names no holder, since it is being written. It removes
-one whose holder has gone, by the same rule as a lock.
-
-### Start times
-
-The start time tells a holder from a later process given its pid. Windows reports a process's
-creation time to the millisecond, and `ps -o lstart` on macOS only to the second. That is why the
-tolerance is two seconds.
-
-On Linux, read it as gdharness and psutil's `create_time()` do. Take the `btime` line of
-`/proc/stat`, plus the 22nd field of `/proc/<pid>/stat` divided by `getconf CLK_TCK`, in seconds.
-That is up to a second early. `ps -o lstart` there cuts the same sum to the second again and reads
-up to two seconds early, which is the whole tolerance.
+A slot is held by the process that lives as long as the engine, which need not be the engine
+itself. It is the keeper of a game, or a server waiting on an engine it started. A server that
+hands a game to a keeper lets go of its lock and the keeper takes it over within 10 seconds. A game
+an editor plays is held by the server until the game announces, and then until the game ends.
 
 ## Preparing the game before any suite
 

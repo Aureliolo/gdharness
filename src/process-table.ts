@@ -303,39 +303,148 @@ public static class GdhProcessTable
 
     private const int ProcessVmCounters = 3;
 
-    /// <summary>"pid bytes" on a line for each of the comma-separated pids that will open, the bytes it has committed.</summary>
-    public static string HeldBy(string pids)
+    // The parent links of the last snapshot, which a reading of memory walks rather than taking a
+    // snapshot of its own: one costs about twenty times what reading a process through its handle
+    // does. Taken again once it is TreeMs old, or when a process asked about is not in it, so an
+    // engine is read from its first reading. A process asked about and missing from a snapshot taken
+    // since it was asked is gone, and is remembered as missing until the next, so an engine that has
+    // ended and is still asked about costs no snapshot at each reading.
+    private static Dictionary<int, Entry> treeByPid;
+    private static Dictionary<int, List<Entry>> treeChildren;
+    private static HashSet<int> treeMissing = new HashSet<int>();
+    private static int treeTakenAt;
+    private const int TreeMs = 10000;
+
+    private static void TakeTree()
     {
-        StringBuilder said = new StringBuilder();
-        int size = 11 * IntPtr.Size;
-        foreach (int pid in Pids(pids))
+        List<Entry> entries = Snapshot();
+        Dictionary<int, Entry> byPid = new Dictionary<int, Entry>();
+        Dictionary<int, List<Entry>> children = new Dictionary<int, List<Entry>>();
+        foreach (Entry entry in entries)
         {
-            IntPtr handle = OpenProcess(QueryLimitedInformation, false, pid);
-            if (handle == IntPtr.Zero)
+            byPid[entry.Pid] = entry;
+        }
+        foreach (Entry entry in entries)
+        {
+            Entry parent;
+            if (entry.Pid <= 0 || !byPid.TryGetValue(entry.Parent, out parent) || entry.Created < parent.Created)
             {
                 continue;
             }
-            try
+            List<Entry> siblings;
+            if (!children.TryGetValue(entry.Parent, out siblings))
             {
-                IntPtr buffer = Marshal.AllocHGlobal(size);
-                try
+                siblings = new List<Entry>();
+                children[entry.Parent] = siblings;
+            }
+            siblings.Add(entry);
+        }
+        treeByPid = byPid;
+        treeChildren = children;
+        treeMissing = new HashSet<int>();
+        treeTakenAt = Environment.TickCount;
+    }
+
+    // The bytes the listed process has committed for itself, or -1 where it will not open, has
+    // exited, or its number now belongs to a later process.
+    private static long CommittedBy(Entry entry)
+    {
+        IntPtr handle = Open(entry, QueryLimitedInformation);
+        if (handle == IntPtr.Zero)
+        {
+            return -1;
+        }
+        int size = 11 * IntPtr.Size;
+        IntPtr buffer = Marshal.AllocHGlobal(size);
+        try
+        {
+            int needed;
+            long exited;
+            long created;
+            long kernel;
+            long user;
+            if (NtQueryInformationProcess(handle, ProcessVmCounters, buffer, size, out needed) != 0
+                || (GetProcessTimes(handle, out created, out exited, out kernel, out user) && exited != 0))
+            {
+                return -1;
+            }
+            // VM_COUNTERS' PagefileUsage, the private bytes.
+            return Marshal.ReadIntPtr(buffer, 9 * IntPtr.Size).ToInt64();
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+            CloseHandle(handle);
+        }
+    }
+
+    /// <summary>
+    /// "pid bytes children" on a line for each running one of the comma-separated pids: the private
+    /// bytes of the process and of every process below it, each read through its own handle, and
+    /// those below it as comma-separated pids. Who is below whom comes from the last snapshot, so a
+    /// process started since is counted once the next one is taken. A process counts as a child only
+    /// if it started after its parent.
+    /// </summary>
+    public static string HeldBy(string pids)
+    {
+        HashSet<int> wanted = Pids(pids);
+        int age = unchecked(Environment.TickCount - treeTakenAt);
+        bool unknown = false;
+        if (treeByPid != null)
+        {
+            foreach (int pid in wanted)
+            {
+                unknown = unknown || (!treeByPid.ContainsKey(pid) && !treeMissing.Contains(pid));
+            }
+        }
+        if (treeByPid == null || age > TreeMs || unknown)
+        {
+            TakeTree();
+        }
+        StringBuilder said = new StringBuilder();
+        foreach (int pid in wanted)
+        {
+            Entry root;
+            if (!treeByPid.TryGetValue(pid, out root))
+            {
+                treeMissing.Add(pid);
+                continue;
+            }
+            long bytes = CommittedBy(root);
+            if (bytes < 0)
+            {
+                continue;
+            }
+            List<string> below = new List<string>();
+            HashSet<int> seen = new HashSet<int>();
+            seen.Add(pid);
+            Queue<int> queue = new Queue<int>();
+            queue.Enqueue(pid);
+            while (queue.Count > 0)
+            {
+                List<Entry> next;
+                if (!treeChildren.TryGetValue(queue.Dequeue(), out next))
                 {
-                    int needed;
-                    if (NtQueryInformationProcess(handle, ProcessVmCounters, buffer, size, out needed) == 0)
+                    continue;
+                }
+                foreach (Entry child in next)
+                {
+                    if (!seen.Add(child.Pid))
                     {
-                        long bytes = Marshal.ReadIntPtr(buffer, 9 * IntPtr.Size).ToInt64();
-                        said.Append(Number(pid)).Append(' ').Append(bytes.ToString(CultureInfo.InvariantCulture)).Append('\n');
+                        continue;
                     }
-                }
-                finally
-                {
-                    Marshal.FreeHGlobal(buffer);
+                    long held = CommittedBy(child);
+                    if (held < 0)
+                    {
+                        continue;
+                    }
+                    bytes += held;
+                    below.Add(Number(child.Pid));
+                    queue.Enqueue(child.Pid);
                 }
             }
-            finally
-            {
-                CloseHandle(handle);
-            }
+            said.Append(Number(pid)).Append(' ').Append(bytes.ToString(CultureInfo.InvariantCulture)).Append(' ')
+                .Append(string.Join(",", below.ToArray())).Append('\n');
         }
         return said.ToString();
     }
@@ -378,6 +487,34 @@ public static class GdhProcessTable
         return said.ToString();
     }
 
+    /// <summary>
+    /// Waits for [pid], started no earlier than [notBeforeMs], and answers when the kernel ended it in
+    /// milliseconds. Empty where it cannot be opened, or is older than that and so another process
+    /// under a number handed on.
+    /// </summary>
+    public static string ExitTimeOf(int pid, long notBeforeMs)
+    {
+        IntPtr handle = OpenProcess(QueryLimitedInformation | Synchronize, false, pid);
+        if (handle == IntPtr.Zero)
+        {
+            return "";
+        }
+        long created;
+        long exited;
+        long kernel;
+        long user;
+        if (!GetProcessTimes(handle, out created, out exited, out kernel, out user)
+            || created <= UnixEpoch || (created - UnixEpoch) / 10000 < notBeforeMs)
+        {
+            CloseHandle(handle);
+            return "";
+        }
+        WaitForSingleObject(handle, 0xFFFFFFFF);
+        string said = GetProcessTimes(handle, out created, out exited, out kernel, out user) ? Milliseconds(exited) : "";
+        CloseHandle(handle);
+        return said;
+    }
+
     /// <summary>"exit code" once a child held by HoldChildren has ended; empty for one not held.</summary>
     public static string WaitFor(int pid)
     {
@@ -393,7 +530,7 @@ public static class GdhProcessTable
 }
 `;
 
-const TABLE = new CompiledHelper('process table', 'gdharness-processes', SOURCE);
+const TABLE = new CompiledHelper('process table', 'gdharness-processes', SOURCE, { cached: true });
 
 /** The process table could not be compiled, which is why Windows was not asked. */
 export class ProcessTableUnbuilt extends Error {}

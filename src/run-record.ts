@@ -13,9 +13,9 @@
  * `outside.ts`), so nothing that ends the server takes it down. Its output goes to a file it holds
  * open rather than to a pipe, so it never blocks on a reader that has gone and the bytes survive
  * the reader anyway. And this record says which process and which file, so the next server can
- * pick the run back up instead of denying it. One record per project, because the directory is
- * shared by every server on the machine, and one record for all of them was overwritten by
- * whichever project started a run last.
+ * pick the run back up instead of denying it. One record per place, which is a project and the
+ * folder its run writes `user://` into, because the directory is shared by every server on the
+ * machine, and one record for all of them was overwritten by whichever run started last.
  *
  * One transcript per run, named for when it started, because the alternative is what the engine
  * does to its own log: a second run rotates the file out from under the first, and the rows the
@@ -34,7 +34,7 @@ import { STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
 import { runtimeDirectories, runtimeDirectory } from './runtime-directories.js';
 import { runHidden } from './spawn.js';
 import { tableListener } from './tcp-listeners.js';
-import { writeWhole } from './whole-file.js';
+import { writeWhole, writeWholeAsync } from './whole-file.js';
 
 /** What a run leaves behind so another server can find it. */
 export interface RunRecord {
@@ -54,6 +54,11 @@ export interface RunRecord {
   readonly startedBy: number;
   readonly projectPath: string;
   /**
+   * The folder the run's `user://` was moved to, when the start named one. Absent for a run that
+   * writes the project's own, so a project's runs with and without it are different places.
+   */
+  readonly savesIn?: string;
+  /**
    * The project the server that started the run serves, which can be another than the run's.
    *
    * A server serving one project can start a run of another by naming its projectPath. Its
@@ -62,6 +67,12 @@ export interface RunRecord {
    * reached the game. Absent for a server that names no project.
    */
   readonly servedBy?: string;
+  /**
+   * The process of the server that started the run. Only that server answers for the run while the
+   * process lives, and the next server of the folder takes the run over once it has gone. Absent in a
+   * note a keeper wrote for no server.
+   */
+  readonly serverPid?: number;
   /**
    * Where the keeper holding the game listens for a stop: see `keeper-channel.ts`. Absent for a
    * keeper that could not listen.
@@ -79,6 +90,11 @@ export interface RunRecord {
    * is the game's debugger and outlives the server, so any later server reads the profile from here.
    */
   readonly profile?: string;
+  /**
+   * True for an exported build. It runs with no `--path`, so the project is not on its command line
+   * and the run is told by its absolute `command` and its start instead.
+   */
+  readonly exported?: true;
   readonly arguments: readonly string[];
   /**
    * The engine this run was started with, so the pid can be shown to still mean this run.
@@ -140,14 +156,37 @@ function runsDirectory(): string {
  * the spelling a server was given and the one its editor reports name the same note.
  */
 function projectKey(projectPath: string): string {
-  const real = realAsFarAsItExists(resolve(projectPath)).replace(/[\\/]+$/, '');
-  const folded = process.platform === 'win32' || process.platform === 'darwin' ? real.toLowerCase() : real;
-  return createHash('sha256').update(folded.replaceAll('\\', '/')).digest('hex').slice(0, 16);
+  return createHash('sha256').update(comparedSpelling(projectPath)).digest('hex').slice(0, 16);
 }
 
-/** Where [param projectPath]'s run note is, in [param directory]'s runs. */
-export function runRecordPath(projectPath: string, directory = runtimeDirectory()): string {
-  return join(directory, 'runs', `note-${projectKey(projectPath)}.json`);
+/** [param path] spelt as `isSameDirectory` compares it: resolved as far as it exists, and folded where the filesystem folds. */
+function comparedSpelling(path: string): string {
+  const real = realAsFarAsItExists(resolve(path)).replace(/[\\/]+$/, '');
+  const folded = process.platform === 'win32' || process.platform === 'darwin' ? real.toLowerCase() : real;
+  return folded.replaceAll('\\', '/');
+}
+
+/**
+ * The part of a run note's name that says which place the run is: a project, and the folder its
+ * `user://` is when the start named one. A run with no folder of its own keeps its project's key,
+ * so two runs of one project that save in different folders each have a note.
+ */
+function placeKey(projectPath: string, savesIn: string | undefined): string {
+  if (savesIn === undefined) {
+    return projectKey(projectPath);
+  }
+  return createHash('sha256')
+    .update(`${comparedSpelling(projectPath)}\n${comparedSpelling(savesIn)}`)
+    .digest('hex')
+    .slice(0, 16);
+}
+
+/**
+ * Where the run note of [param projectPath] is in [param directory]'s runs, for the run whose
+ * `user://` is in [param savesIn] when it names a folder.
+ */
+export function runRecordPath(projectPath: string, directory = runtimeDirectory(), savesIn?: string): string {
+  return join(directory, 'runs', `note-${placeKey(projectPath, savesIn)}.json`);
 }
 
 /**
@@ -178,6 +217,16 @@ export function writeLatestRun(servedBy: string, latest: LatestRun): void {
   }
 }
 
+/** {@link writeLatestRun} for a caller on the event loop. */
+export async function writeLatestRunAsync(servedBy: string, latest: LatestRun): Promise<void> {
+  try {
+    mkdirSync(runsDirectory(), { recursive: true });
+    await writeWholeAsync(latestRunPath(servedBy), JSON.stringify(latest, null, 2));
+  } catch {
+    // Unwritable leaves the successor choosing by age.
+  }
+}
+
 /** The run a server of [param servedBy] started last, or null when none has said. */
 export function readLatestRun(servedBy: string, directory = runtimeDirectory()): LatestRun | null {
   try {
@@ -195,13 +244,6 @@ export function readLatestRun(servedBy: string, directory = runtimeDirectory()):
   }
 }
 
-/**
- * A transcript nothing else is writing to, opened for appending.
- *
- * The descriptor is handed to the child as both its streams and closed here straight afterwards:
- * the child keeps its own copy, and this process has no reason to hold one open for a file it
- * only ever reads by offset.
- */
 /**
  * A new transcript for a run started at [startedAt], made by this call alone. The runs folder is one
  * for the machine, and servers woken by one gate freeing its slots start in the same millisecond, so
@@ -244,7 +286,7 @@ export function profileMarkPath(run: {
 
 export function writeRunRecord(record: RunRecord): void {
   mkdirSync(runsDirectory(), { recursive: true });
-  const path = runRecordPath(record.projectPath);
+  const path = runRecordPath(record.projectPath, undefined, record.savesIn);
   if (!writeWhole(path, JSON.stringify(record, null, 2))) {
     throw new Error(`the run note could not be written at ${path}`);
   }
@@ -296,6 +338,15 @@ export function writeEditorRunNote(note: EditorRunNote): void {
   mkdirSync(runsDirectory(), { recursive: true });
   const path = editorNotePath(note.projectPath);
   if (!writeWhole(path, JSON.stringify(note, null, 2))) {
+    throw new Error(`the editor run note could not be written at ${path}`);
+  }
+}
+
+/** {@link writeEditorRunNote} for a caller on the event loop. */
+export async function writeEditorRunNoteAsync(note: EditorRunNote): Promise<void> {
+  mkdirSync(runsDirectory(), { recursive: true });
+  const path = editorNotePath(note.projectPath);
+  if (!(await writeWholeAsync(path, JSON.stringify(note, null, 2)))) {
     throw new Error(`the editor run note could not be written at ${path}`);
   }
 }
@@ -380,7 +431,7 @@ export function sameRun(
  * changes the pid, and a later run can be handed the same pid and the same start.
  */
 export function amendRunRecord(record: RunRecord): boolean {
-  const path = runRecordPath(record.projectPath);
+  const path = runRecordPath(record.projectPath, undefined, record.savesIn);
   const there = recordAt(path);
   if (there !== null && !sameRun(there, record)) {
     return false;
@@ -390,7 +441,8 @@ export function amendRunRecord(record: RunRecord): boolean {
 }
 
 /**
- * The run of [param projectPath] a server left a note for, or null when there is none.
+ * The run of [param projectPath] a server left a note for, with its `user://` in [param savesIn]
+ * when the run named a folder, or null when there is none.
  *
  * Looked for in every runtime directory, because the two servers either side of a reconnect do not
  * have to agree about where the temporary directory is. They usually do, being started the same way
@@ -401,9 +453,10 @@ export function amendRunRecord(record: RunRecord): boolean {
 export function readRunRecord(
   projectPath: string,
   directories: readonly string[] = runtimeDirectories(),
+  savesIn?: string,
 ): RunRecord | null {
   for (const directory of directories) {
-    const own = recordAt(runRecordPath(projectPath, directory));
+    const own = recordAt(runRecordPath(projectPath, directory, savesIn));
     if (own !== null) {
       return own;
     }
@@ -479,8 +532,17 @@ function recordAt(path: string): RunRecord | null {
 /** The fields of a note that say who served the run, each present only when it holds something. */
 function namedFields(
   fields: Record<string, unknown>,
-): Pick<RunRecord, 'servedBy' | 'keeper' | 'keeperPid' | 'profile'> {
+): Pick<RunRecord, 'servedBy' | 'serverPid' | 'savesIn' | 'keeper' | 'keeperPid' | 'profile' | 'exported'> {
   return {
+    ...(typeof fields['serverPid'] === 'number' &&
+    Number.isInteger(fields['serverPid']) &&
+    fields['serverPid'] > 0
+      ? { serverPid: fields['serverPid'] }
+      : {}),
+    ...(fields['exported'] === true ? { exported: true as const } : {}),
+    ...(typeof fields['savesIn'] === 'string' && fields['savesIn'] !== ''
+      ? { savesIn: fields['savesIn'] }
+      : {}),
     ...(typeof fields['servedBy'] === 'string' && fields['servedBy'] !== ''
       ? { servedBy: fields['servedBy'] }
       : {}),
@@ -872,9 +934,28 @@ export function whyNotTheRun(
       ? null
       : `the operating system named only its executable and not its command line (${running.unread ?? 'no reason given'}), which is not enough to signal it on`;
   }
-  return namesTheProject(running.text, record.projectPath)
+  return namesTheRun(running.text, record)
     ? null
     : `that process's command line does not name ${record.projectPath}`;
+}
+
+/** Whether [param commandLine] names the project the record was started for, or is the build it was started with. */
+function namesTheRun(commandLine: string, record: RunRecord): boolean {
+  return namesTheProject(commandLine, record.projectPath) || isTheRecordedBuild(commandLine, record);
+}
+
+/**
+ * Whether [param commandLine] is the exported build the record was started with. An export runs
+ * with no `--path`, so the project is no part of its command line, and an engine run always has
+ * one. The build is told by its absolute path, which the start time compared before this ties to
+ * the one run.
+ */
+function isTheRecordedBuild(commandLine: string, record: RunRecord): boolean {
+  return (
+    record.exported === true &&
+    readCommandLine(commandLine).projectPath === null &&
+    spelt(commandLine).includes(spelt(record.command))
+  );
 }
 
 /** [param path] with forward slashes, no trailing slash, and lower case where the file system ignores case. */
@@ -937,17 +1018,19 @@ export function judgeAnnouncedGame(
 }
 
 /**
- * Take [param projectPath]'s note away for a run that has ended, wherever it was left.
+ * Take the note of [param projectPath], with its `user://` in [param savesIn] when the run named
+ * a folder, away for a run that has ended, wherever it was left.
  *
  * Every candidate directory is looked in, for the same reason they are read.
  */
 export function clearRunRecord(
   projectPath: string,
   directories: readonly string[] = runtimeDirectories(),
+  savesIn?: string,
 ): void {
   for (const directory of directories) {
     try {
-      rmSync(runRecordPath(projectPath, directory), { force: true });
+      rmSync(runRecordPath(projectPath, directory, savesIn), { force: true });
     } catch {
       // Held open for a moment, which leaves it for the next clear.
     }

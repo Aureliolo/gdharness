@@ -10,7 +10,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serverServing } from './bridge-announce.js';
 import { editorOpenOptionsOf, holdTheEditors, openTheEditor } from './editor-open.js';
-import { inOneSlot, nameSlotTaker, sayWaitsTo } from './engine-slots.js';
+import { sayWaitsTo, withoutASlot } from './engine-slots.js';
 import { letWindowsReportCrashes } from './error-mode.js';
 import { EngineUsageError, Refusal } from './errors.js';
 import { GodotLocator } from './godot-path.js';
@@ -438,7 +438,7 @@ async function rebuildClassList(godot: HeadlessEngine, projectPath: string): Pro
   }
 }
 
-/** The engine steps of setup, which share one slot. */
+/** The engine steps of setup, which take no slot. */
 async function installIntoProject(projectPath: string, withRuntime: boolean): Promise<HeadlessEngine> {
   const found = await engine(projectPath);
   for (const addon of installAddons(projectPath)) {
@@ -491,8 +491,7 @@ async function setup(): Promise<void> {
   // The runtime addon is per-project like everything else setup installs, so it is not something
   // to opt into: without it a third of the tools have nothing to talk to.
   const withRuntime = !args.includes('--no-runtime');
-  // The engine steps share one slot, and the harness question below holds none while it waits.
-  const godot = await inOneSlot(async () => await installIntoProject(projectPath, withRuntime));
+  const godot = await withoutASlot(async () => await installIntoProject(projectPath, withRuntime));
 
   if (!args.includes('--no-connect')) {
     await connectHarnesses(godot, projectPath);
@@ -1010,8 +1009,8 @@ Usage:
   gdharness test [project] [suite ...] [--engines N] [--slots DIR] [--slot-count N]
                  [--silence S] [--deadline S] [--tests DIR] [--changed-only] [--reach-also PATH]
                  [--whole-tree] [--import] [--godot PATH] [--godot-version V] [--cores N]
-                 [--order reversed|named|SEED] [--print-output] [--verbose] [--result FILE]
-                 [--times FILE] [--runner]
+                 [--order reversed|named|SEED] [--print-output] [--verbose] [--engine-arg ARG ...]
+                 [--keep-slower-than S] [--result FILE] [--times FILE] [--runner]
                                      Run the project's gdUnit4 suites over several engines and
                                      judge every line they print: exit 1 on a failing case, an
                                      engine error no case declared, a case that never finished
@@ -1023,7 +1022,12 @@ Usage:
                                      with the line, and runs nothing. --print-output
                                      prints what every engine printed, for a
                                      benchmark run by hand. --verbose starts every engine verbose,
-                                     so a leak at exit is named. --result writes the outcome, each
+                                     so a leak at exit is named. --engine-arg gives every engine
+                                     one entry of project_test's engineArgs, so --time-scale 20
+                                     is two. --keep-slower-than keeps the log of each engine
+                                     that ran a case past S seconds, in a passing run too, and
+                                     names it in the result as slowCases. --result writes the
+                                     outcome, each
                                      suite's time and every problem as JSON. --times
                                      deals by and records into FILE instead of the project's own
                                      times. --runner prints the shipped runner's path.
@@ -1106,15 +1110,6 @@ async function spread(): Promise<void> {
   process.exitCode = await runSpreadCommand(options, godotPath);
 }
 
-/** What the slot this process takes is called to whoever waits for it. */
-function slotTakerName(): string {
-  if (command !== undefined) {
-    return `gdharness ${command}`;
-  }
-  const served = process.env['GDHARNESS_PROJECT'];
-  return `a gdharness server${served === undefined || served === '' ? '' : ` of ${served}`}`;
-}
-
 /** Runs the commands that read their own options, and answers whether `command` was one of them. */
 async function ranOwnOptionsCommand(): Promise<boolean> {
   if (command !== undefined && asksForHelp()) {
@@ -1170,7 +1165,6 @@ async function main(): Promise<void> {
       console.error(`gdharness: ${line}`);
     });
   }
-  nameSlotTaker(slotTakerName());
   if (await ranOwnOptionsCommand()) {
     return;
   }
@@ -1189,16 +1183,16 @@ async function main(): Promise<void> {
       doctorReport(projectArgument(1));
       return;
     case 'runtime':
-      await inOneSlot(runtime);
+      await withoutASlot(runtime);
       return;
     case 'classes':
       await classes();
       return;
     case 'upgrade':
-      await inOneSlot(upgrade);
+      await withoutASlot(upgrade);
       return;
     case 'uninstall':
-      await inOneSlot(uninstall);
+      await withoutASlot(uninstall);
       return;
     default: {
       if (ranPrintingCommand(command)) {

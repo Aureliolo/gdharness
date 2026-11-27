@@ -28,11 +28,20 @@ var ended_at: Dictionary = {}
 var raised_in: Array[String] = []
 ## The engine file the refusal in [member refused] was reported from.
 var refused_in: String = ""
+## The collector bound when this began listening. A signal the call emits can resume another
+## request's code inside it, and what that code reads under its own collector is not the call's.
+var _listening_for: GdhCollected = null
+
+
+func _init() -> void:
+	_listening_for = _bound
 
 
 ## Makes [param collector] the one reads add their errors to, and answers the one it replaced. A
 ## request opens one when it starts. Code that resumes after an await binds the request's again,
-## since another request may have run in between.
+## since another request may have run in between. Every bind is undone with the collector it
+## answered before the code that made it awaits or returns. Code resumed by a signal runs inside
+## whatever emitted it, which goes on reading under its own collector once that code is done.
 static func bind(collector: GdhCollected) -> GdhCollected:
 	var before: GdhCollected = _bound
 	_bound = collector
@@ -116,6 +125,8 @@ func _log_error(
 ) -> void:
 	# Another thread's report in the same moment is not the call's.
 	if OS.get_thread_caller_id() != OS.get_main_thread_id():
+		return
+	if _bound != _listening_for:
 		return
 	var text: String = rationale if not rationale.is_empty() else code
 	if function == "callv" and text.begins_with(REFUSED) and refused.is_empty():

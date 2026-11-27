@@ -377,6 +377,240 @@ function testAScriptErrorDoesNotTakeTheCasesAfterIt(): void {
   );
 }
 
+/** The lines of a long run on both streams: prints, errors with their detail, and loose message lines. */
+function aLongRunPrinted(rounds: number): { stream: 'stdout' | 'stderr'; text: string }[] {
+  const printed: { stream: 'stdout' | 'stderr'; text: string }[] = [];
+  for (let at = 0; at < rounds; at += 1) {
+    printed.push({ stream: 'stdout', text: `print ${String(at)}\n` });
+    printed.push({
+      stream: 'stderr',
+      text: [
+        `SCRIPT ERROR: failure ${String(at % 7)}`,
+        `   at: case_${String(at % 3)} (res://tests/a_test.gd:${String(at % 11)})`,
+        '   GDScript backtrace (most recent call first):',
+        `       [0] case_${String(at % 3)} (res://tests/a_test.gd:${String(at % 11)})`,
+        '',
+      ].join('\n'),
+    });
+    if (at % 5 === 0) {
+      // A headline ending in a colon, whose message runs on over unindented lines.
+      printed.push({
+        stream: 'stderr',
+        text: `ERROR: configuration errors:\nmissing template ${String(at)}\nmissing other ${String(at)}\n   at: export (editor/export.cpp:1)\n`,
+      });
+    }
+    if (at % 4 === 0) {
+      // Unindented lines after a headline, which an `at:` line later makes its message.
+      printed.push({
+        stream: 'stderr',
+        text: `ERROR: first part ${String(at)}\nsecond part ${String(at)}\n   at: thing (core/thing.cpp:2)\n`,
+      });
+    }
+    if (at % 50 === 0) {
+      // A message running over more unindented lines than the log holds, and a headline whose `at:`
+      // line comes after more prints on the other stream than that.
+      printed.push({
+        stream: 'stderr',
+        text: `ERROR: long message ${String(at)}\n${Array.from({ length: 60 }, (_line, part) => `part ${String(part)}\n`).join('')}   at: long (core/long.cpp:3)\n`,
+      });
+      printed.push({ stream: 'stderr', text: `ERROR: awaited ${String(at)}\n` });
+      for (let between = 0; between < 60; between += 1) {
+        printed.push({ stream: 'stdout', text: `between ${String(between)}\n` });
+      }
+      printed.push({ stream: 'stderr', text: '   at: awaited (core/awaited.cpp:4)\n' });
+    }
+    if (at % 6 === 0) {
+      printed.push({
+        stream: 'stderr',
+        text: `WARNING: mild ${String(at)}\nnot its message ${String(at)}\n`,
+      });
+    }
+  }
+  return printed;
+}
+
+/** [param text] in pieces of [param size] characters. */
+function piecesOfText(text: string, size: number): string[] {
+  const pieces: string[] = [];
+  for (let at = 0; at < text.length; at += size) {
+    pieces.push(text.slice(at, at + size));
+  }
+  return pieces;
+}
+
+/**
+ * A log kept to a bound holds a few times that many entries however long the run, and hands every
+ * other entry to its reader whole, in order, each with its full detail and whether a script raised
+ * it, as the log holding every entry reads them. Its counts are of every entry.
+ */
+function testALogKeptToABoundHandsOverEveryEntryWhole(): void {
+  const most = 25;
+  const printed = aLongRunPrinted(400);
+  for (const size of [1, 13, 4096]) {
+    const whole = new GameLog();
+    const handed: [string, string, string, string[], boolean][] = [];
+    const bounded = new GameLog({
+      most,
+      retired: (entry, byScript) =>
+        handed.push([entry.severity, entry.source, entry.text, [...entry.detail], byScript]),
+    });
+    let largest = 0;
+    for (const { stream, text } of printed) {
+      for (const piece of piecesOfText(text, size)) {
+        whole.append(stream, piece);
+        bounded.append(stream, piece);
+        largest = Math.max(largest, bounded.all.length);
+      }
+    }
+    whole.finish();
+    bounded.finish();
+    const said = `read ${String(size)} characters at a time`;
+    assert.ok(
+      largest <= 4 * most,
+      `${said}: the log held ${String(largest)} entries, more than ${String(4 * most)}`,
+    );
+    assert.ok(bounded.retiredCount > 0, `${said}: entries were handed over`);
+    for (const severity of ['error', 'warning', 'info'] as const) {
+      assert.equal(bounded.count(severity), whole.count(severity), `${said}: every ${severity} is counted`);
+    }
+    bounded.handOverHeld();
+    assert.deepEqual(
+      handed,
+      whole.all.map((entry) => [
+        entry.severity,
+        entry.source,
+        entry.text,
+        entry.detail,
+        whole.raisedByScript(entry),
+      ]),
+      `${said}: every entry reaches the reader whole and in order`,
+    );
+  }
+}
+
+interface Printed {
+  readonly stream: 'stdout' | 'stderr' | 'transcript';
+  readonly text: string;
+}
+
+/** [param count] plain lines on [param stream], each its own entry. */
+function filler(stream: Printed['stream'], name: string, count: number): Printed {
+  return {
+    stream,
+    text: Array.from({ length: count }, (_line, n) => `${name} ${String(n)}\n`).join(''),
+  };
+}
+
+/**
+ * Past entries handed over, a log kept to a bound still places each line as the log holding every
+ * entry does: a call's mark claims the error its detail names, a headline takes the loose lines that
+ * turn out to be its message, also when lines taken out before them moved them, and a crash report
+ * printed beside other output reaches the reader with all of it.
+ */
+function testALogKeptToABoundPlacesLinesAfterEntriesAreHandedOver(): void {
+  const printed: Printed[] = [
+    filler('stdout', 'before', 100),
+    {
+      stream: 'stdout' as const,
+      text: 'gdharness: debug_state evaluate raised from core/math/expression.cpp: boom\n',
+    },
+    filler('stdout', 'waiting', 10),
+    { stream: 'stderr' as const, text: 'ERROR: boom\n   at: evaluate (core/math/expression.cpp:12)\n' },
+    { stream: 'stderr' as const, text: 'ERROR: first part\nsecond part\n' },
+    { stream: 'transcript' as const, text: 'ERROR: told twice\nits reason\n' },
+    { stream: 'stdout' as const, text: 'CrashHandlerException: Program crashed with signal 11\n' },
+    { stream: 'stdout' as const, text: 'Engine version: Godot Engine v4.7.2.stable.official\n' },
+    { stream: 'stderr' as const, text: '   at: thing (core/thing.cpp:2)\n' },
+    { stream: 'transcript' as const, text: '   at: told (core/told.cpp:3)\ntold again\n' },
+    filler('stderr', 'beside', 12),
+    filler('stderr', 'beside', 12),
+    filler('stderr', 'beside', 12),
+    {
+      stream: 'stdout' as const,
+      text: 'Load address: 7ff51ac40000\nGDScript backtrace (most recent call first):\n',
+    },
+    filler('stderr', 'after', 4),
+  ];
+  const whole = new GameLog();
+  const handed: unknown[] = [];
+  const bounded = new GameLog({
+    most: 10,
+    retired: (entry, byScript) =>
+      handed.push([entry.severity, entry.text, [...entry.detail], entry.raisedBy, byScript]),
+  });
+  for (const { stream, text } of printed) {
+    whole.append(stream, text);
+    bounded.append(stream, text);
+  }
+  whole.finish();
+  bounded.finish();
+  assert.ok(
+    bounded.retiredCount > 80,
+    `entries were handed over before the crash: ${String(bounded.retiredCount)}`,
+  );
+  bounded.handOverHeld();
+  const wholeRead = whole.all.map((entry) => [
+    entry.severity,
+    entry.text,
+    entry.detail,
+    entry.raisedBy,
+    whole.raisedByScript(entry),
+  ]);
+  assert.deepEqual(handed, wholeRead, 'every entry reaches the reader as the whole log holds it');
+  assert.deepEqual(
+    wholeRead.filter(
+      ([, text]) =>
+        ['boom', 'first part', 'told twice'].includes(String(text)) || String(text).startsWith('Crash'),
+    ),
+    [
+      ['info', 'boom', ['at: evaluate (core/math/expression.cpp:12)'], 'debug_state evaluate', false],
+      ['error', 'first part', ['second part', 'at: thing (core/thing.cpp:2)'], undefined, false],
+      ['error', 'told twice', ['its reason', 'at: told (core/told.cpp:3)'], undefined, false],
+      [
+        'error',
+        'CrashHandlerException: Program crashed with signal 11',
+        [
+          'Engine version: Godot Engine v4.7.2.stable.official',
+          'Load address: 7ff51ac40000',
+          'GDScript backtrace (most recent call first):',
+        ],
+        undefined,
+        false,
+      ],
+    ],
+    'the whole log claims the error, takes the message and keeps the crash whole',
+  );
+}
+
+/**
+ * Looks at a log kept to a bound each find the entries printed since the last look that the log
+ * still holds, as the whole log has them, also when it let go of some before the look.
+ */
+function testALogKeptToABoundIsLookedAtFromWhereTheLastLookEnded(): void {
+  const whole = new GameLog();
+  const bounded = new GameLog({ most: 5, retired: () => undefined });
+  let read = 0;
+  let lostSome = false;
+  for (let chunk = 0; chunk < 30; chunk += 1) {
+    const text = Array.from(
+      { length: 1 + (chunk % 13) },
+      (_line, n) => `line ${String(chunk)} ${String(n)}\n`,
+    ).join('');
+    whole.append('stdout', text);
+    bounded.append('stdout', text);
+    const looked = bounded.heldFrom(read);
+    lostSome ||= bounded.retiredCount > read;
+    assert.deepEqual(
+      looked.entries.map((entry) => entry.text),
+      whole.all.slice(Math.max(read, bounded.retiredCount)).map((entry) => entry.text),
+      `chunk ${String(chunk)}`,
+    );
+    assert.equal(looked.next, whole.all.length, `chunk ${String(chunk)}`);
+    read = looked.next;
+  }
+  assert.ok(bounded.retiredCount > 0 && lostSome, 'entries were let go before a look');
+}
+
 testAScriptErrorDoesNotTakeTheCasesAfterIt();
 testAnEntrySaysTheScriptItPointsAt();
 testACrashIsAnErrorWithItsReport();
@@ -384,4 +618,7 @@ testAFilteredReadDoesNotConsumeWhatItDidNotReport();
 testHeadlinesKeepTheirDetail();
 testChunksAndLineEndingsDoNotMatter();
 testSelectionAnswersByEntry();
+testALogKeptToABoundHandsOverEveryEntryWhole();
+testALogKeptToABoundPlacesLinesAfterEntriesAreHandedOver();
+testALogKeptToABoundIsLookedAtFromWhereTheLastLookEnded();
 console.log('game log tests passed');

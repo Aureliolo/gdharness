@@ -10,10 +10,16 @@ import { alive } from './alive.js';
 import { DEFAULT_DAP_PORT } from './dap_client.js';
 import { HIDDEN_DESKTOP } from './desktop.js';
 import { placeEmptyScriptDocs } from './doc-cache.js';
-import { clearEditorLog, editorLogPath, writeEditorLogNote } from './editor-log.js';
+import {
+  clearEditorLog,
+  editorExitPath,
+  editorHelperOutputPath,
+  editorLogPath,
+  writeEditorLogNote,
+} from './editor-log.js';
 import { EngineUsageError } from './errors.js';
 import { type EditorPorts, editorArguments, OPENED_BY_A_SERVER, startedAs, waitFromEnv } from './launch.js';
-import { freeLibraryCopies } from './library-copies.js';
+import { freeLibraryCopiesAsync } from './library-copies.js';
 import { DEFAULT_LSP_PORT } from './lsp_client.js';
 import { launchOutsideTheTree } from './outside.js';
 import { commandProjectRefusal, isGodotProject } from './paths.js';
@@ -180,6 +186,20 @@ export interface EditorOpened {
 }
 
 /**
+ * Where an editor is started. A hidden editor is on a desktop of its own, because the games it
+ * plays are its children and land where it is, and its helper's output goes to a file a play reads
+ * its verdict from. A visible one is shown without being activated, so it takes nobody's keyboard.
+ */
+export function editorDesktopOf(
+  hidden: boolean,
+  projectPath: string,
+): { readonly desktop: string; readonly output: string } | { readonly noActivate: true } {
+  return hidden
+    ? { desktop: HIDDEN_DESKTOP, output: editorHelperOutputPath(projectPath) }
+    : { noActivate: true };
+}
+
+/**
  * Starts an editor on a project, on the ports named, through a launcher that exits once the editor
  * is up, so the editor is nobody's child here. The harness ends a server by killing its process
  * tree at every reconnect, and an editor spawned as its child went with it.
@@ -197,7 +217,7 @@ export async function openEditorProcess(
 ): Promise<EditorOpened> {
   clearEditorLog(projectPath);
   // An editor being restarted may not have let its library copies go yet.
-  freeLibraryCopies(projectPath);
+  await freeLibraryCopiesAsync(projectPath);
   if (start.hidden) {
     const unplaced = await placeEmptyScriptDocs(engine, projectPath);
     if (unplaced !== null) {
@@ -225,9 +245,8 @@ export async function openEditorProcess(
       GDHARNESS_DAP_PORT: String(ports.dap),
       [OPENED_BY_A_SERVER]: '1',
     },
-    // A hidden editor is on a desktop of its own, because the games it plays are its children and
-    // land where it is. A visible one is shown without being activated, so it takes nobody's keyboard.
-    ...(start.hidden ? { desktop: HIDDEN_DESKTOP } : { noActivate: true }),
+    exitNote: editorExitPath(projectPath),
+    ...editorDesktopOf(start.hidden, projectPath),
   });
   if ('error' in launched) {
     return { pid: null, startedAt: null, error: launched.error, arguments: args };

@@ -9,7 +9,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { cachedClasses } from './class-cache.js';
+import { cachedClasses, cachedClassesAsync } from './class-cache.js';
 import { emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
 import { EXIT_LEAK, projectSelfTypedExports, selfTypedSentence } from './engine-leaks.js';
@@ -17,8 +17,9 @@ import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import type { Sample } from './engine-spent.js';
 import { errorMessage } from './errors.js';
 import type { GameLog, LogEntry } from './game-log.js';
+import { HEADLESS_OPERATIONS } from './headless-operations.js';
 import { IMPORTABLE_EXTENSIONS } from './import-freshness.js';
-import { freeLibraryCopies, seedExtensionList } from './library-copies.js';
+import { freeLibraryCopiesAsync, seedExtensionList } from './library-copies.js';
 import { realAsFarAsItExists } from './paths.js';
 import { isRecord } from './records.js';
 import { forceNextImport } from './reimport.js';
@@ -34,6 +35,11 @@ export interface HeadlessEngine {
   readonly debug: boolean;
   /** Start the engine as an editor, which is the only engine that can make an exporter. */
   readonly editor?: boolean;
+  /**
+   * The project the run is for where its engine runs on another folder, which gives its slot that
+   * project's repository and priority. The folder the operation names when not given.
+   */
+  readonly project?: string;
   /** How long an operation's engine may run before it is ended. Ten minutes when not given. */
   readonly ceiling?: { readonly ms: number; readonly said: string };
   /** Reads the machine for the ceiling, for a test. */
@@ -61,6 +67,8 @@ interface Reported {
   readonly beforeOperationOmitted?: number;
   /** Which engine ran, when it was not the server's own. */
   readonly engineNote?: string;
+  /** The engine could not read the class list, so the operation ran knowing no class_name. */
+  readonly classListUnreadable?: true;
 }
 
 export type HeadlessOutcome =
@@ -199,6 +207,12 @@ export const ANSWERED = '[gdharness] answered';
  */
 export const WAITING = '[gdharness] waiting for the autoloads';
 export const BEGUN = '[gdharness] begun';
+
+/**
+ * What the operations script prints before an operation when the engine could not read the class
+ * list. Kept in step with godot_operations.gd.
+ */
+const UNREADABLE_CLASS_LIST = '[gdharness] the class list could not be read';
 
 /**
  * What the operations script prints around engine output it provokes for a question of its own,
@@ -397,7 +411,7 @@ export async function runImport(
     readonly engine?: ImportEngine;
   } = {},
 ): Promise<ImportOutcome> {
-  const engine = options.engine ?? defaultImportEngine(godotPath);
+  const engine = options.engine ?? defaultImportEngine(godotPath, projectPath);
   const caches = editorCacheDirectory(godotPath);
   let listed: readonly string[] | undefined;
   const pass = async (): Promise<ImportOutcome> => {
@@ -408,7 +422,7 @@ export async function runImport(
     for (const target of options.forcing ?? []) {
       forceNextImport(projectPath, target);
     }
-    freeLibraryCopies(projectPath);
+    await freeLibraryCopiesAsync(projectPath);
     const cachesBefore = docCachesWritten(caches);
     const ran = await engine(['--headless', '--path', projectPath, '--import']);
     return judgeImport(ran, docCacheCrash(ran, cachesBefore, docCachesWritten(caches), 'import'));
@@ -454,16 +468,20 @@ const BLENDER_STOPPED =
 export type ImportEngine = (args: readonly string[]) => Promise<EngineRun>;
 
 /** The server's start: its own engine with a scratch log file, since the project's log would be rotated. */
-function defaultImportEngine(godotPath: string): ImportEngine {
+function defaultImportEngine(godotPath: string, projectPath: string): ImportEngine {
   return async (args) => {
     const logDir = scratchDirectory('import');
     try {
-      return await runEngine(godotPath, [
-        '--headless',
-        '--log-file',
-        join(logDir, 'engine.log'),
-        ...args.filter((arg) => arg !== '--headless'),
-      ]);
+      return await runEngine(
+        godotPath,
+        [
+          '--headless',
+          '--log-file',
+          join(logDir, 'engine.log'),
+          ...args.filter((arg) => arg !== '--headless'),
+        ],
+        { project: projectPath, slotless: true },
+      );
     } finally {
       discard(logDir);
     }
@@ -506,10 +524,11 @@ export async function runOperation(
   projectPath: string,
 ): Promise<HeadlessOutcome> {
   // Read before the engine starts, since every start first drops the entries whose script is gone,
-  // and the rebuild could then not answer them as removed.
-  const listedBefore = operation === REFRESH_CLASS_LIST ? cachedClasses(projectPath) : null;
+  // and the rebuild could then answer them neither as removed nor, moved to another declarer, as
+  // changed.
+  const listedBefore = operation === REFRESH_CLASS_LIST ? await cachedClassesAsync(projectPath) : null;
   const run = await operationOutcome(engine, operation, params, projectPath);
-  const outcome = listedBefore === null ? run : withEveryRemovalAnswered(run, listedBefore, projectPath);
+  const outcome = listedBefore === null ? run : answeredAgainst(run, listedBefore, projectPath);
   const heldAtExit = [...outcome.messages, ...(outcome.afterAnswerMessages ?? [])].some((entry) =>
     EXIT_LEAK.test(entry.text),
   );
@@ -520,26 +539,56 @@ export async function runOperation(
 const REFRESH_CLASS_LIST = 'refresh_class_cache';
 
 /**
- * [param outcome] of a class list rebuild, its `removed` holding every class [param listedBefore]
- * held that the list no longer does, whether the rebuild dropped it or the start before it did.
+ * The operations of project_import, the class rebuild among them, which take no engine slot as its
+ * import does: short steps of an import path that every other call waits behind.
  */
-function withEveryRemovalAnswered(
+const SLOTLESS_OPERATIONS: ReadonlySet<string> = new Set(
+  Object.values(HEADLESS_OPERATIONS['project_import'] ?? {}),
+);
+
+/**
+ * [param outcome] of a class list rebuild, answered against [param listedBefore], the list before
+ * the start dropped what names a gone script: `removed` holds every class it held that the list no
+ * longer does, and a class it held at another path is `changed`, not `added`. A list the engine
+ * could not read gave it none of the classes it names, so each class it wrote stays `added`.
+ */
+function answeredAgainst(
   outcome: HeadlessOutcome,
   listedBefore: ReadonlyMap<string, string>,
   projectPath: string,
 ): HeadlessOutcome {
-  const answered = outcome.ok ? outcome.payload['removed'] : undefined;
-  if (!(outcome.ok && Array.isArray(answered))) {
+  if (!outcome.ok) {
+    return outcome;
+  }
+  const unreadable = outcome.payload['unreadableList'] === true;
+  const names = (key: string): string[] | null => {
+    const answered = outcome.payload[key];
+    return Array.isArray(answered)
+      ? answered.filter((name): name is string => typeof name === 'string')
+      : null;
+  };
+  const [added, removed, changed] = [names('added'), names('removed'), names('changed')];
+  if (added === null || removed === null || changed === null) {
     return outcome;
   }
   const listedAfter = cachedClasses(projectPath) ?? new Map<string, string>();
-  const removed = answered.filter((name): name is string => typeof name === 'string');
   const unanswered = [...listedBefore.keys()].filter(
     (name) => !listedAfter.has(name) && !removed.includes(name),
   );
-  return unanswered.length === 0
-    ? outcome
-    : { ...outcome, payload: { ...outcome.payload, removed: [...removed, ...unanswered] } };
+  const moved = unreadable ? [] : added.filter((name) => listedBefore.has(name));
+  if (unanswered.length === 0 && moved.length === 0) {
+    return outcome;
+  }
+  const payload = {
+    ...outcome.payload,
+    added: added.filter((name) => !moved.includes(name)),
+    removed: [...removed, ...unanswered],
+    changed: [
+      ...changed,
+      ...moved.filter((name) => listedBefore.get(name) !== listedAfter.get(name)),
+    ].toSorted(),
+  };
+  return { ...outcome, payload };
 }
 
 async function operationOutcome(
@@ -583,12 +632,28 @@ async function operationOutcome(
     // answered spun for nearly four hours with nothing to end it.
     ran = await runEngine(engine.godotPath, args, {
       timeout: engine.ceiling ?? OPERATION_CEILING,
+      project: engine.project ?? projectPath,
+      ...(SLOTLESS_OPERATIONS.has(operation) ? { slotless: true } : {}),
       ...(engine.sample === undefined ? {} : { sample: engine.sample }),
     });
     answer = answerIn(answerFile);
   } finally {
     discard(paramsDir);
   }
+  const outcome = judgedOutcome(operation, engine, ran, answer);
+  const unreadable = withoutAsides(ran.log.everything()).some(
+    (entry) => entry.source === 'stderr' && entry.text === UNREADABLE_CLASS_LIST,
+  );
+  return unreadable ? { ...outcome, classListUnreadable: true } : outcome;
+}
+
+/** The outcome of [param operation]'s run [param ran], which wrote [param answer]. */
+function judgedOutcome(
+  operation: string,
+  engine: HeadlessEngine,
+  ran: EngineRun,
+  answer: ReturnType<typeof answerIn>,
+): HeadlessOutcome {
   const seen = operationLogOf(ran);
   const { problems, afterAnswered } = seen;
 

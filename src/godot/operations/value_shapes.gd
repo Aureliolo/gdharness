@@ -2,7 +2,7 @@ extends RefCounted
 ## How each engine type built from fields is written: the fields it needs, the ones it reads when
 ## they are there, and what a refusal says about a value that is not one.
 ##
-## This file is the one beside the operations, and `bun run sync:gd` copies it into each addon.
+## This file is the one beside the operations, and the build copies it into each addon.
 
 const GdhRead = preload("reading.gd")
 ## The classes that store what the inspector shows, and a write takes, under other names: a Curve

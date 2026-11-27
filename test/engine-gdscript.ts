@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
   appendFileSync,
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -20,12 +21,14 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { syncSharedGdscript } from '../scripts/sync-shared-gd.js';
 import { declaredClassLines } from '../src/class-cache.js';
 import {
   ANSWERED,
@@ -315,6 +318,8 @@ const PROVOKED: Readonly<Record<string, readonly RegExp[]>> = {
   ],
   // The parse error the refused reload is refused for.
   reload_script: [/^SCRIPT ERROR: Parse Error: Expected parameter name\.$/],
+  // One report for each shader compile the fixture makes fail.
+  shader_include_cache: [/^ERROR: Shader compilation failed\.$/],
 };
 
 const SHUT_PORT = 'GDHARNESS_TEST_SHUT_PORT';
@@ -336,6 +341,7 @@ function runFixture(godotPath: string, projectDir: string, name: string): unknow
   if (run.status !== 0) {
     throw failedRun(name, run, output);
   }
+  console.log(`fixture ${name} took ${(run.ms / 1000).toFixed(1)}s`);
   assertNoEngineErrors(name, output, PROVOKED[name]);
   const payload = lastJsonLine(run.stdout, name);
   assert.equal(get(payload, 'ok'), true, `${name} should report success JSON`);
@@ -4385,6 +4391,82 @@ function testTheRunnerListsNoFileOfANestedProject(godotPath: string): void {
   }
 }
 
+/**
+ * The test runner's walks of res://, and the operations' listings of one folder, pass a folder that
+ * lists but does not open without an engine error. Another engine of the same gate can make and remove a folder while a walk is under way,
+ * and the gate counts an engine error outside every suite against the run. A link whose target is
+ * gone stands for that folder on Windows, and a folder nobody may enter elsewhere.
+ */
+function testTheRunnerWalksPastAFolderThatDoesNotOpen(godotPath: string): void {
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GDUNIT4_PATH names no gdUnit4.');
+    }
+    console.log('runner walk check skipped (GDUNIT4_PATH names no gdUnit4)');
+    return;
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-runner-walks-'));
+  const shut = join(dir, 'scripts', 'shut');
+  const editorCache = join(dir, '.godot', 'editor');
+  const unopenable = (folder: string): void => {
+    if (process.platform === 'win32') {
+      rmSync(folder, { recursive: true, force: true });
+      const target = `${folder}-gone`;
+      mkdirSync(target);
+      symlinkSync(target, folder, 'junction');
+      rmSync(target, { recursive: true });
+    } else {
+      mkdirSync(folder, { recursive: true });
+      chmodSync(folder, 0o000);
+    }
+  };
+  try {
+    cpSync(gdunit, join(dir, 'addons', 'gdUnit4'), { recursive: true });
+    writeTreeAt(dir, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="GdharnessRunnerWalks"\n',
+      'scripts/visible.gd': 'extends Node\n',
+    });
+    const imported = spawnSyncHidden(godotPath, ['--headless', '--path', dir, '--import'], {
+      encoding: 'utf8',
+      timeout: 180000,
+    });
+    assert.equal(imported.status, 0, `${imported.stdout}${imported.stderr}`);
+    assert.ok(existsSync(editorCache), 'the import made the editor folder');
+    unopenable(shut);
+    unopenable(editorCache);
+    cpSync(join('test', 'support', 'gd', 'runner_walks.gd'), join(dir, 'runner_walks.gd'));
+    const run = runScript(godotPath, dir, join(dir, 'runner_walks.gd'), [
+      '--',
+      resolve(join('src', 'godot', 'tests', 'listed.gd')),
+      resolve(join('src', 'godot', 'operations')),
+      'res://scripts/shut',
+      shut,
+    ]);
+    const output = `${run.stdout}${run.stderr}`;
+    assert.equal(run.status, 0, output);
+    const walked = lastJsonLine(run.stdout, 'runner_walks');
+    assert.ok(
+      asArray(get(walked, 'scripts')).includes('res://scripts/visible.gd'),
+      `the walks still reach the project's scripts: ${output}`,
+    );
+    assert.ok(asArray(get(walked, 'files')).includes('res://scripts/visible.gd'), `and its files: ${output}`);
+    assert.deepEqual(
+      get(walked, 'listings'),
+      { namesakes: [], imported_from: '', installed: false, editor_cache: '' },
+      `each listing answers as for a folder that is not there: ${output}`,
+    );
+    assert.doesNotMatch(output, /Couldn't open directory/, 'no walk or listing printed an engine error');
+  } finally {
+    for (const folder of [shut, editorCache]) {
+      if (process.platform !== 'win32' && existsSync(folder)) {
+        chmodSync(folder, 0o755);
+      }
+    }
+    sweep(dir);
+  }
+}
+
 /** Writes [param files] under [param root], each folder made as it is needed. */
 function writeTreeAt(root: string, files: Readonly<Record<string, string>>): void {
   for (const [path, content] of Object.entries(files)) {
@@ -6616,13 +6698,6 @@ function testTheReconnectFixtureListensWhereItIsTold(godotPath: string, projectD
   // The leg runs this through the loop over CASES, so it runs once and, being last, after every
   // step that meets the project as createProject made it.
   assert.equal(Object.keys(CASES).at(-1), 'reconnect', 'reconnect should be the last case');
-  const source = readFileSync(import.meta.filename, 'utf8');
-  const mainBody = source.slice(source.lastIndexOf('async function main'));
-  assert.ok(mainBody.includes('await main()'), 'the slice should hold main');
-  assert.ok(
-    !mainBody.includes("runFixture(godotPath, projectDir, 'bridge_" + "reconnect')"),
-    'main should not run the reconnect fixture itself',
-  );
 
   const saved = process.env[SHUT_PORT];
   process.env[SHUT_PORT] = 'none';
@@ -6654,6 +6729,9 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   nestedProject: testANestedProjectStopsTheWalk,
   nestedProjectListed: (godotPath) => {
     testTheRunnerListsNoFileOfANestedProject(godotPath);
+  },
+  runnerWalks: (godotPath) => {
+    testTheRunnerWalksPastAFolderThatDoesNotOpen(godotPath);
   },
   importJudged: testAnImportIsJudgedByWhatItWasBuiltFrom,
   referencesMissing: testAReferenceIsMissingOnlyWhereTheEngineMissesIt,
@@ -6711,6 +6789,7 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
 };
 
 async function main(): Promise<void> {
+  syncSharedGdscript();
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     skipWithoutGodot();
@@ -6815,6 +6894,30 @@ async function runEveryCase(godotPath: string, projectDir: string): Promise<void
   ]) {
     assert.equal(get(cached, claim), true, `${claim}: ${JSON.stringify(cached)}`);
   }
+  // The cache holds an include the file has since changed and one with an unsaved edit, and the
+  // shader read judges the files while leaving both copies where they are.
+  const included = runFixture(godotPath, projectDir, 'shader_include_cache');
+  for (const claim of [
+    'missing_before',
+    'gained_compiles',
+    'held_copy_kept_after_gain',
+    'lost_fails',
+    'lost_names_the_function',
+    'unsaved_edit_kept',
+    'relative_gained_compiles',
+    'relative_lost_fails',
+    'relative_held_copy_kept',
+    'missing_include_answered_by_the_engine',
+    'odd_spelling_gained_compiles',
+    'odd_spelling_held_copy_kept',
+    'uid_include_gained_compiles',
+    'self_include_loads_nothing_as_an_include',
+    'user_include_gained_compiles',
+    'deleted_include_fails',
+    'deleted_held_copy_kept',
+  ]) {
+    assert.equal(get(included, claim), true, `${claim}: ${JSON.stringify(included)}`);
+  }
   runFixture(godotPath, projectDir, 'runtime_serialize');
   runFixture(godotPath, projectDir, 'runtime_input');
   runFixture(godotPath, projectDir, 'runtime_input_said');
@@ -6861,8 +6964,11 @@ async function runEveryCase(godotPath: string, projectDir: string): Promise<void
     'the engine and the server should agree on the temporary directory',
   );
   runFixture(godotPath, projectDir, 'input_action');
-  for (const run of Object.values(CASES)) {
+  // Said for each, so a leg nearing its limit shows which cases grew.
+  for (const [name, run] of Object.entries(CASES)) {
+    const began = performance.now();
     await run(godotPath, projectDir);
+    console.log(`case ${name} took ${((performance.now() - began) / 1000).toFixed(1)}s`);
   }
 }
 

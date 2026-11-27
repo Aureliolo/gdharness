@@ -337,15 +337,20 @@ func _advance_modules() -> void:
 ## finished it yet. A command acts in the frame it arrives, so it never waits frames for its module:
 ## a frame wait let 38 frames pass for three, and a signal fired before the wait began. Such a frame
 ## is the runtime's slowness, and is left out of the timing.
+##
+## A module compiled here while the thread compiles another that shares preloads with it is two
+## loads at once, which have deadlocked Godot's loader. So the thread's module is taken first, which
+## waits for that one compile. A module already compiled, such as one another module preloads, is
+## returned at once: waiting for the thread there held a timed frame some 150 ms.
 func _compiled(file: String) -> GDScript:
 	var path: String = ADDON_DIR + file
-	if not ResourceLoader.has_cached(path):
+	var cached: bool = ResourceLoader.has_cached(path)
+	if not cached:
 		_frames.skip_this_frame()
-	if path == _in_flight:
-		var _taken: Resource = ResourceLoader.load_threaded_get(path)
+	if path == _in_flight or not (cached or _in_flight.is_empty()):
+		var _taken: Resource = ResourceLoader.load_threaded_get(_in_flight)
 		_in_flight = ""
-	else:
-		_queued.erase(path)
+	_queued.erase(path)
 	return _loaded(file)
 
 
@@ -894,11 +899,22 @@ func _execute_command(command: String, params: Dictionary) -> Dictionary:
 		var _seen: Variant = waits.call(&"saw_call", command, params)
 	# The errors the request's reads make are gathered while the handler runs up to its first
 	# await, and a handler that reads after an await binds the collector again. They go into the
-	# answer whatever it is, so no route that reads can leave them out.
+	# answer whatever it is, so no route that reads can leave them out. The bind is undone where
+	# the handler first gives control back. Its end can come inside another request's read, which
+	# a bind undone there would take its collector from.
 	var errors: GdhCallErrors.GdhCollected = GdhCallErrors.GdhCollected.new()
 	var before: GdhCallErrors.GdhCollected = GdhCallErrors.bind(errors)
-	var answer: Variant = await handler.call(params)
+	# Through the object's callv: the engine refuses a Callable's call of a function that awaits
+	# when the call is not awaited where it is made.
+	var module: Object = handler.get_object()
+	var answer: Variant = module.callv(handler.get_method(), [params])
 	var _rebound: GdhCallErrors.GdhCollected = GdhCallErrors.bind(before)
+	# A handler that awaits hands back its state at the first await, and its answer only once it
+	# ends.
+	if answer is Object:
+		var state: Object = answer
+		if state != null and state.get_class() == "GDScriptFunctionState":
+			answer = await Signal(state, &"completed")
 	var result: Dictionary = answer
 	GdhCallErrors.attach(result, errors)
 	return result

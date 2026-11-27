@@ -111,6 +111,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       engine: ${{ steps.scope.outputs.engine }}
+      macos: ${{ steps.scope.outputs.macos }}
     steps:
       # Two commits deep: a pull request is checked out as its merge into the base, whose first
       # parent is the base, so the diff between them is what the pull request changes.
@@ -124,9 +125,17 @@ jobs:
         id: scope
         env:
           EVENT: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           set -euo pipefail
           engine=true
+          # macOS is the slowest and scarcest runner, so a pull request leaves it to Linux and
+          # Windows. It runs on main after a merge and on the release pull request, which is the
+          # last gate before a version ships.
+          macos=false
+          if [[ "${EVENT}" == push || "${HEAD_REF}" == release/v* ]]; then
+            macos=true
+          fi
           if [[ "${EVENT}" == pull_request ]]; then
             changed="$(git diff --name-only HEAD^1 HEAD | sort | tr '\n' ' ')"
             if [[ "${changed}" == "package.json server.json " ]]; then
@@ -141,6 +150,7 @@ jobs:
           fi
           echo "Engine legs needed: ${engine}"
           echo "engine=${engine}" >> "${GITHUB_OUTPUT}"
+          echo "macos=${macos}" >> "${GITHUB_OUTPUT}"
 
   # The GDScript that ships in the bundle, driven against a real engine on every platform we
   # claim to support. It is a separate job from build-and-test because it is the only one that
@@ -157,9 +167,9 @@ jobs:
     with:
       # renovate: datasource=github-runners depName=ubuntu
       runner: ubuntu-24.04
-      # Five, as on the other platforms: three parts ran 915 to 1053 of the 1200 seconds a part's
-      # run is given, so one test that ran long took the rest of its part down with it.
-      regression-parts: '["1/5", "2/5", "3/5", "4/5", "5/5"]'
+      # Ten on every platform: by the weights in test/support/shards.ts ten parts carry about 904 of
+      # the 1200 seconds a part's run is given, inside the four fifths the balance check allows.
+      regression-parts: '["1/10", "2/10", "3/10", "4/10", "5/10", "6/10", "7/10", "8/10", "9/10", "10/10"]'
 
   engine-windows-parts:
     name: engine windows
@@ -171,25 +181,19 @@ jobs:
     with:
       # renovate: datasource=github-runners depName=windows
       runner: windows-2025
-      # Seven: Windows runs the regressions slowest and installs slowest, and by its own figures five
-      # parts carry about 1160 of the 1200 seconds a part's run is given, seven about 830. Five ran
-      # one part out of its time.
-      regression-parts: '["1/7", "2/7", "3/7", "4/7", "5/7", "6/7", "7/7"]'
+      regression-parts: '["1/10", "2/10", "3/10", "4/10", "5/10", "6/10", "7/10", "8/10", "9/10", "10/10"]'
 
   engine-macos-parts:
     name: engine macos
     needs: scope
-    if: needs.scope.outputs.engine == 'true'
+    if: needs.scope.outputs.macos == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/engine.yml # zizmor: ignore[self-repository]
     with:
       # renovate: datasource=github-runners depName=macos
       runner: macos-26
-      # Seven: macOS runs the write regressions slowest, and by its own figures six parts carry
-      # about 975 of the 1200 seconds a part's run is given, seven about 836.
-      regression-parts: '["1/7", "2/7", "3/7", "4/7", "5/7", "6/7", "7/7"]'
-      engine-fixtures-with-editor-fixtures: true
+      regression-parts: '["1/10", "2/10", "3/10", "4/10", "5/10", "6/10", "7/10", "8/10", "9/10", "10/10"]'
 
   # One check per platform, named by platform rather than by runner image, because the name is
   # what the branch ruleset requires, and an image bump must not rename a required check out from
@@ -222,6 +226,8 @@ jobs:
           ENGINE: ${{ needs.scope.outputs.engine }}
         run: test "${RESULT}" = success || { test "${ENGINE}" = false && test "${RESULT}" = skipped; }
 
+  # Reports on every pull request, since the ruleset requires it, and passes unrun where scope
+  # said macOS has nothing to do.
   engine-macos:
     name: engine (macos)
     needs: [scope, engine-macos-parts]
@@ -232,8 +238,8 @@ jobs:
       - name: Every part passed
         env:
           RESULT: ${{ needs.engine-macos-parts.result }}
-          ENGINE: ${{ needs.scope.outputs.engine }}
-        run: test "${RESULT}" = success || { test "${ENGINE}" = false && test "${RESULT}" = skipped; }
+          MACOS: ${{ needs.scope.outputs.macos }}
+        run: test "${RESULT}" = success || { test "${MACOS}" = false && test "${RESULT}" = skipped; }
 
   # Biome owns formatting and the fast syntactic rules; oxlint owns the ones that need the type
   # checker, which it runs through typescript-go rather than a second copy of the compiler.

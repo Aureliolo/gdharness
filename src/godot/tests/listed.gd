@@ -37,7 +37,8 @@ const ORPHANS_LEFT: String = "gdharness orphans:"
 const ORPHANS_NAMED: int = 8
 ## The flags turning off a report, with the gdUnit4 hook that writes it. A gate reads what a run
 ## prints, and each report finds every case it hears of in the session to write them all out as the
-## run ends, and project_test reads the JUnit one and turns off only the HTML one.
+## run ends. project_test and gdharness test read the JUnit one, for the skip reasons it holds, and
+## turn off only the HTML one.
 const REPORTS_OFF: Dictionary[String, String] = {
 	"--html-report-off": "res://addons/gdUnit4/src/core/hooks/GdUnitHtmlReporterTestSessionHook.gd",
 	"--junit-report-off": "res://addons/gdUnit4/src/core/hooks/GdUnitXMLReporterTestSessionHook.gd",
@@ -84,6 +85,11 @@ const GDUNIT: String = "--gdh-gdunit"
 ## low-processor pause, 6.8 ms measured, which a run of suites awaiting frames spends thousands of
 ## times. Zero makes a frame's delta round to nothing, and a tween then never moves.
 const FRAME_SLEEP_USEC: int = 1000
+## The same on Windows, where a delay of a few milliseconds or less spins its processor instead of
+## sleeping: one engine used 73 to 97 percent of a core at 1000 and 2000, and 133 to 226 ms a second
+## at 4000 and 5000.
+## Measured at 6000: 71 ms a second waiting on a thread, 22 idle, and 300 frames in 1.8 s.
+const WINDOWS_FRAME_SLEEP_USEC: int = 6000
 ## What the engine's shutdown prints as it clears the newest script and the oldest, on an engine
 ## whose walk [GdhShutdownWalk] guards. Kept in step with the server's engine-leaks.ts, which reads
 ## a run printing the first and not the second as a walk that stopped part way.
@@ -215,6 +221,15 @@ func compile_only(given: PackedStringArray) -> void:
 	quit()
 
 
+## How long an engine on [param os_name] sleeps after each frame. A cap on the frame rate, from
+## `--max-fps` or the project's `application/run/max_fps`, sets the frame time itself, so the
+## sleep stays at [constant FRAME_SLEEP_USEC] under one.
+static func frame_sleep_usec(os_name: String, max_fps: int) -> int:
+	if os_name == "Windows" and max_fps <= 0:
+		return WINDOWS_FRAME_SLEEP_USEC
+	return FRAME_SLEEP_USEC
+
+
 ## The runner over the suites [param given] lists, to be added to the tree, which starts it. Shared
 ## by this script and the suites scene of the tests addon, which loads this file from where the
 ## server ships it and calls this, since the addon itself names no gdUnit4 class.
@@ -226,7 +241,7 @@ static func started(
 	var oldest: Array[GDScript] = walk
 	if oldest.is_empty() and GdhShutdownWalk.guarded():
 		oldest = GdhShutdownWalk.marker(WALK_ENDED)
-	OS.low_processor_usage_mode_sleep_usec = FRAME_SLEEP_USEC
+	OS.low_processor_usage_mode_sleep_usec = frame_sleep_usec(OS.get_name(), Engine.max_fps)
 	var at: int = given.find(GDUNIT)
 	var asked: PackedStringArray = given if at < 0 else given.slice(0, at)
 	var unread: PackedStringArray = []
@@ -429,10 +444,16 @@ static func scripts_in(paths: PackedStringArray) -> PackedStringArray:
 	while not pending.is_empty():
 		var directory: String = pending[pending.size() - 1]
 		pending.remove_at(pending.size() - 1)
-		for file: String in DirAccess.get_files_at(directory):
+		# Another engine of the same run can make and remove a folder while a walk is under way.
+		# DirAccess.get_files_at prints an engine error for one that vanished, which a gate counts
+		# against the run, and DirAccess.open answers null for it quietly.
+		var at: DirAccess = DirAccess.open(directory)
+		if at == null:
+			continue
+		for file: String in at.get_files():
 			if file.ends_with(".gd"):
 				var _file: bool = found.append("%s/%s" % [directory, file])
-		for inner: String in DirAccess.get_directories_at(directory):
+		for inner: String in at.get_directories():
 			var _inner: bool = pending.append("%s/%s" % [directory, inner])
 	return found
 
@@ -1054,13 +1075,17 @@ class GdhShutdownWalk:
 		while not pending.is_empty():
 			var directory: String = pending[pending.size() - 1]
 			pending.remove_at(pending.size() - 1)
-			for file: String in DirAccess.get_files_at(directory):
+			# Quietly skips a folder another engine removed mid-walk, as scripts_in does.
+			var at: DirAccess = DirAccess.open(directory)
+			if at == null:
+				continue
+			for file: String in at.get_files():
 				var path: String = directory.path_join(file)
 				if file.ends_with(".gd") and ResourceLoader.has_cached(path):
 					var script: GDScript = ResourceLoader.get_cached_ref(path) as GDScript
 					if script != null:
 						held.append(script)
-			for inner: String in DirAccess.get_directories_at(directory):
+			for inner: String in at.get_directories():
 				if not inner.begins_with("."):
 					var _inner: bool = pending.append(directory.path_join(inner))
 		ThemeDB.set_meta(WALK_HOLD, held)
@@ -1128,10 +1153,14 @@ class GdhReached:
 			if (directory != "res://"
 					and FileAccess.file_exists(directory.path_join("project.godot"))):
 				continue
-			for file: String in DirAccess.get_files_at(directory):
+			# Quietly skips a folder another engine removed mid-walk, as scripts_in does.
+			var at: DirAccess = DirAccess.open(directory)
+			if at == null:
+				continue
+			for file: String in at.get_files():
 				if not file.ends_with(".import") and not file.ends_with(".uid"):
 					var _file_found: bool = found.append(directory.path_join(file))
-			for inner: String in DirAccess.get_directories_at(directory):
+			for inner: String in at.get_directories():
 				if not inner.begins_with("."):
 					var _inner: bool = pending.append(directory.path_join(inner))
 		return found

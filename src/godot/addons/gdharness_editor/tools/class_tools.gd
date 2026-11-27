@@ -49,11 +49,28 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 ## The list of methods afterwards is the evidence rather than an `ok` beside it. A reload that
 ## returned OK and compiled nothing is exactly the failure worth catching, and the members it now
 ## has are the only thing that can tell those apart.
+##
+## [code]scriptPaths[/code] reloads a list in order, answered under [code]reloads[/code] one entry a
+## script. Each folder is listed once for the whole list: a rescan reloads every script declaring a
+## class it brought in, and listing a folder of 800 entries for each of 400 scripts is most of that.
 func reload_script(args: Dictionary) -> Dictionary:
-	var asked: String = str(args.get("scriptPath", ""))
+	var listed: Variant = args.get("scriptPaths")
+	if not listed is Array:
+		return _reload(str(args.get("scriptPath", "")), {})
+	var paths: Array = listed
+	var listings: Dictionary = {}
+	var reloads: Array[Dictionary] = []
+	for entry: Variant in paths:
+		reloads.append(_reload(str(entry), listings))
+	return { "ok": true, "reloads": reloads }
+
+
+## Reloads the script at [param asked], finding its spelling on disk through [param listings], the
+## folders already listed.
+func _reload(asked: String, listings: Dictionary) -> Dictionary:
 	if asked.is_empty():
 		return { "ok": false, "error": "scriptPath is required" }
-	var path: String = _spelled_as_on_disk(asked, {})
+	var path: String = _spelled_as_on_disk(asked, listings)
 	if not ResourceLoader.exists(path):
 		return { "ok": false, "error": "No script at " + path }
 
@@ -101,9 +118,13 @@ func reload_script(args: Dictionary) -> Dictionary:
 	# parse, such as a file open in an editor's language server. Compiling once with a line more
 	# makes the texts differ, which drops that parse and those of the scripts that resolved through
 	# it. The file's own text is compiled below.
-	script.source_code = text + "\n"
+	#
+	# Through the setter rather than the property: in the editor, a property assigned from a script
+	# marks the resource changed, and the next scene save writes the editor's copy back over the
+	# file, over any edit made to the file since.
+	script.set_source_code(text + "\n")
 	var _dropped: Error = script.reload(true)
-	script.source_code = text
+	script.set_source_code(text)
 
 	# A reload that fails is still answered as a call that ran, because the readings are what a
 	# caller needs then: a failure travels back as its message alone, and a project met one and
@@ -124,7 +145,7 @@ func reload_script(args: Dictionary) -> Dictionary:
 		"heldConstantsBefore": held_constants,
 	}
 	if failed != OK:
-		script.source_code = previous
+		script.set_source_code(previous)
 		var restored: Error = script.reload(true)
 		answer["restored"] = restored == OK
 		if restored != OK:

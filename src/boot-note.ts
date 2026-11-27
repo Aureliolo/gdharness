@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { ANNOUNCE_BUDGET_MS } from './runtime-client.js';
 import { asParams } from './tool-args.js';
-import { readWhole, writeWhole } from './whole-file.js';
+import { readWhole, readWholeAsync, writeWhole } from './whole-file.js';
 
 /**
  * How long the last games of a project took to announce, noted where the bridge file is: in the
@@ -43,6 +43,14 @@ function readScenes(projectPath: string): Record<string, unknown> {
   }
 }
 
+async function readScenesAsync(projectPath: string): Promise<Record<string, unknown>> {
+  try {
+    return scenesIn(await readWholeAsync(bootNotePath(projectPath)));
+  } catch {
+    return {};
+  }
+}
+
 /**
  * How many of a scene's boots are kept. A boot moves with what else the machine is doing: one
  * downstream menu announced at 11.6 s on a quiet machine and at 20.1 s beside its own balance
@@ -63,7 +71,15 @@ function bootsOf(scenes: Record<string, unknown>, scene: string): number[] {
  * start, or null when none has.
  */
 export function readBootNote(projectPath: string, scene: string): number | null {
-  const boots = bootsOf(readScenes(projectPath), scene);
+  return slowestOf(bootsOf(readScenes(projectPath), scene));
+}
+
+/** {@link readBootNote} for a caller on the event loop. */
+export async function readBootNoteAsync(projectPath: string, scene: string): Promise<number | null> {
+  return slowestOf(bootsOf(await readScenesAsync(projectPath), scene));
+}
+
+function slowestOf(boots: readonly number[]): number | null {
   return boots.length === 0 ? null : Math.max(...boots);
 }
 

@@ -3,10 +3,31 @@
   // `lint:dead` runs this with KNIP_DISABLE_RAW_TRANSFER=1. knip parses through oxc-parser, whose
   // raw transfer reserves a 6 GiB buffer per CPU core it parses on; Linux never commits those
   // pages, Windows does, and on a 32-core machine the reservation fails outright.
-  // keep-cache.ts is started as a process by the fuzz properties, so nothing imports it.
-  "entry": ["src/cli.ts", "scripts/*.ts", "test/*.ts", "test/support/keep-cache.ts"],
+  // helper-lost-owner.ts, helper-owner.ts, inflight-owner.ts, keep-cache.ts, keep-rounds.ts, kept-launcher.ts, memory-engine.ts,
+  // nested-job.ts, run-engine-and-leave.ts, run-engine-once.ts and
+  // stopped-engine.ts are started as processes by the fuzz properties and regressions, so nothing
+  // imports them.
+  "entry": [
+    "src/cli.ts",
+    "scripts/*.ts",
+    "test/*.ts",
+    "test/support/helper-owner.ts",
+    "test/support/helper-lost-owner.ts",
+    "test/support/inflight-owner.ts",
+    "test/support/keep-cache.ts",
+    "test/support/keep-rounds.ts",
+    "test/support/kept-launcher.ts",
+    "test/support/memory-engine.ts",
+    "test/support/nested-job.ts",
+    "test/support/run-engine-and-leave.ts",
+    "test/support/run-engine-once.ts",
+    "test/support/stopped-engine.ts"
+  ],
   "project": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"],
   // uv is no npm package. It comes from `.github/actions/install-uv` in CI and from the setup in
   // CONTRIBUTING.md elsewhere, and its tools are pinned in uv.lock.
-  "ignoreBinaries": ["uv"]
+  "ignoreBinaries": ["uv"],
+  // fs-native-extensions is read as files: the build copies its prebuilt addons beside the bundle,
+  // and no source imports it.
+  "ignoreDependencies": ["fs-native-extensions"]
 }

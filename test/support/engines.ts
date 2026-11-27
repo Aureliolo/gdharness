@@ -2,6 +2,7 @@ import { isAbsolute } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from '../../src/alive.js';
+import { processTree, whyTheProcessTreeFailed } from '../../src/process-children.js';
 import { type SpawnSyncReturns, spawnSyncHidden } from '../../src/spawn.js';
 
 /** One engine ended because it was still holding a fixture's directory, and the directory it held. */
@@ -26,19 +27,19 @@ export async function endEnginesUnder(...given: string[]): Promise<EndedEngine[]
   if (paths.length === 0) {
     return [];
   }
-  const listing = listProcesses();
+  const listed = await listProcesses();
 
   // A listing that did not happen is the failure this had for months, and it looks exactly like a
   // machine with nothing to clean up. Said out loud, because the cost of it lands on the next run
   // and on whoever is using the machine, not on this one.
-  if (listing.status !== 0 || listing.stdout.trim() === '') {
+  if ('failed' in listed || listed.listing.trim() === '') {
     console.warn(
-      `could not list processes to clean up engines under ${paths.join(', ')}: ${listing.status ?? listing.error?.message ?? 'no output'}`,
+      `could not list processes to clean up engines under ${paths.join(', ')}: ${'failed' in listed ? listed.failed : 'no output'}`,
     );
     return [];
   }
 
-  const ended = endListed(listing.stdout, paths);
+  const ended = endListed(listed.listing, paths);
 
   // Waited for, because a signal is not an exit, and an engine on its way out still holds the files
   // and the ports it had: the next fixture reserves a port, is handed that number because nothing
@@ -55,13 +56,69 @@ export async function endEnginesUnder(...given: string[]): Promise<EndedEngine[]
 }
 
 /**
+ * Waits up to [param withinMs] for every process whose command line names [param path] to have
+ * exited, and answers whether none is left. Ends nothing.
+ *
+ * For a fixture whose server has stopped and whose editor has gone: the keeper that held the editor
+ * and the helper that started it end themselves a moment later, and a listing taken in that moment
+ * reads them as an engine the fixture left running. An entry the table still lists for a process
+ * that has exited, which a handle on it keeps, is not running.
+ */
+export async function untilNothingRunsUnder(path: string, withinMs: number): Promise<boolean> {
+  const spelled = spelledForMatching(path);
+  const deadline = Date.now() + withinMs;
+  for (;;) {
+    const tree = await processTree();
+    const running =
+      tree === undefined
+        ? []
+        : [...tree].filter(
+            ([pid, { command }]) =>
+              pid !== process.pid && names(spelledForMatching(command), spelled) && alive(pid),
+          );
+    if (running.length === 0) {
+      return true;
+    }
+    if (Date.now() >= deadline) {
+      return false;
+    }
+    await delay(100);
+  }
+}
+
+/**
  * Every process, matched on its command line alone. Filtering by `Name='godot.exe'` first meant
  * this found nothing at all wherever the engine is not called that, which is every machine using
  * the pinned build: it is `Godot_v4.7.2-stable_win64.exe` on Windows. Nineteen fixture projects
  * and eleven engines were left running on this machine before anybody looked. The path is the
  * discriminator anyway, and a name filter can only subtract from that.
+ *
+ * Read from the server's own process table, which this process asks through the one PowerShell it
+ * keeps. A PowerShell of its own per listing cost half a second of processor time each, and a run
+ * lists after every fixture that leaves a directory behind. Where the table cannot be read, a
+ * listing of its own is taken instead, since a cleanup that sees nothing ends nothing.
  */
-function listProcesses(): SpawnSyncReturns<string> {
+async function listProcesses(): Promise<{ listing: string } | { failed: string }> {
+  const tree = await processTree();
+  if (tree !== undefined) {
+    return { listing: [...tree].map(([pid, { command }]) => `${String(pid)} ${command}`).join('\n') };
+  }
+  if (!saidTheTableFailed) {
+    saidTheTableFailed = true;
+    console.warn(
+      `the process table could not be read, so cleanup lists processes on its own: ${whyTheProcessTreeFailed() ?? 'no answer'}`,
+    );
+  }
+  const own = ownListing();
+  return own.status === 0
+    ? { listing: own.stdout }
+    : { failed: String(own.status ?? own.error?.message ?? 'no output') };
+}
+
+/** Whether a cleanup has said that it lists processes on its own, which it says once a run. */
+let saidTheTableFailed = false;
+
+function ownListing(): SpawnSyncReturns<string> {
   return process.platform === 'win32'
     ? spawnSyncHidden(
         'powershell',

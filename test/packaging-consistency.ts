@@ -6,6 +6,8 @@ import { chmod, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import pkg from '../package.json' with { type: 'json' };
+import { sharedCopies } from '../scripts/sync-shared-gd.js';
+import { ADDON_FILE, PREBUILDS_FOLDER, PREBUILT_PLATFORMS } from '../src/os-lock.js';
 import { spawnSyncHidden } from '../src/spawn.js';
 import { asObject, get } from './support/json.js';
 
@@ -110,6 +112,8 @@ for (const requiredFile of [
   'package/package.json',
   'package/build/cli.js',
   'package/build/keeper.js',
+  `package/build/${PREBUILDS_FOLDER}/LICENSE`,
+  ...PREBUILT_PLATFORMS.map((platform) => `package/build/${PREBUILDS_FOLDER}/${platform}/${ADDON_FILE}`),
   ...operationsModules.map((module) => `package/build/godot/operations/${module}`),
   'package/build/godot/addons/auto_reload/plugin.cfg',
   'package/build/godot/addons/gdharness_editor/plugin.cfg',
@@ -144,6 +148,14 @@ for (const script of addonScripts) {
     packedFiles.has(`package/build/godot/${script}`),
     `release archive should include the addon script ${script}`,
   );
+}
+
+// The walk above reads the source tree, which cannot tell a tree without the helper copies from an
+// archive without them, so each copy and its identity is asked for by name.
+for (const { copy } of sharedCopies()) {
+  const packed = `package/build/${copy.replaceAll('\\', '/').replace(/^src\//, '')}`;
+  assert.ok(packedFiles.has(packed), `release archive should include the helper copy ${packed}`);
+  assert.ok(packedFiles.has(`${packed}.uid`), `release archive should include ${packed}.uid`);
 }
 
 // A module added to the source directory and left out of the list above would otherwise be

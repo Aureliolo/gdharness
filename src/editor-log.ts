@@ -41,6 +41,53 @@ export function editorLogPath(projectPath: string): string {
   return join(projectPath, '.godot', 'gdharness-editor.log');
 }
 
+/**
+ * Where the desktop helper of a hidden editor writes what it says of the editor's games: the box
+ * it ended one on, which the editor's own console never holds.
+ */
+export function editorHelperOutputPath(projectPath: string): string {
+  return join(projectPath, '.godot', 'gdharness-editor-helper.log');
+}
+
+/** Where the keeper of the editor of [param projectPath] writes how that editor exited. */
+export function editorExitPath(projectPath: string): string {
+  return join(projectPath, '.godot', 'gdharness-editor-exit');
+}
+
+/** How many bytes of the helper's output are read for a verdict, from the end. */
+const HELPER_OUTPUT_READ_BYTES = 256 * 1024;
+
+/** How long the helper's output is now, which a play reads from so an earlier game's box is not its own. */
+export function editorHelperOutputSize(projectPath: string): number {
+  try {
+    return statSync(editorHelperOutputPath(projectPath)).size;
+  } catch {
+    return 0;
+  }
+}
+
+/** What the helper of a hidden editor wrote from byte [param from] on, as log entries. */
+export function editorHelperEntries(projectPath: string, from: number): readonly LogEntry[] {
+  const log = new GameLog();
+  try {
+    const path = editorHelperOutputPath(projectPath);
+    const size = statSync(path).size;
+    const start = Math.max(from, size - HELPER_OUTPUT_READ_BYTES);
+    const bytes = Buffer.alloc(Math.max(0, size - start));
+    const fd = openSync(path, 'r');
+    try {
+      readSync(fd, bytes, 0, bytes.length, start);
+    } finally {
+      closeSync(fd);
+    }
+    log.append('stdout', bytes);
+    log.finish();
+  } catch {
+    // No helper output, so nothing was ended.
+  }
+  return log.all;
+}
+
 /** Where the server records which editor that log belongs to. */
 function editorLogNotePath(projectPath: string): string {
   return join(projectPath, '.godot', 'gdharness-editor.json');
@@ -89,6 +136,8 @@ export function clearEditorLog(projectPath: string): void {
     const path = editorLogPath(projectPath);
     mkdirSync(dirname(path), { recursive: true });
     rmSync(path, { force: true });
+    rmSync(editorHelperOutputPath(projectPath), { force: true });
+    rmSync(editorExitPath(projectPath), { force: true });
     rmSync(editorLogNotePath(projectPath), { force: true });
   } catch {
     // A project that cannot be written into gets the refusal for an uncaptured console, which is

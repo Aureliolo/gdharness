@@ -38,6 +38,7 @@ import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
+import { syncSharedGdscript } from '../scripts/sync-shared-gd.js';
 import { alive } from '../src/alive.js';
 import { readBreakpointNote } from '../src/breakpoint-note.js';
 import { GodotDAPClient } from '../src/dap_client.js';
@@ -55,7 +56,7 @@ import { type JsonRpcMessage, parseTextContent, textOf } from './support/json-rp
 import { pixelPng, solidPng } from './support/png.js';
 import { reservePort, ServerProcess } from './support/server.js';
 import { sweep } from './support/sweep.js';
-import { sampleThread } from './support/thread-samples.js';
+import { NO_STACKS, sampleThread } from './support/thread-samples.js';
 
 /** Long enough for a cold editor to finish its first filesystem scan on a slow runner. */
 const CONNECT_TIMEOUT_MS = 120_000;
@@ -1378,6 +1379,15 @@ function fileText(project: string, name: string): string {
   return readFileSync(join(project, name), 'utf8');
 }
 
+const noStall = async (): Promise<void> => {
+  await Promise.resolve();
+};
+/**
+ * Takes the account of the editor's main thread the first time the running editor leaves a call
+ * or the fixture hook unanswered, set by withEditor for the editor it started.
+ */
+let noteStall = noStall;
+
 /**
  * Has the fixture hook in the editor act as a person at the editor would, and waits for what it
  * says the editor holds afterwards. The answer can be read part-written, so a parse that fails is
@@ -1417,6 +1427,7 @@ async function hook(project: string, request: Record<string, unknown>): Promise<
     }
     await delay(100);
   }
+  await noteStall();
   throw new Error(`the fixture hook never answered ${JSON.stringify(request)}`);
 }
 
@@ -1489,8 +1500,23 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   };
   const server = new ServerProcess({ env: serverEnv });
 
-  const invoke = async (name: string, args: Record<string, unknown>) =>
-    await server.request('tools/call', { name, arguments: args }, TOOL_TIMEOUT_MS);
+  // No case expects the editor to leave a call unanswered, so the first time it does is the stall
+  // a failing case is about, and the editor's threads are read while it is still going on.
+  const invoke = async (name: string, args: Record<string, unknown>) => {
+    const response = await server
+      .request('tools/call', { name, arguments: args }, TOOL_TIMEOUT_MS)
+      .catch(async (error: unknown) => {
+        await noteStall();
+        throw error;
+      });
+    if (
+      get(response, 'result', 'isError') === true &&
+      (textOf(response) ?? '').includes('did not answer within')
+    ) {
+      await noteStall();
+    }
+    return response;
+  };
 
   // A refusal comes back as a sentence rather than as JSON, so it is reported as the sentence
   // the server wrote instead of as a parse failure several frames from the call that caused it.
@@ -1583,11 +1609,17 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   editor.stdout?.on('data', (chunk: Buffer) => engineOutput.push(chunk.toString()));
   editor.stderr?.on('data', (chunk: Buffer) => engineOutput.push(chunk.toString()));
   const thread = sampleThread(editor.pid);
+  let atStall: string | null = null;
+  noteStall = async () => {
+    atStall ??= await thread.account();
+  };
 
   try {
     await server.initialize('editor-fixture');
 
-    await waitForTheBridge({ editor, engineOutput, invoke });
+    await timedCase('the editor start', async () => {
+      await waitForTheBridge({ editor, engineOutput, invoke });
+    });
 
     const printed = (): string => engineOutput.join('');
     await body({
@@ -1604,13 +1636,18 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
       serverEnv,
     });
     // A /proc that stopped answering would leave every later failure without its samples, unseen.
-    if (process.platform === 'linux') {
-      assert.notEqual(thread.account(), '', "the editor's main thread was sampled from /proc");
+    if (process.platform === 'linux' || process.platform === 'win32') {
+      const account = await thread.account();
+      assert.ok(
+        account !== '' && !account.startsWith(NO_STACKS),
+        `the editor's main thread was sampled: ${account}`,
+      );
     }
   } catch (failure) {
-    throw editorFailure(failure, { editor, engineOutput, thread, server });
+    throw await editorFailure(failure, { editor, engineOutput, thread, server, atStall });
   } finally {
-    thread.stop();
+    noteStall = noStall;
+    await thread.stop();
     // The game first: it is the editor's child and outlives it, so a run that failed part way
     // through would otherwise leave an engine behind holding the fixture project.
     await invoke('editor_run', { op: 'stop' }).catch(() => undefined);
@@ -1655,16 +1692,17 @@ async function waitForTheBridge(running: {
 }
 
 /** The error for a case that failed in [param failure], carrying what the editor and server said. */
-function editorFailure(
+async function editorFailure(
   failure: unknown,
   running: {
     editor: ChildProcess;
     engineOutput: string[];
     thread: ReturnType<typeof sampleThread>;
     server: ServerProcess;
+    atStall: string | null;
   },
-): Error {
-  const { editor, engineOutput, thread, server } = running;
+): Promise<Error> {
+  const { editor, engineOutput, thread, server, atStall } = running;
   // What the engine said on its way to failing, which is the half of the evidence a tool
   // answer does not carry: a fixture that reports only its own assertion sends whoever reads
   // the run back to guessing about an editor that is no longer there to ask.
@@ -1678,9 +1716,15 @@ function editorFailure(
       : `gone (exit ${editor.exitCode ?? 'none'}, signal ${editor.signalCode ?? 'none'})`;
   // The tail rather than the whole: a tier's log runs to thousands of lines, and the case that
   // failed is the last thing in it.
-  const sampled = thread.account();
+  const sampled = await thread.account();
+  // Taken when a call first went unanswered, because the case's own clean-up waits on the editor
+  // too, and a stall can be over by the time the failure gets here.
+  const stalled =
+    atStall === null || atStall === ''
+      ? ''
+      : `\n\nThe editor's main thread up to when it first did not answer:\n${atStall}`;
   return new Error(
-    `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}${sampled === '' ? '' : `\n\nThe editor's main thread, sampled every quarter second:\n${sampled}`}`,
+    `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}${stalled}${sampled === '' ? '' : `\n\nThe editor's main thread, sampled every quarter second:\n${sampled}`}`,
     { cause: failure },
   );
 }
@@ -2636,6 +2680,90 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
 }
 
 /**
+ * A script the editor holds and a rescan reloads is left saved, and so is the addon's own code. Each
+ * was left marked as changed in the editor, so its next scene save wrote the editor's copy of every
+ * one back to disk: over an edit made to the file outside the editor since, and 412 scripts long in
+ * this suite, which held the save for ten seconds on Windows.
+ */
+async function testAReloadedScriptIsNotWrittenBackByTheNextSave({ call, project }: Editor): Promise<void> {
+  const script = join(project, 'resaved', 'held.gd');
+  const addon = join(project, 'addons', 'gdharness_editor', 'scene_file.gd');
+  mkdirSync(join(project, 'resaved'), { recursive: true });
+  writeFileSync(script, 'extends Node2D\n\nfunc ring() -> int:\n\treturn 1\n');
+  writeFileSync(
+    join(project, 'resaved', 'held.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://resaved/held.gd" id="1_held"]\n\n' +
+      '[node name="Held" type="Node2D"]\nscript = ExtResource("1_held")\n',
+  );
+  try {
+    await call('editor_rescan', { projectPath: project });
+    // Open, so the editor holds the script the reload goes through.
+    await hook(project, { op: 'open', path: 'res://resaved/held.tscn' });
+    const reloaded = await call('editor_rescan', {
+      projectPath: project,
+      reloadScript: 'res://resaved/held.gd',
+    });
+    assert.equal(get(reloaded, 'reloadProblem'), undefined, text(reloaded));
+
+    const edited = 'extends Node2D\n\nfunc ring() -> int:\n\treturn 2\n';
+    writeFileSync(script, edited);
+    const addonWritten = statSync(addon).mtimeMs;
+    await call('scene_create', { projectPath: project, scenePath: 'res://resaved/held.tscn', op: 'save' });
+    assert.equal(
+      fileText(project, 'resaved/held.gd'),
+      edited,
+      'the save kept the edit made outside the editor',
+    );
+    assert.equal(statSync(addon).mtimeMs, addonWritten, "the save left the addon's own script alone");
+
+    // A reload that fails puts the text the script was built from back in the editor.
+    writeFileSync(script, 'extends Node2D\n\nfunc ring( -> int:\n\treturn 3\n');
+    const broken = await call('editor_rescan', {
+      projectPath: project,
+      reloadScript: 'res://resaved/held.gd',
+    });
+    assert.notEqual(get(broken, 'reloadProblem'), undefined, text(broken));
+    const mended = 'extends Node2D\n\nfunc ring() -> int:\n\treturn 3\n';
+    writeFileSync(script, mended);
+    await call('scene_create', { projectPath: project, scenePath: 'res://resaved/held.tscn', op: 'save' });
+    assert.equal(
+      fileText(project, 'resaved/held.gd'),
+      mended,
+      'the save kept the edit made outside the editor after a failed reload',
+    );
+
+    // A write that keeps a connection the engine cannot make answers with a note, which the call
+    // hands back and empties.
+    writeFileSync(
+      join(project, 'resaved', 'quitting.tscn'),
+      '[gd_scene format=3]\n\n[node name="Menu" type="Control"]\n\n[node name="Quit" type="Button" parent="."]\n\n' +
+        // Binds to a method the root lacks, which the engine refuses to make as the scene loads.
+        '[connection signal="pressed" from="Quit" to="." method="_on_quit" binds= [3]]\n',
+    );
+    await call('editor_rescan', { projectPath: project });
+    const relabelled = await call('scene_node', {
+      projectPath: project,
+      op: 'set',
+      scenePath: 'res://resaved/quitting.tscn',
+      nodePath: 'Quit',
+      properties: { text: 'Quit' },
+    });
+    assert.equal(typeof get(relabelled, 'unmadeConnections'), 'string', text(relabelled));
+    const afterNote = statSync(addon).mtimeMs;
+    await call('scene_create', { projectPath: project, scenePath: 'res://resaved/held.tscn', op: 'save' });
+    assert.equal(
+      statSync(addon).mtimeMs,
+      afterNote,
+      "the save after a note left the addon's own script alone",
+    );
+  } finally {
+    await hook(project, { op: 'open', path: 'res://main.tscn' });
+    rmSync(join(project, 'resaved'), { recursive: true, force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
+/**
  * An unset through the editor drops a built-in ShaderMaterial's parameter line, the null one and
  * one at a value, as the inspector's revert arrow does. The editor's renderer runs headless here
  * and gives a parameter it was never given null, which its save wrote as a line.
@@ -2683,6 +2811,90 @@ async function testAShaderParameterIsUnsetInTheEditor({ call, refusal, project }
     rmSync(join(project, 'unset'), { recursive: true, force: true });
     await call('editor_rescan', { projectPath: project });
   }
+}
+
+/** The include text that defines `lit()`, which the shader of these cases calls. */
+const INCLUDE_WITH_LIT = 'float lit() { return 1.0; }\n';
+/** The include text that does not. */
+const INCLUDE_WITHOUT_LIT = 'float other() { return 1.0; }\n';
+
+/**
+ * Opens a scene whose material uses a shader that calls `lit()` and includes a file holding
+ * [param firstInclude], then hands [param body] a read of the shader and a way to rewrite the
+ * include. The scene stays open, so the editor holds the include as it was when it opened.
+ */
+async function withAShaderIncludeHeldByTheEditor(
+  { call, project }: Editor,
+  firstInclude: string,
+  body: (read: () => Promise<unknown>, writeInclude: (code: string) => void) => Promise<void>,
+): Promise<void> {
+  mkdirSync(join(project, 'inc'), { recursive: true });
+  const shader = join(project, 'inc', 'a.gdshader');
+  const include = join(project, 'inc', 'lib.gdshaderinc');
+  writeFileSync(
+    shader,
+    'shader_type canvas_item;\n#include "res://inc/lib.gdshaderinc"\n\nvoid fragment() {\n\tCOLOR = vec4(lit());\n}\n',
+  );
+  writeFileSync(include, firstInclude);
+  // A scene open in a tab, whose material uses the shader, keeps the include alive in the editor,
+  // which is what leaves a stale copy of it in the resource cache.
+  writeFileSync(
+    join(project, 'inc', 'holder.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="Shader" path="res://inc/a.gdshader" id="1_shader"]\n\n' +
+      '[sub_resource type="ShaderMaterial" id="ShaderMaterial_1"]\nshader = ExtResource("1_shader")\n\n' +
+      '[node name="Holder" type="Sprite2D"]\nmaterial = SubResource("ShaderMaterial_1")\n',
+  );
+  const read = async (): Promise<unknown> =>
+    await call('resource_edit', { projectPath: project, op: 'read', resourcePath: 'res://inc/a.gdshader' });
+  try {
+    await call('editor_rescan', { projectPath: project });
+    await hook(project, { op: 'open', path: 'res://inc/holder.tscn' });
+    await body(read, (code) => {
+      writeFileSync(include, code);
+    });
+  } finally {
+    rmSync(join(project, 'inc'), { recursive: true, force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
+/** The messages of a shader read's compile errors. */
+function compileMessagesOf(answer: unknown): string[] {
+  return asArray(get(answer, 'compileErrors') ?? []).map((error) => String(get(error, 'message')));
+}
+
+/**
+ * A shader read by an editor that has the include open compiles against the include as the file
+ * is now. A function the include gains makes the next read compile, with no restart.
+ */
+async function testAShaderReadSeesAGainedIncludeFunctionInTheEditor(editor: Editor): Promise<void> {
+  await withAShaderIncludeHeldByTheEditor(editor, INCLUDE_WITHOUT_LIT, async (read, writeInclude) => {
+    const missing = await read();
+    assert.deepEqual(
+      [get(missing, 'readBy'), get(missing, 'compiles')],
+      ['the editor', false],
+      text(missing),
+    );
+    assert.match(compileMessagesOf(missing).join('\n'), /No matching function found for: 'lit'/);
+    writeInclude(INCLUDE_WITH_LIT);
+    const gained = await read();
+    assert.deepEqual([get(gained, 'compiles'), compileMessagesOf(gained)], [true, []], text(gained));
+  });
+}
+
+/**
+ * The same, for a function the include loses: the next read fails with the engine's message naming
+ * it.
+ */
+async function testAShaderReadSeesALostIncludeFunctionInTheEditor(editor: Editor): Promise<void> {
+  await withAShaderIncludeHeldByTheEditor(editor, INCLUDE_WITH_LIT, async (read, writeInclude) => {
+    const present = await read();
+    assert.deepEqual([get(present, 'compiles'), compileMessagesOf(present)], [true, []], text(present));
+    writeInclude(INCLUDE_WITHOUT_LIT);
+    const lost = await read();
+    assert.equal(get(lost, 'compiles'), false, text(lost));
+    assert.match(compileMessagesOf(lost).join('\n'), /No matching function found for: 'lit'/);
+  });
 }
 
 /**
@@ -3021,6 +3233,19 @@ async function testResources({ call, refusal, project }: Editor): Promise<void> 
     await refusal('resource_edit', { ...theme, op: 'read', properties: {} }),
     /resource_edit read does not take properties/,
   );
+
+  // A type variation's base is set through modify, and the file holds it as the engine writes it.
+  const varied = { projectPath: project, resourcePath: 'res://theme_variation.tres' };
+  await call('resource_edit', { ...varied, op: 'create', resourceType: 'Theme' });
+  await call('resource_edit', {
+    ...varied,
+    op: 'modify',
+    properties: { 'NewType/base_type': 'PanelContainer' },
+  });
+  assert.match(fileText(project, 'theme_variation.tres'), /^NewType\/base_type = &"PanelContainer"$/m);
+  assert.deepEqual(get(await call('resource_edit', { ...varied, op: 'read' }), 'properties'), {
+    'NewType/base_type': 'PanelContainer',
+  });
 }
 
 /**
@@ -3075,6 +3300,70 @@ async function testABuiltInResourceIsReadWithWhatItHolds({ call, project }: Edit
     `the resource is read with what it holds, and no _init ran for its defaults: ${JSON.stringify(tally)}`,
   );
   await call('scene_node', { ...scene, op: 'delete', nodePath: 'Tallied' });
+}
+
+/**
+ * A theme variation's base the engine refuses is refused with the engine's own reason, as a headless
+ * engine gives it, and an empty one names only the steps that take a base out of what was written.
+ */
+async function testAThemeBaseTheEngineRefusesIsRefusedWithItsReasonInTheEditor({
+  call,
+  refusal,
+  project,
+}: Editor): Promise<void> {
+  const themed = { projectPath: project, resourcePath: 'res://theme_refused.tres' };
+  const modify = (properties: Record<string, unknown>) => ({ ...themed, op: 'modify', properties });
+  await call('resource_edit', { ...themed, op: 'create', resourceType: 'Theme' });
+  const empty = fileText(project, 'theme_refused.tres');
+  assert.equal(
+    await refusal('resource_edit', modify({ 'NewType/base_type': 'Panel Container' })),
+    `The editor answered resource_edit modify with an error: Theme.NewType/base_type was given "Panel Container" and holds "" after it was set: the engine changed or refused the value, so nothing was written. The engine said: Invalid type name: 'Panel Container'.`,
+  );
+  assert.equal(fileText(project, 'theme_refused.tres'), empty);
+  const emptyRefused = (holder: string, property: string, held: string, steps: string): string =>
+    `The editor answered ${holder === 'Theme' ? 'resource_edit modify' : 'scene_node set'} with an error: ${holder}.${property} was given "" and holds ${held} after it was set: the engine takes no empty base. ${steps}Nothing was written. The engine said: An empty theme type cannot be the base type of a variation. Use clear_type_variation() instead if you want to unmark 'NewType' as a variation.`;
+  assert.equal(
+    await refusal('resource_edit', modify({ 'NewType/base_type': '' })),
+    emptyRefused('Theme', 'NewType/base_type', '""', 'No base is held, so there is none to take out. '),
+  );
+  assert.equal(fileText(project, 'theme_refused.tres'), empty);
+
+  await call('resource_edit', modify({ 'NewType/base_type': 'PanelContainer' }));
+  const held = fileText(project, 'theme_refused.tres');
+  assert.equal(
+    await refusal('resource_edit', modify({ 'NewType/base_type': '' })),
+    emptyRefused(
+      'Theme',
+      'NewType/base_type',
+      '"PanelContainer"',
+      'unset takes a base out, and remove_theme_item without item takes it out with its type. ',
+    ),
+  );
+  assert.equal(fileText(project, 'theme_refused.tres'), held);
+  // Each step it names, as written, takes the base out.
+  await call('resource_edit', { ...themed, op: 'modify', unset: ['NewType/base_type'] });
+  assert.doesNotMatch(fileText(project, 'theme_refused.tres'), /base_type/);
+  await call('resource_edit', modify({ 'NewType/base_type': 'PanelContainer' }));
+  await call('resource_edit', { ...themed, op: 'remove_theme_item', controlType: 'NewType' });
+  assert.doesNotMatch(fileText(project, 'theme_refused.tres'), /base_type/);
+
+  // Through a Control's built-in Theme, which remove_theme_item cannot reach.
+  writeFileSync(
+    join(project, 'theme_holder.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[sub_resource type="Theme" id="Theme_1"]\nNewType/base_type = &"PanelContainer"\nNewType/constants/margin = 4\n\n[node name="Root" type="Control"]\ntheme = SubResource("Theme_1")\n',
+  );
+  await call('editor_rescan', { projectPath: project });
+  const scene = { projectPath: project, scenePath: 'res://theme_holder.tscn', op: 'set', nodePath: '.' };
+  const holding = fileText(project, 'theme_holder.tscn');
+  assert.equal(
+    await refusal('scene_node', { ...scene, properties: { 'theme/NewType/base_type': '' } }),
+    emptyRefused('Control', 'theme/NewType/base_type', '"PanelContainer"', 'unset takes a base out. '),
+  );
+  assert.equal(fileText(project, 'theme_holder.tscn'), holding);
+  await call('scene_node', { ...scene, unset: ['theme/NewType/base_type'] });
+  const unset = fileText(project, 'theme_holder.tscn');
+  assert.doesNotMatch(unset, /base_type/, unset);
+  assert.match(unset, /^NewType\/constants\/margin = 4$/m, unset);
 }
 
 async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise<void> {
@@ -4145,7 +4434,10 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
   assert.doesNotMatch(fileText(project, 'moves/library.tres'), /&"stroll"/);
   assert.match(fileText(project, 'moves/library.tres'), /&"idle"/, 'and the rest of the library stays');
 
-  assert.match(await refusal('scene_animation', track([{ value: [1, 2] }])), /keyframes\[0\] has no time/);
+  assert.match(
+    await refusal('scene_animation', track([{ value: [1, 2] }])),
+    /^scene_animation takes track\.keyframes\[0\] with its time, which is missing\./,
+  );
   assert.match(await refusal('scene_animation', track([], 'colour')), /Sprite2D has no property colour/);
   assert.match(
     await refusal('scene_animation', {
@@ -9446,7 +9738,15 @@ async function testAnEvaluateNamesAGlobalClassThatDoesNotParse({
   }
 }
 
+/** Runs [param run] and says how long it took, so a leg nearing its limit shows which cases grew. */
+async function timedCase(name: string, run: () => Promise<void>): Promise<void> {
+  const began = performance.now();
+  await run();
+  console.log(`${name} took ${((performance.now() - began) / 1000).toFixed(1)}s`);
+}
+
 async function main(): Promise<void> {
+  syncSharedGdscript();
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     if (process.env['GDHARNESS_REQUIRE_GODOT'] === '1') {
@@ -9476,6 +9776,10 @@ async function main(): Promise<void> {
     ['testSceneAnimation', testSceneAnimation],
     ['testResources', testResources],
     ['testABuiltInResourceIsReadWithWhatItHolds', testABuiltInResourceIsReadWithWhatItHolds],
+    [
+      'testAThemeBaseTheEngineRefusesIsRefusedWithItsReasonInTheEditor',
+      testAThemeBaseTheEngineRefusesIsRefusedWithItsReasonInTheEditor,
+    ],
     ['testResourcesOnNodes', testResourcesOnNodes],
     ['testAWriteKeepsWhatTheSceneComesFrom', testAWriteKeepsWhatTheSceneComesFrom],
     ['testAHeldSceneIsWrittenFromItsFile', testAHeldSceneIsWrittenFromItsFile],
@@ -9516,7 +9820,16 @@ async function main(): Promise<void> {
     ['testAMethodScriptEditAddsIsSeenByTheEditor', testAMethodScriptEditAddsIsSeenByTheEditor],
     ['testAScenesInstancedAndPlaced', testAScenesInstancedAndPlaced],
     ['testASceneKeepsItsOwnValuesInTheEditor', testASceneKeepsItsOwnValuesInTheEditor],
+    ['testAReloadedScriptIsNotWrittenBackByTheNextSave', testAReloadedScriptIsNotWrittenBackByTheNextSave],
     ['testAShaderParameterIsUnsetInTheEditor', testAShaderParameterIsUnsetInTheEditor],
+    [
+      'testAShaderReadSeesAGainedIncludeFunctionInTheEditor',
+      testAShaderReadSeesAGainedIncludeFunctionInTheEditor,
+    ],
+    [
+      'testAShaderReadSeesALostIncludeFunctionInTheEditor',
+      testAShaderReadSeesALostIncludeFunctionInTheEditor,
+    ],
     ['testAMovedNodeKeepsItsPathsInTheEditor', testAMovedNodeKeepsItsPathsInTheEditor],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
     [
@@ -9574,14 +9887,18 @@ async function main(): Promise<void> {
 
   if (chosen.length > 0) {
     await withEditor(godotPath, async (editor) => {
-      for (const [, run] of chosen) {
-        await run(editor);
+      for (const [name, run] of chosen) {
+        await timedCase(name, async () => {
+          await run(editor);
+        });
       }
     });
   }
   // After the shared pair has been taken down, so only one editor is up at a time.
-  for (const [, run] of alone) {
-    await run(godotPath);
+  for (const [name, run] of alone) {
+    await timedCase(name, async () => {
+      await run(godotPath);
+    });
   }
 
   console.log(`editor tests passed (${chosen.length + alone.length})`);

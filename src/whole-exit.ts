@@ -11,6 +11,7 @@
 
 import type { Pointer } from 'bun:ffi';
 import process from 'node:process';
+import { type ChildProcess, RelayedChild } from './spawn.js';
 
 /** The child's whole exit code, given the one the runtime told. Asked once, as the child ends. */
 export type WholeExit = (told: number | null) => number | null;
@@ -55,6 +56,14 @@ export async function prepareWholeExits(): Promise<void> {
   } catch {
     // Left unloaded, and every code is the one told.
   }
+}
+
+/**
+ * [method holdExit] for [param child]. A start through the desktop helper is told its whole code by
+ * the helper, and its pid is the helper's, whose exit is no engine's.
+ */
+export function holdChildExit(child: ChildProcess): WholeExit {
+  return holdExit(child instanceof RelayedChild ? undefined : child.pid);
 }
 
 /**

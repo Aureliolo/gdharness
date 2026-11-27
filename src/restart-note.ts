@@ -1,9 +1,9 @@
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { errorMessage } from './errors.js';
 import type { EditorPorts } from './launch.js';
 import { isRecord } from './records.js';
-import { writeWhole } from './whole-file.js';
+import { removeWhole, writeWholeAsync } from './whole-file.js';
 
 /**
  * A restart of an editor this server opened is two acts with a gap between them: the editor is
@@ -40,13 +40,13 @@ export function restartNotePath(projectPath: string): string {
  * A failure here is logged and not fatal: the restart goes ahead as it always did, and only the
  * successor's ability to explain an interruption is lost.
  */
-export function noteRestartBegun(note: RestartNote): void {
+export async function noteRestartBegun(note: RestartNote): Promise<void> {
   const path = restartNotePath(note.projectPath);
   try {
     mkdirSync(dirname(path), { recursive: true });
     // Whole or not at all: a successor reading it mid-write would otherwise read no note, which
     // says nothing is owed and is the fault the note exists to stop.
-    if (!writeWhole(path, `${JSON.stringify(note, null, 2)}\n`)) {
+    if (!(await writeWholeAsync(path, `${JSON.stringify(note, null, 2)}\n`))) {
       console.error(`[SERVER] Could not record the restart at ${path}.`);
     }
   } catch (error) {
@@ -93,7 +93,11 @@ export function restartOwed(projectPath: string): RestartNote | null {
  */
 export function restartSettled(projectPath: string): void {
   try {
-    rmSync(restartNotePath(projectPath), { force: true });
+    // Through the whole-file removal, which a write of the note still waiting on a reader yields
+    // to: a plain removal finds nothing to take down, and the note then lands after it.
+    if (!removeWhole(restartNotePath(projectPath))) {
+      console.error('[SERVER] Could not clear the restart note: a reader holds it.');
+    }
   } catch (error) {
     console.error(`[SERVER] Could not clear the restart note: ${errorMessage(error)}`);
   }

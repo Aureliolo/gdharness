@@ -6,7 +6,6 @@
 
 import assert from 'node:assert/strict';
 import {
-  BOTH_SIDES_ALIKE_NOTE,
   failedCases,
   failedWithin,
   hookFailuresPrinted,
@@ -19,15 +18,14 @@ import {
   orphansLeftSaid,
   orphansPrinted,
   parseJUnit,
-  RENDERED_AWAY_NOTE,
   rowsIgnoredIn,
   scriptErrorsPrinted,
+  skippedInReport,
   suitesPrinted,
   testProgressMessage,
-  VALUE_NOT_RECOVERED_NOTE,
   whyNoReport,
-  withActualsPrinted,
 } from '../src/junit.js';
+import { casesRan, type Expected, judgeEngine, readRun } from '../src/suite-judge.js';
 
 /** What gdUnit4 printed for a run pointed at a directory that is not there, as it printed it. */
 const NOTHING_THERE = [
@@ -355,7 +353,7 @@ ${error('test_errors_then_fails', 'late_test', 6)}
       ['twice_test', 1, 0],
     ],
   );
-  const failed = failedCases(report, '');
+  const failed = failedCases(report);
   assert.deepEqual(
     failed.map((entry) => [
       entry.name,
@@ -394,34 +392,24 @@ ${error('test_errors_then_fails', 'late_test', 6)}
   assert.equal(failed[0]?.path, 'res://tests/late_test.gd');
 
   // A case with one report answers as it always did, without a list of one.
-  const single = failedCases(parseJUnit(GDUNIT_REPORT), '');
+  const single = failedCases(parseJUnit(GDUNIT_REPORT));
   assert.deepEqual(
     single.map((entry) => [entry.name, entry.status, entry.message, 'reports' in entry]),
     [['test_two_and_two_is_not_five', 'failed', 'FAILED: res://test/sums_test.gd:9', false]],
   );
 
-  // Each report has its value read back, in the order the run printed them: the second string
-  // equality of one case is the second diff, which reading the case's first report alone never met.
-  const e = String.fromCharCode(0x1b);
-  const at = `${e}[0m${e}[38;2;173;216;230m\tat 'test_each' in res://test/each_test.gd:7${e}[0m`;
-  const printed = [
-    ` but was`,
-    ` '${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[38;2;255;255;255mabc${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${at}`,
-    ` but was`,
-    ` '${e}[38;2;30;144;255ma${e}[48;2;38;0;0m${e}[38;2;255;255;255mbc${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${at}`,
-  ].join('\n');
+  // A failing string comes through as gdUnit4's report wrote it, the merge of both sides included.
   const merged =
     "<failure message=\"FAILED: res://test/each_test.gd:7\" type=\"FAILURE\"><![CDATA[Expecting:\n 'abc'\n but was\n 'abc'\n\tat 'test_each' in res://test/each_test.gd:7]]></failure>";
   const [each] = failedCases(
     parseJUnit(
       `<testsuites><testsuite name="each_test" package="test" tests="1" failures="2"><testcase name="test_each">${merged}${merged}</testcase></testsuite></testsuites>`,
     ),
-    printed,
   );
   assert.deepEqual(
-    each?.reports?.map((one) => / but was\n '(.*)'\n/.exec(one.detail ?? '')?.[1]),
-    ['', 'a'],
-    `both values read back, the second into the second report: ${JSON.stringify(each)}`,
+    each?.reports?.map((one) => [one.detail, one.times]),
+    [["Expecting:\n 'abc'\n but was\n 'abc'\n\tat 'test_each' in res://test/each_test.gd:7", 2]],
+    'the report is passed through as written, the same one twice folded into one',
   );
 }
 
@@ -451,7 +439,7 @@ function testARunawayCaseIsFoldedAndBounded(): void {
       `<testcase name="test_many">${distinct}</testcase>`,
     )}${suite('long_test', `<testcase name="test_long">${long}</testcase>`)}</testsuites>`,
   );
-  const [longest, loop, many] = failedCases(report, '');
+  const [longest, loop, many] = failedCases(report);
 
   assert.deepEqual(
     loop?.reports?.map((one) => [one.message, one.times]),
@@ -712,310 +700,6 @@ function testOrphansAreReadOffTheConsole(): void {
  * The console lines are gdUnit4's own, as the runner printed them on 4.7.2, ended both ways: a pipe
  * on Windows carries CRLF, which the report has none of.
  */
-function testAFailingStringReadsItsValue(): void {
-  for (const ending of ['\n', '\r\n']) {
-    readsItsValue(ending);
-  }
-}
-
-function readsItsValue(ending: string): void {
-  const e = String.fromCharCode(0x1b);
-  const printed = [
-    ` but was`,
-    ` '${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[38;2;255;255;255mabc${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_empty' in res://test/words_test.gd:5${e}[0m`,
-    ` but was`,
-    ` '${e}[38;2;30;144;255mab${e}[48;2;38;0;0m${e}[38;2;255;255;255mc${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mX<LF>${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255md${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_swapped' in res://test/words_test.gd:9${e}[0m`,
-  ].join(ending);
-  const reported = (name: string, line: number, expected: string, merged: string): { detail: string } => ({
-    detail: `Expecting:\n '${expected}'\n but was\n '${merged}'\n\tat '${name}' in res://test/words_test.gd:${line}`,
-  });
-  const [empty, swapped, elsewhere, numbers, apart] = withActualsPrinted(
-    [
-      reported('test_empty', 5, 'abc', 'abc'),
-      reported('test_swapped', 9, 'abcd', 'abcX<LF>d'),
-      reported('test_unprinted', 12, 'same', 'same'),
-      { detail: "Expecting:\n 5\n but was\n 4\n\tat 'test_sums' in res://test/words_test.gd:15" },
-      reported('test_unprinted_apart', 18, 'abcd', 'abcXd'),
-    ],
-    printed,
-  );
-  assert.match(
-    empty?.detail ?? '',
-    / but was\n ''\n\tat 'test_empty'/,
-    `an empty value reads as empty, lines ended ${JSON.stringify(ending)}`,
-  );
-  assert.match(
-    swapped?.detail ?? '',
-    / but was\n 'abX\nd'\n\tat 'test_swapped'/,
-    'a swapped character reads as the one the value had, and a marked line break as a line break',
-  );
-  assert.ok(
-    (elsewhere?.detail ?? '').endsWith(BOTH_SIDES_ALIKE_NOTE),
-    `a detail the console kept no copy of says its two sides cannot be told apart: ${elsewhere?.detail}`,
-  );
-  assert.equal(
-    numbers?.detail,
-    "Expecting:\n 5\n but was\n 4\n\tat 'test_sums' in res://test/words_test.gd:15",
-    'anything that is not a merged string is left as it was',
-  );
-  assert.ok(
-    (apart?.detail ?? '').endsWith(
-      `'abcXd'\n\tat 'test_unprinted_apart' in res://test/words_test.gd:18\n${VALUE_NOT_RECOVERED_NOTE}`,
-    ),
-    `a detail the console kept no copy of, whose sides differ, says its value may be the merge: ${apart?.detail}`,
-  );
-}
-
-/**
- * One assertion line failing twice, as a parameterized test does: one function name, one line, and a
- * different value each time. Expected "abc", found "" and then "a", which merge alike, so a diff
- * offered to every failure it matched gave both the first one's value.
- */
-function testOneLineFailingTwiceKeepsEachValue(): void {
-  const e = String.fromCharCode(0x1b);
-  const at = `${e}[0m${e}[38;2;173;216;230m\tat 'test_each' in res://test/each_test.gd:7${e}[0m`;
-  const printed = [
-    ` but was`,
-    ` '${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[38;2;255;255;255mabc${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${at}`,
-    ` but was`,
-    ` '${e}[38;2;30;144;255ma${e}[48;2;38;0;0m${e}[38;2;255;255;255mbc${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${at}`,
-  ].join('\n');
-  const reported = {
-    detail: "Expecting:\n 'abc'\n but was\n 'abc'\n\tat 'test_each' in res://test/each_test.gd:7",
-  };
-  const [first, second] = withActualsPrinted([reported, reported], printed);
-  assert.match(
-    first?.detail ?? '',
-    / but was\n ''\n\tat 'test_each'/,
-    `the first found nothing: ${first?.detail}`,
-  );
-  assert.match(
-    second?.detail ?? '',
-    / but was\n 'a'\n\tat 'test_each'/,
-    `the second found "a": ${second?.detail}`,
-  );
-}
-
-/**
- * A string equality after an array equality, read off the console that gdUnit4 v6.2.1 printed on
- * 4.7.2 for the suite below, ended both ways. An array's value is followed by a table of
- * differences and then its location, not by a quote and its location, so it is the one failure
- * whose own report a match cannot end in.
- *
- *     func test_a_array_failure_first() -> void:
- *         assert_array([0, 55, 110]).is_equal([0, 75, 150])
- *     func test_the_sentence_alone() -> void:
- *         assert_str(FOUND).is_equal(WANTED)
- *     func test_a_mismatch_string_first() -> void:
- *         assert_str("wanted 25, got 15").is_empty()
- *     func test_the_sentence_after_others() -> void:
- *         assert_str(FOUND).is_equal(WANTED)
- */
-function testAStringAfterAnArrayReadsItsOwnValue(): void {
-  for (const ending of ['\n', '\r\n']) {
-    readsItsOwnValue(ending);
-  }
-}
-
-function readsItsOwnValue(ending: string): void {
-  const e = String.fromCharCode(0x1b);
-  const printed = [
-    `${e}[38;2;0;206;209mRun Test Suite: ${e}[0m${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m`,
-    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_a_array_failure_first${e}[0m${e}[38;2;34;139;34m STARTED${e}[0m${e}[38;2;128;128;128m${e}[0m`,
-    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_a_array_failure_first${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 9ms${e}[0m`,
-    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
-    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
-    ` '${e}[38;2;30;144;255m[0, 75, 150]${e}[0m'`,
-    ` but was`,
-    ` '${e}[38;2;30;144;255m[0, ${e}[48;2;38;0;0m${e}[38;2;255;255;255m55${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m, ${e}[48;2;38;0;0m${e}[38;2;255;255;255m110${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m]${e}[0m'`,
-    ``,
-    `${e}[38;2;255;69;0mDifferences found:${e}[0m`,
-    `[table=3][cell][right]${e}[1mIndex${e}[0m[/right]\t[/cell][cell][right]${e}[1mCurrent${e}[0m[/right]\t[/cell][cell][right]${e}[1mExpected${e}[0m[/right]\t[/cell][cell][right]1[/right]\t[/cell][cell][right]55[/right]\t[/cell][cell][right]75[/right]\t[/cell][cell][right]2[/right]\t[/cell][cell][right]110[/right]\t[/cell][cell][right]150[/right]\t[/cell][/table]${e}[0m${e}[38;2;173;216;230m\tat 'test_a_array_failure_first' in res://mixed/mixed_test.gd:8${e}[0m${e}[38;2;128;128;128m${e}[0m`,
-    `${e}[38;2;128;128;128m${e}[0m`,
-    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_the_sentence_alone${e}[0m${e}[38;2;34;139;34m STARTED${e}[0m${e}[38;2;128;128;128m${e}[0m`,
-    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_the_sentence_alone${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 9ms${e}[0m`,
-    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
-    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
-    ` '${e}[38;2;30;144;255meach crate you stack is 1 taller, for every Ostrakon you have kept tonight${e}[0m'`,
-    ` but was`,
-    ` '${e}[38;2;30;144;255meach crate you stack is 1 taller, for every ${e}[48;2;38;0;0m${e}[38;2;255;255;255mO${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255ms${e}[48;2;38;0;0m${e}[38;2;255;255;255mtrakon${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mpell${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m you have kept tonight${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_the_sentence_alone' in res://mixed/mixed_test.gd:12${e}[0m${e}[38;2;128;128;128m${e}[0m`,
-    `${e}[38;2;128;128;128m${e}[0m`,
-    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_a_mismatch_string_first${e}[0m${e}[38;2;34;139;34m STARTED${e}[0m${e}[38;2;128;128;128m${e}[0m`,
-    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_a_mismatch_string_first${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 9ms${e}[0m`,
-    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
-    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
-    ` must be empty but was`,
-    ` '${e}[38;2;30;144;255mwanted 25, got 15${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_a_mismatch_string_first' in res://mixed/mixed_test.gd:16${e}[0m${e}[38;2;128;128;128m${e}[0m`,
-    `${e}[38;2;128;128;128m${e}[0m`,
-    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_the_sentence_after_others${e}[0m${e}[38;2;34;139;34m STARTED${e}[0m${e}[38;2;128;128;128m${e}[0m`,
-    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_the_sentence_after_others${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 9ms${e}[0m`,
-    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
-    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
-    ` '${e}[38;2;30;144;255meach crate you stack is 1 taller, for every Ostrakon you have kept tonight${e}[0m'`,
-    ` but was`,
-    ` '${e}[38;2;30;144;255meach crate you stack is 1 taller, for every ${e}[48;2;38;0;0m${e}[38;2;255;255;255mO${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255ms${e}[48;2;38;0;0m${e}[38;2;255;255;255mtrakon${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mpell${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m you have kept tonight${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_the_sentence_after_others' in res://mixed/mixed_test.gd:20${e}[0m${e}[38;2;128;128;128m${e}[0m`,
-    `${e}[38;2;128;128;128m${e}[0m`,
-  ].join(ending);
-  const wanted = 'each crate you stack is 1 taller, for every Ostrakon you have kept tonight';
-  const found = 'each crate you stack is 1 taller, for every spell you have kept tonight';
-  const merged = 'each crate you stack is 1 taller, for every Ostrakonpell you have kept tonight';
-  const at = (name: string, line: number): string => `\tat '${name}' in res://mixed/mixed_test.gd:${line}`;
-  const arrayDetail = `Expecting:\n '[0, 75, 150]'\n but was\n '[0, 55, 110]'\n\nDifferences found:\nIndex\tCurrent\tExpected\t1\t55\t75\t2\t110\t150\t\n${at('test_a_array_failure_first', 8)}`;
-  const emptyDetail = `Expecting:\n must be empty but was\n 'wanted 25, got 15'\n${at('test_a_mismatch_string_first', 16)}`;
-  const [array, alone, empty, after] = withActualsPrinted(
-    [
-      { detail: arrayDetail },
-      { detail: `Expecting:\n '${wanted}'\n but was\n '${merged}'\n${at('test_the_sentence_alone', 12)}` },
-      { detail: emptyDetail },
-      {
-        detail: `Expecting:\n '${wanted}'\n but was\n '${merged}'\n${at('test_the_sentence_after_others', 20)}`,
-      },
-    ],
-    printed,
-  );
-  for (const [name, line, entry] of [
-    ['test_the_sentence_alone', 12, alone],
-    ['test_the_sentence_after_others', 20, after],
-  ] as const) {
-    assert.equal(
-      entry?.detail,
-      `Expecting:\n '${wanted}'\n but was\n '${found}'\n${at(name, line)}`,
-      `${name} reads the value it found, lines ended ${JSON.stringify(ending)}`,
-    );
-  }
-  assert.equal(array?.detail, arrayDetail, 'the array equality is left as the report wrote it');
-  assert.equal(empty?.detail, emptyDetail, 'a value with no marks is left as the report wrote it');
-}
-
-/**
- * The other shapes a string equality is printed in, read off the console gdUnit4 v6.2.1 printed on
- * 4.7.2, ended both ways, for these cases:
- *
- *     assert_str("for every spell").is_equal_ignoring_case("FOR EVERY GAME-B")
- *     assert_str("a [b]bold[/b] x").is_equal("a [b]bold[/b] y")
- *     assert_str("keep [lb] as is").is_equal("other")
- *     assert_dict({"[lb]": 1}).is_equal({"[lb]": 2})
- *     assert_str("plain").is_equal("[b]plain[/b]")
- *     assert_failure(func() -> void: assert_int(1).is_equal(2)).has_message("Expecting:\n '3'\n but was\n '1'")
- */
-function testEveryShapeOfAStringEqualityReadsItsValue(): void {
-  for (const ending of ['\n', '\r\n']) {
-    readsEveryShape(ending);
-  }
-}
-
-function readsEveryShape(ending: string): void {
-  const e = String.fromCharCode(0x1b);
-  const printed = [
-    `  ${e}[38;2;250;235;215mres://probe/probe_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_ignoring_case_second${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 6ms${e}[0m`,
-    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
-    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
-    ` '${e}[38;2;30;144;255mFOR EVERY GAME-B${e}[0m'`,
-    ` but was`,
-    ` '${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[38;2;255;255;255mFOR${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mfor${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m ${e}[48;2;38;0;0m${e}[38;2;255;255;255mEVERY${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mevery${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m ${e}[48;2;38;0;0m${e}[38;2;255;255;255mGAME-B${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mspell${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m${e}[0m' (ignoring case)${e}[0m${e}[38;2;173;216;230m\tat 'test_ignoring_case_second' in res://probe/probe_test.gd:72${e}[0m${e}[38;2;128;128;128m${e}[0m`,
-    `  ${e}[38;2;250;235;215mres://probe/probe_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_bbcode${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 6ms${e}[0m`,
-    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
-    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
-    ` '${e}[38;2;30;144;255ma [lb]b]bold[lb]/b] y${e}[0m'`,
-    ` but was`,
-    ` '${e}[38;2;30;144;255ma [lb]b]bold[lb]/b] x${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_bbcode' in res://probe/probe_test.gd:80${e}[0m${e}[38;2;128;128;128m${e}[0m`,
-    `  ${e}[38;2;250;235;215mres://probe/probe_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_literal_lb${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 6ms${e}[0m`,
-    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
-    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
-    ` '${e}[38;2;30;144;255mother${e}[0m'`,
-    ` but was`,
-    ` '${e}[38;2;30;144;255mkeep [lb]lb] as is${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_literal_lb' in res://probe/probe_test.gd:84${e}[0m${e}[38;2;128;128;128m${e}[0m`,
-    `  ${e}[38;2;250;235;215mres://probe/probe_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_dict_lb${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 5ms${e}[0m`,
-    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
-    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
-    ` '${e}[38;2;30;144;255m{`,
-    `\t"[lb]": 2`,
-    `  }${e}[0m'`,
-    ` but was`,
-    ` '${e}[38;2;30;144;255m{`,
-    `\t"[lb]": 1`,
-    `  }${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_dict_lb' in res://probe/probe_test.gd:100${e}[0m${e}[38;2;128;128;128m${e}[0m`,
-    `  ${e}[38;2;250;235;215mres://probe/probe_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_bbcode_expected_only${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 18ms${e}[0m`,
-    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
-    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
-    ` '${e}[38;2;30;144;255m${e}[1mplain${e}[0m${e}[38;2;30;144;255m${e}[0m'`,
-    ` but was`,
-    ` '${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[38;2;255;255;255m${e}[1m${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255mplain${e}[48;2;38;0;0m${e}[38;2;255;255;255m${e}[0m${e}[38;2;255;255;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_bbcode_expected_only' in res://probe/probe_test.gd:92${e}[0m${e}[38;2;128;128;128m${e}[0m`,
-    `  ${e}[38;2;250;235;215mres://probe/probe_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_has_message${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 6ms${e}[0m`,
-    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
-    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting error message:${e}[0m`,
-    ` '${e}[38;2;30;144;255mExpecting:`,
-    ` '3'`,
-    ` but was`,
-    ` '1'${e}[0m'`,
-    ` but was`,
-    ` '${e}[38;2;30;144;255mExpecting:`,
-    ` ${e}[48;2;38;0;0m${e}[38;2;255;255;255m'3'${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255m2${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m`,
-    ` but was`,
-    ` ${e}[48;2;38;0;0m${e}[38;2;255;255;255m'${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m1${e}[48;2;38;0;0m${e}[38;2;255;255;255m'${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_has_message' in res://probe/probe_test.gd:76${e}[0m${e}[38;2;128;128;128m${e}[0m`,
-  ];
-  const reported = {
-    test_ignoring_case_second:
-      "Expecting:\n 'FOR EVERY GAME-B'\n but was\n 'FORfor EVERYevery GAME-Bspell' (ignoring case)\n\tat 'test_ignoring_case_second' in res://probe/probe_test.gd:72",
-    test_bbcode:
-      "Expecting:\n 'a [lb]b]bold[lb]/b] y'\n but was\n 'a [lb]b]bold[lb]/b] x'\n\tat 'test_bbcode' in res://probe/probe_test.gd:80",
-    test_literal_lb:
-      "Expecting:\n 'other'\n but was\n 'keep [lb]lb] as is'\n\tat 'test_literal_lb' in res://probe/probe_test.gd:84",
-    test_dict_lb:
-      "Expecting:\n '{\n\t\"[lb]\": 2\n  }'\n but was\n '{\n\t\"[lb]\": 1\n  }'\n\tat 'test_dict_lb' in res://probe/probe_test.gd:100",
-    test_bbcode_expected_only:
-      "Expecting:\n 'plain'\n but was\n 'plain'\n\tat 'test_bbcode_expected_only' in res://probe/probe_test.gd:92",
-    test_has_message:
-      "Expecting error message:\n 'Expecting:\n '3'\n but was\n '1''\n but was\n 'Expecting:\n '3'2\n but was\n '1''\n\tat 'test_has_message' in res://probe/probe_test.gd:76",
-  };
-  const unprintedMessage = `Expecting error message:\n 'abc'\n but was\n 'abXc'\n\tat 'test_unprinted' in res://probe/probe_test.gd:90`;
-  const [ignoring, bbcode, literal, dictionary, renderedAway, message, unprinted] = withActualsPrinted(
-    [...Object.values(reported), unprintedMessage].map((detail) => ({ detail })),
-    printed.join(ending),
-  );
-  const at = (name: string, line: number): string => `\n\tat '${name}' in res://probe/probe_test.gd:${line}`;
-  assert.equal(
-    ignoring?.detail,
-    `Expecting:\n 'FOR EVERY GAME-B'\n but was\n 'for every spell' (ignoring case)${at('test_ignoring_case_second', 72)}`,
-    `an equality ignoring case reads the value it found, lines ended ${JSON.stringify(ending)}`,
-  );
-  assert.equal(
-    bbcode?.detail,
-    `Expecting:\n 'a [b]bold[/b] y'\n but was\n 'a [b]bold[/b] x'${at('test_bbcode', 80)}`,
-    'a string holding BBCode reads without the mask gdUnit4 put on both sides',
-  );
-  assert.equal(
-    literal?.detail,
-    `Expecting:\n 'other'\n but was\n 'keep [lb] as is'${at('test_literal_lb', 84)}`,
-    'a string holding the mask itself reads as it was written',
-  );
-  assert.equal(
-    dictionary?.detail,
-    reported.test_dict_lb,
-    'a dictionary holding the mask is left as it printed',
-  );
-  assert.equal(
-    renderedAway?.detail,
-    `${reported.test_bbcode_expected_only}\n${RENDERED_AWAY_NOTE}`,
-    'two sides that still read alike once the value is read back say what went unprinted',
-  );
-  assert.equal(
-    message?.detail,
-    `Expecting error message:\n 'Expecting:\n '3'\n but was\n '1''\n but was\n 'Expecting:\n 2\n but was\n 1'${at('test_has_message', 76)}`,
-    'an error message holding " but was" of its own reads the message the failure had',
-  );
-  assert.equal(
-    unprinted?.detail,
-    `${unprintedMessage}\n${VALUE_NOT_RECOVERED_NOTE}`,
-    'an error message the console kept no copy of says its value may be the merge',
-  );
-}
-
-/**
- * #915: the suites a run has finished, read off the console as gdUnit4 printed it on 4.7.2 with
- * v6.2.1, for a run cut off before its report and for the progress a long one sends. The second
- * suite fails and is followed by its report's lines, and the third is still running.
- */
 function testFinishedSuitesAreReadOffTheConsole(): void {
   const printed = [
     'Scanning for test suites in: res://test',
@@ -1077,8 +761,6 @@ function testFinishedSuitesAreReadOffTheConsole(): void {
 }
 
 testWhatGdUnitWrites();
-testAFailingStringReadsItsValue();
-testOneLineFailingTwiceKeepsEachValue();
 testASuiteWithASpaceInItsPathKeepsItsOrphans();
 testAFailedHookIsCountedAndNamed();
 /**
@@ -1226,7 +908,7 @@ Godot Runtime Error !
 \t</testsuite>
 </testsuites>`);
   assert.deepEqual(
-    failedCases(report, '').map((entry) => [entry.name, entry.message]),
+    failedCases(report).map((entry) => [entry.name, entry.message]),
     [
       ['test_div_by_zero', 'ERROR: res://calc.gd:11'],
       ['test_reads_missing', 'ERROR: res://test/calc_test.gd:20'],
@@ -1235,13 +917,237 @@ Godot Runtime Error !
   );
 }
 
+/** [param whole] in pieces of [param size] bytes. */
+function testEverySkipTheReportHoldsIsListedWithItsReason(): void {
+  const skipped = (name: string, line: number, reason: string): string =>
+    `\t\t<testcase name="${name}" classname="x" time="0.000">\n\t\t\t<skipped message="SKIPPED: res://test/x.gd:${String(line)}">\n<![CDATA[\nThis test is skipped!\n  Reason: '${reason}'\n]]>\n\t\t\t</skipped>\n\t\t</testcase>\n`;
+  const report = parseJUnit(
+    `<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-11-22" name="report_1" tests="10" failures="0" skipped="7" flaky="0" time="0.000">
+\t<testsuite id="0" name="one_skip_test" package="test" tests="2" failures="0" errors="0" skipped="1" flaky="0" time="0.458">
+\t\t<testcase name="test_a" classname="one_skip_test" time="0.044">
+\t\t</testcase>
+${skipped('test_skipped', 6, 'not ready yet')}\t</testsuite>
+\t<testsuite id="1" name="rows_skip_test" package="test" tests="2" failures="0" errors="0" skipped="2" flaky="0" time="0.432">
+${skipped('test_rows:0 (1)', 3, 'rows wait')}${skipped('test_rows:1 (2)', 3, 'rows wait')}\t</testsuite>
+\t<testsuite id="2" name="whole_skip_test" package="test" tests="1" failures="0" errors="0" skipped="1" flaky="0" time="0.000">
+${skipped('test_a', 6, 'Skipped from the entire test suite')}\t</testsuite>
+</testsuites>
+`,
+  );
+  assert.deepEqual(
+    skippedInReport(report),
+    [
+      { suite: 'res://test/one_skip_test.gd', name: 'test_skipped', reason: 'not ready yet' },
+      { suite: 'res://test/rows_skip_test.gd', name: 'test_rows:0 (1)', reason: 'rows wait' },
+      { suite: 'res://test/rows_skip_test.gd', name: 'test_rows:1 (2)', reason: 'rows wait' },
+      {
+        suite: 'res://test/whole_skip_test.gd',
+        name: 'test_a',
+        reason: 'Skipped from the entire test suite',
+      },
+    ],
+    'each skipped case, in the order of its suite',
+  );
+  assert.deepEqual(skippedInReport(parseJUnit(GDUNIT_REPORT)), [
+    { suite: 'res://test/sums_test.gd', name: 'test_skipped_for_now', reason: 'not today' },
+  ]);
+}
+
+/**
+ * How a report spells the failure {@link aSuiteFailingOn} prints: the merge of both sides, a
+ * character of each after [param value].
+ */
+/** A report of [param suites], each a script under test/ with its cases as gdUnit4 writes them. */
+function reportOf(
+  suites: readonly {
+    readonly name: string;
+    readonly hookFailures?: number;
+    readonly cases: readonly (readonly [
+      name: string,
+      status: 'passed' | 'failed' | 'skipped',
+      text?: string,
+    ])[];
+  }[],
+): ReturnType<typeof parseJUnit> {
+  const element = ([name, status, text]: readonly [string, string, string?]): string => {
+    if (status === 'failed') {
+      return `<testcase name="${name}" time="0.010"><failure message="FAILED: res://test/x.gd:5" type="FAILURE"><![CDATA[${text ?? 'Expecting: 1'}]]></failure></testcase>`;
+    }
+    if (status === 'skipped') {
+      return `<testcase name="${name}" time="0.000"><skipped message="SKIPPED: res://test/x.gd:5"><![CDATA[\nThis test is skipped!\n  Reason: '${text ?? ''}'\n]]></skipped></testcase>`;
+    }
+    return `<testcase name="${name}" time="0.010"></testcase>`;
+  };
+  return parseJUnit(
+    `<testsuites>${suites
+      .map((suite) => {
+        const failures =
+          suite.cases.filter(([, status]) => status === 'failed').length + (suite.hookFailures ?? 0);
+        return `<testsuite name="${suite.name}" package="test" tests="${suite.cases.length}" failures="${failures}" errors="0" time="0.050">${suite.cases.map(element).join('')}</testsuite>`;
+      })
+      .join('')}</testsuites>`,
+  );
+}
+
+const A_TEST = 'res://test/a_test.gd';
+const NOTHING_HANDED = { errors: {}, warnings: {} } satisfies Expected;
+const ENDED_WELL = { code: 0, signal: null, ended: null };
+
+/**
+ * Every case's outcome, the suite's verdict and the totals are the report's, whatever the console
+ * printed beside them. The console here says the failing case passed and prints no line for the rest.
+ */
+function testTheReportAloneSaysWhatEachCaseDid(): void {
+  const report = reportOf([
+    {
+      name: 'a_test',
+      cases: [
+        ['test_ok', 'passed'],
+        ['test_bad', 'failed', 'Expecting: 2'],
+        ['test_later', 'skipped', 'not today'],
+        ['test_rows:0 (1)', 'passed'],
+      ],
+    },
+  ]);
+  const printed = readRun(
+    [
+      `Run Test Suite: ${A_TEST}`,
+      `  ${A_TEST} > test_bad STARTED`,
+      `  ${A_TEST} > test_bad PASSED 3ms`,
+      'Statistics: 4 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED 9ms',
+      'Executed test cases : (99/99)',
+    ].join('\n'),
+    [report],
+  );
+  const suite = printed.suites.get(A_TEST);
+  assert.deepEqual(
+    suite?.cases.map((one) => [one.name, one.func, one.row, one.verdict, one.message]),
+    [
+      ['test_ok', 'test_ok', null, 'PASSED', null],
+      ['test_bad', 'test_bad', null, 'FAILED', 'FAILED: res://test/x.gd:5'],
+      ['test_later', 'test_later', null, 'SKIPPED', 'SKIPPED: res://test/x.gd:5'],
+      ['test_rows:0 (1)', 'test_rows', 0, 'PASSED', null],
+    ],
+  );
+  assert.deepEqual(
+    printed.suites.get(A_TEST)?.closed,
+    { verdict: 'FAILED', seconds: 0.05 },
+    'the suite failed, as the report counts',
+  );
+  assert.equal(printed.executed, 3, 'executed counts the cases the report holds that were not skipped');
+  assert.equal(casesRan(printed), 3);
+  assert.deepEqual(printed.skipped, [{ suite: A_TEST, name: 'test_later', reason: 'not today' }]);
+  const judged = judgeEngine(
+    printed,
+    {
+      suites: [{ path: A_TEST, cases: ['test_ok', 'test_bad', 'test_later', 'test_rows'] }],
+      expected: NOTHING_HANDED,
+    },
+    ENDED_WELL,
+  );
+  assert.deepEqual(judged.faults, [
+    `${A_TEST} > test_later never ran: gdUnit4 skipped it, saying "not today"`,
+    `${A_TEST} > test_bad failed: FAILED: res://test/x.gd:5`,
+  ]);
+}
+
+/** A skip reason is the report's text, whatever it holds: line breaks, quotes, tags and a separator. */
+function testASkipReasonIsPassedThroughAsTheReportWroteIt(): void {
+  const reasons = [
+    'first\nERROR: second',
+    'it\'s "quoted" and ends in a quote\'',
+    '[color=a\nb][color=c\nd] tags',
+    `line${String.fromCharCode(0x2028)}separator`,
+  ];
+  const report = reportOf([
+    {
+      name: 'a_test',
+      cases: reasons.map((reason, at) => [`test_${String(at)}`, 'skipped', reason] as const),
+    },
+  ]);
+  const printed = readRun(`Run Test Suite: ${A_TEST}`, [report]);
+  assert.deepEqual(
+    printed.skipped.map((one) => one.reason),
+    reasons,
+  );
+  const failing = reportOf([{ name: 'a_test', cases: [['test_x', 'failed', 'a ]]]]><![CDATA[> b']] }]);
+  assert.equal(failedCases(failing)[0]?.detail, 'a ]]> b');
+}
+
+/** The console still says whose an error is, and what the report cannot hold: a script that did not load. */
+function testTheConsoleStillSaysWhoseAnErrorIs(): void {
+  const report = reportOf([{ name: 'a_test', cases: [['test_ok', 'passed']] }]);
+  const printed = readRun(
+    [
+      'ERROR: before any suite',
+      `Run Test Suite: ${A_TEST}`,
+      `  ${A_TEST} > test_ok STARTED`,
+      'ERROR: in the case',
+      `  ${A_TEST} > test_ok PASSED 3ms`,
+      'Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED 9ms',
+    ].join('\n'),
+    [report],
+  );
+  assert.deepEqual(
+    printed.errors.map((error) => [error.text, error.suite, error.during]),
+    [
+      ['before any suite', null, null],
+      ['in the case', A_TEST, 'test_ok'],
+    ],
+  );
+  const unloaded = readRun(
+    [
+      'Script errors were detected during test discovery!',
+      '  Parse Error: Identifier "x" not declared in the current scope.',
+      '\tat res://test/a_test.gd:5',
+    ].join('\n'),
+  );
+  assert.deepEqual(unloaded.unloadable, [
+    'res://test/a_test.gd:5: Parse Error: Identifier "x" not declared in the current scope.',
+  ]);
+}
+
+/** A run with no report has no case outcomes and says so, however far its console got. */
+function testARunWithNoReportSaysSoAndNamesWhereItStopped(): void {
+  const printed = readRun([`Run Test Suite: ${A_TEST}`, `  ${A_TEST} > test_hangs STARTED`].join('\n'));
+  assert.equal(printed.executed, null);
+  assert.deepEqual(printed.suites.get(A_TEST)?.cases, []);
+  assert.equal(printed.stoppedIn, `${A_TEST} > test_hangs`);
+  const judged = judgeEngine(
+    printed,
+    { suites: [{ path: A_TEST, cases: ['test_hangs'] }], expected: NOTHING_HANDED },
+    { code: null, signal: null, ended: 'it was ended after 60 s' },
+  );
+  assert.ok(judged.faults.includes('the run wrote no JUnit report'), judged.faults.join(' | '));
+  assert.ok(judged.faults.includes(`${A_TEST} never finished`), judged.faults.join(' | '));
+}
+
+/** A hook that failed makes its suite FAILED with every case passing, as the report counts it. */
+function testAFailedHookFailsItsSuiteWithEveryCasePassing(): void {
+  const report = reportOf([{ name: 'a_test', hookFailures: 1, cases: [['test_ok', 'passed']] }]);
+  const printed = readRun(`Run Test Suite: ${A_TEST}`, [report]);
+  const judged = judgeEngine(
+    printed,
+    { suites: [{ path: A_TEST, cases: ['test_ok'] }], expected: NOTHING_HANDED },
+    { code: 100, signal: null, ended: null },
+  );
+  assert.ok(
+    judged.faults.includes(`${A_TEST} reported FAILED with every case passing, so a hook failed`),
+    judged.faults.join(' | '),
+  );
+}
+
+testTheReportAloneSaysWhatEachCaseDid();
+testASkipReasonIsPassedThroughAsTheReportWroteIt();
+testTheConsoleStillSaysWhoseAnErrorIs();
+testARunWithNoReportSaysSoAndNamesWhereItStopped();
+testAFailedHookFailsItsSuiteWithEveryCasePassing();
 testASecondFailedAssertionIsNotAHook();
 testAnErrorIsPlacedWhereItWasRaised();
 testEveryReportOfACaseIsKept();
 testTheRunnersOwnFramesAreLeftOut();
 testARunawayCaseIsFoldedAndBounded();
-testAStringAfterAnArrayReadsItsOwnValue();
-testEveryShapeOfAStringEqualityReadsItsValue();
 testEntitiesAndShapes();
 testSuitesComeInTheOrderOfTheirPaths();
 testMalformedReportsAreRefused();
@@ -1251,4 +1157,5 @@ testOrphansAreReadOffTheConsole();
 testScriptErrorsAreReadOffTheConsole();
 testFinishedSuitesAreReadOffTheConsole();
 testAnIgnoreThatLeftOutNothingIsNamed();
+testEverySkipTheReportHoldsIsListedWithItsReason();
 console.log('junit reader tests passed');
