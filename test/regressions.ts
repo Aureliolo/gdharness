@@ -107496,27 +107496,23 @@ async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
       `a scene inheriting an inherited one: ${JSON.stringify(further)}`,
     );
     const bigger = fileOf('parts/bigger_crate.tscn');
-    assert.match(
-      bigger,
-      /\[ext_resource type="PackedScene" path="res:\/\/parts\/big_crate\.tscn" id="1_base"\]/,
-      `big_crate.tscn was made since the import, so the uid cache has no uid for it to be named by: ${bigger}`,
+    const bigUid = /uid="(uid:\/\/[a-y0-8]+)"/.exec(fileOf('parts/big_crate.tscn'))?.[1] ?? 'no header uid';
+    // The engine start before this write set the cache right, which gave big_crate.tscn, made since
+    // the import, an entry. Naming it by path now happens only for a file made and referred to
+    // inside one engine run, which no tool call does.
+    assert.ok(
+      bigger.includes(`[ext_resource type="PackedScene" uid="${bigUid}" path="res://parts/big_crate.tscn"`),
+      `big_crate.tscn is named by its own uid: ${bigger}`,
     );
-    assert.equal(
-      get(further, 'namedByPath'),
-      "This saved res://parts/big_crate.tscn by path, because the project's uid cache does not hold its uid until the project is scanned. A path loads the same. project_import refresh_uids scans the project, so later writes name it by uid.",
-      'and the answer says why, with the call that changes it',
-    );
+    assert.equal(get(further, 'namedByPath'), undefined, JSON.stringify(further));
     assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
     const refreshed = parseTextContent(await call('project_import', { op: 'refresh_uids' }));
     assert.ok(Array.isArray(get(refreshed, 'uidsCreated')), JSON.stringify(refreshed));
     const cached = asArray(get(refreshed, 'uidsCached')).map(String);
-    assert.ok(
-      cached.includes('res://parts/big_crate.tscn') && cached.includes('res://parts/bigger_crate.tscn'),
-      `the answer names the scenes made since the import as gaining their uid in the cache: ${JSON.stringify(refreshed)}`,
-    );
-    assert.ok(
-      !cached.includes('res://parts/crate.tscn'),
-      `and not the one it held already: ${cached.join(', ')}`,
+    assert.deepEqual(
+      cached,
+      ['res://parts/bigger_crate.tscn'],
+      `only the scene made by the last write is newly taken: the starts before it gave the others their entry: ${JSON.stringify(refreshed)}`,
     );
     const after = await written('scene_node', {
       op: 'set',
@@ -107525,7 +107521,6 @@ async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
       properties: { position: [1, 1] },
     });
     assert.equal(get(after, 'namedByPath'), undefined, JSON.stringify(after));
-    const bigUid = /uid="(uid:\/\/[a-y0-8]+)"/.exec(fileOf('parts/big_crate.tscn'))?.[1] ?? 'no header uid';
     assert.ok(
       fileOf('parts/bigger_crate.tscn').includes(
         `[ext_resource type="PackedScene" uid="${bigUid}" path="res://parts/big_crate.tscn"`,

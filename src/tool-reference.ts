@@ -124,7 +124,7 @@ export const SHARED_PARAGRAPHS: readonly {
     heading: 'Editor or headless engine',
     text: WITHOUT_AN_EDITOR,
     detail:
-      'The headless engine runs every script of the file, where the editor runs only tool scripts. What a script changes as the file loads or as a property is set is put back before anything is saved. A file where that cannot be done, such as a scene whose script does not compile, is refused with nothing written. Each file the written one refers to is named by its uid, as the editor names it. A file the uid cache has no uid for yet, such as one made since the last scan, is named by path. namedByPath lists it with the call that scans it. An editor of the project that is running and has not reached this server yet is waited for.',
+      'The headless engine runs every script of the file, where the editor runs only tool scripts. What a script changes as the file loads or as a property is set is put back before anything is saved. A file where that cannot be done, such as a scene whose script does not compile, is refused with nothing written. Each file the written one refers to is named by its uid, as the editor names it. Each engine start gives the cache the uid of every file in the project, so a file made by an earlier call is named by its uid too. Only a file made and referred to inside one engine run has no uid in the cache yet, and is named by path. namedByPath lists it with the call that scans it. An editor of the project that is running and has not reached this server yet is waited for.',
   },
   {
     heading: 'What a scene write also saves',
