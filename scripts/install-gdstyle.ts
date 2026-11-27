@@ -24,19 +24,19 @@ export const GDSTYLE_VERSION = 'v0.8.0';
 const ASSETS: Record<string, { asset: string; digest: string }> = {
   'win32-x64': {
     asset: 'gdstyle-x86_64-pc-windows-msvc.zip',
-    digest: '8cfa130f4c0ef4e08ced7025812ecf3398fe4686894d6ad54452725f67de8c18',
+    digest: '9ee5e6e80f2589b4bcd6250286a46614c8a0d7b7aa9800dd9e5a4a79f98aeb31',
   },
   'linux-x64': {
     asset: 'gdstyle-x86_64-unknown-linux-gnu.tar.gz',
-    digest: 'a5d06eeedda85822dd0b90db74c3049469f4e7f91429b8525b01730bbbfcdb92',
+    digest: '2d6611eef86fbdb8bac80685bedb9d936d8ceb4ad701995e34f50a558846f64f',
   },
   'darwin-x64': {
     asset: 'gdstyle-x86_64-apple-darwin.tar.gz',
-    digest: 'a4f77e9a9ae070372e09823fa8725a70bbb382ae2d12f78c617a277bfeec8d0a',
+    digest: 'cf540cb0f708ddd183ec9fd46892787b24e8f8483c234726da66578b878620f5',
   },
   'darwin-arm64': {
     asset: 'gdstyle-aarch64-apple-darwin.tar.gz',
-    digest: '84cbb6ed43a3e37c2eeccd03cd4307db038869944ff731833064860967206569',
+    digest: '1e83a5407cdc8383757f6c8f4846d282d265da18a55b1a0d5eb5771f5de77d88',
   },
 };
 
