@@ -67415,6 +67415,7 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
       // A run that wrote its report says how long the whole call took beside gdUnit4's own seconds.
       const quick = await run('res://quick');
       assert.equal(get(quick, 'passed'), true, JSON.stringify(quick));
+      assert.equal(get(quick, 'engineLog'), undefined, `a run that passed names no log: ${JSON.stringify(quick)}`);
       const quickTook = Number(get(quick, 'tookMs'));
       // gdUnit4 is copied in unimported, so the first run imports its pictures, which the limit
       // does not cover and importTookMs counts.
@@ -67488,6 +67489,13 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
         /^hung: killed after 12000 ms, having printed nothing/,
         JSON.stringify(stuck),
       );
+      // A run that did not pass keeps its engine log, which holds what a crash printed, and names it.
+      const keptLog = String(get(stuck, 'engineLog'));
+      assert.ok(
+        keptLog !== 'undefined' && existsSync(keptLog),
+        `a run that did not pass names a log that is still there: ${JSON.stringify(stuck)}`,
+      );
+      rmSync(dirname(keptLog), { recursive: true, force: true });
       const loop = await run('res://looping');
       assert.equal(get(loop, 'hung'), false, JSON.stringify(loop));
       assert.equal(get(loop, 'timedOut'), true, JSON.stringify(loop));

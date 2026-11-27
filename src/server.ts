@@ -10772,7 +10772,8 @@ export class GodotServer {
         report === null ? undefined : [report],
       );
     } finally {
-      discard(reportsDir, userData);
+      // The user folder goes with the answer, once it is known whether the run passed.
+      discard(reportsDir);
       // The directory the runs share goes with the last report in it, so a project that has
       // been tested is left as it was found. A run still writing beside this one keeps it full,
       // and a removal that fails for that reason is the answer wanted.
@@ -10798,7 +10799,7 @@ export class GodotServer {
           }),
     };
 
-    return await this.testJudged({
+    const answered = await this.testJudged({
       ...ran,
       tookMs,
       tookMsBy,
@@ -10807,6 +10808,38 @@ export class GodotServer {
       report,
       reportProblem,
     });
+    return this.withoutPassedLog(answered, userData, engineLog);
+  }
+
+  /**
+   * A test run's answer with its scratch folder gone. A run that did not pass keeps its engine log
+   * in a folder of its own and names it, since a crash's backtrace is in no other place.
+   */
+  private withoutPassedLog(answered: ToolResponse, userData: string, engineLog: string): ToolResponse {
+    const texts = answered.content.filter((part) => part.type === 'text');
+    const shown = texts.at(-1);
+    let payload: Record<string, unknown> | null = null;
+    try {
+      const parsed: unknown = shown === undefined ? null : JSON.parse(shown.text);
+      payload = isRecord(parsed) ? parsed : null;
+    } catch {
+      // Not an answer with fields: nothing to name the log in.
+    }
+    if (shown === undefined || payload === null || payload['passed'] === true || !existsSync(engineLog)) {
+      discard(userData);
+      return answered;
+    }
+    const kept = scratchDirectory('tests');
+    const keptLog = join(kept, 'engine.log');
+    try {
+      copyFileSync(engineLog, keptLog);
+    } catch {
+      discard(userData, kept);
+      return answered;
+    }
+    discard(userData);
+    shown.text = answerJson({ ...payload, engineLog: keptLog });
+    return answered;
   }
 
   /** The files the script errors name, found only on a run that stopped on a class it could not resolve. */
