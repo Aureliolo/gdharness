@@ -125,7 +125,8 @@ export function resolveSilent(requested: unknown): boolean {
  * The engine's own flags a run may be given, each with the value it takes after it, if any.
  *
  * Only flags that change what the engine logs, draws for debugging, checks on the GPU, which renderer
- * draws, how it times frames or whether it builds the tree a screen reader reads, and Movie Maker's
+ * draws, how it times frames, the window mode a run starts in (`--windowed`, which lets `--resolution`
+ * size a project whose mode is full screen) or whether it builds the tree a screen reader reads, and Movie Maker's
  * `--write-movie`, whose file the server holds to the rules a written capture is held to before the
  * run starts (`movieRefusal`). The command line also takes flags that run a script, open another
  * project, export or write files anywhere, and a tool that passed anything through would hand a
@@ -151,6 +152,7 @@ const ENGINE_FLAGS: Readonly<Record<string, 'none' | FlagValue>> = Object.freeze
   '--time-scale': 'number',
   '--fixed-fps': 'number',
   '--max-fps': 'number',
+  '--windowed': 'none',
   '--resolution': 'size',
   '--write-movie': 'file',
   '--rendering-driver': 'driver',

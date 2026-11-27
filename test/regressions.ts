@@ -38203,7 +38203,16 @@ function testEngineFlagsAreAListNotAPassage(): void {
   assert.deepEqual(engineFlags([]), { ok: true });
   assert.deepEqual(engineFlags(['--verbose', '--debug-collisions', '--print-fps']), { ok: true });
   assert.deepEqual(
-    engineFlags(['--fixed-fps', '60', '--time-scale', '0.5', '--resolution', '640x360', '--quiet']),
+    engineFlags([
+      '--fixed-fps',
+      '60',
+      '--time-scale',
+      '0.5',
+      '--windowed',
+      '--resolution',
+      '640x360',
+      '--quiet',
+    ]),
     { ok: true },
   );
   const refused = (given: string[]): string => {
