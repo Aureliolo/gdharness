@@ -29223,6 +29223,7 @@ function testAUidCacheNamingAFileGoneIsMended(): void {
           [8n, 'res://copy.gd'],
           [0xffff_ffff_ffff_fff0n, 'res://deep/gone_too.gd'],
         ],
+        added: [],
       },
       'each entry naming a file gone moves to the file declaring its uid, outside a .gdignore, or goes',
     );
@@ -29235,11 +29236,11 @@ function testAUidCacheNamingAFileGoneIsMended(): void {
 
     // A sound cache, and one not in Godot's form, are left byte for byte.
     const sound = readFileSync(cache);
-    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [] });
+    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [], added: [] });
     assert.deepEqual(readFileSync(cache), sound);
     const broken = encodedUidCache(stale).subarray(0, 30);
     writeFileSync(cache, broken);
-    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [] });
+    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [], added: [] });
     assert.deepEqual(readFileSync(cache), broken);
 
     // Every way an engine is started mends the cache of the project its --path names, relative to
@@ -29298,6 +29299,71 @@ function testAWrappedEngineIsReadByItsOwnArguments(): void {
     '--',
     'x',
   ]);
+}
+
+/**
+ * A cache older than the files gains an entry for each uid they declare that it lacks (#1723). An
+ * engine that does not scan knew no file for such a uid and warned at every load that named it.
+ */
+function testAUidCacheGainsTheUidsOfFilesItPredates(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-uid-added-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'old.gd': 'extends Node\n',
+      'old.gd.uid': 'uid://1\n',
+      'new/part.tscn': '[gd_scene format=3 uid="uid://2"]\n\n[node name="Part" type="Node"]\n',
+      'new/script.gd': 'extends Node\n',
+      'new/script.gd.uid': 'uid://3\n',
+      'new/data.tres': '[gd_resource type="Resource" format=3 uid="uid://4"]\n',
+      'new/user.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="PackedScene" uid="uid://2" path="res://new/part.tscn" id="1"]\n',
+    });
+    // A digit in a uid text is its value plus 25, so uid://1 is 26n and uid://4 is 29n.
+    const entries: UidEntry[] = [[26n, 'res://old.gd']];
+    const cache = join(project, '.godot', 'uid_cache.bin');
+    mkdirSync(join(project, '.godot'));
+    writeFileSync(cache, encodedUidCache(entries));
+    assert.deepEqual(mendUidCache(project), {
+      moved: [],
+      dropped: [],
+      added: [
+        [27n, 'res://new/part.tscn'],
+        [28n, 'res://new/script.gd'],
+        [29n, 'res://new/data.tres'],
+      ],
+    });
+    assert.deepEqual(
+      readFileSync(cache),
+      encodedUidCache([
+        ...entries,
+        [27n, 'res://new/part.tscn'],
+        [28n, 'res://new/script.gd'],
+        [29n, 'res://new/data.tres'],
+      ]),
+      'the entries it had stand first, and the new ones follow',
+    );
+    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [], added: [] }, 'a second mend is done');
+
+    const fresh = mkdtempSync(join(tmpdir(), 'gdharness-uid-added-none-'));
+    try {
+      writeTree(fresh, {
+        'project.godot': 'config_version=5\n',
+        'a.gd': 'extends Node\n',
+        'a.gd.uid': 'uid://1\n',
+      });
+      mendUidCache(fresh);
+      assert.equal(
+        existsSync(join(fresh, '.godot', 'uid_cache.bin')),
+        false,
+        'no cache is made where none stood',
+      );
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -29614,6 +29680,7 @@ function testASidecarWithNoFileDeclaresNoUid(): void {
           [26n, 'res://gone.gd'],
           [27n, 'res://old.png'],
         ],
+        added: [],
       },
       'only a sidecar beside its file declares, and of two files claiming one uid the later scanned wins',
     );
@@ -29625,7 +29692,11 @@ function testASidecarWithNoFileDeclaresNoUid(): void {
         [30n, 'res://beside/kept.gd'],
       ]),
     );
-    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [] }, 'a second mend finds nothing to do');
+    assert.deepEqual(
+      mendUidCache(project),
+      { moved: [], dropped: [], added: [] },
+      'a second mend finds nothing to do',
+    );
 
     const said: string[] = [];
     const write = process.stderr.write.bind(process.stderr);
@@ -67469,7 +67540,11 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
       // A run that wrote its report says how long the whole call took beside gdUnit4's own seconds.
       const quick = await run('res://quick');
       assert.equal(get(quick, 'passed'), true, JSON.stringify(quick));
-      assert.equal(get(quick, 'engineLog'), undefined, `a run that passed names no log: ${JSON.stringify(quick)}`);
+      assert.equal(
+        get(quick, 'engineLog'),
+        undefined,
+        `a run that passed names no log: ${JSON.stringify(quick)}`,
+      );
       const quickTook = Number(get(quick, 'tookMs'));
       // gdUnit4 is copied in unimported, so the first run imports its pictures, which the limit
       // does not cover and importTookMs counts.
@@ -115455,6 +115530,7 @@ function testTheUidCacheStepsOverAFolderHoldingAProject(): void {
       assert.deepEqual(mendUidCache(project), {
         moved: [[2972703169784048779n, 'res://boot/loader.gd', 'res://gdharness/loader.gd']],
         dropped: [[8n, 'res://copy.gd']],
+        added: [],
       });
     },
   );
@@ -120188,6 +120264,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartMendsNoClassListWhereThereIsNoneOrNoProjectIsNamed,
   testAnEngineReadsAClassListMendedOfAGoneScript,
   testASidecarWithNoFileDeclaresNoUid,
+  testAUidCacheGainsTheUidsOfFilesItPredates,
   testTwinUidsSettleAsTheEditorScans,
   testAMovedAutoloadBootsFromWhereItIs,
   testACancelledCallEndsTheEngineItStarted,
