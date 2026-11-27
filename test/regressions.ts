@@ -102352,6 +102352,37 @@ async function testAStaleShaderParameterIsUnset(): Promise<void> {
   );
 }
 
+/**
+ * A write to another node leaves a shader parameter its shader no longer declares in the file, as
+ * the file held it, since the engine saves only the parameters a shader declares. An unset of it
+ * still takes it out, and a later write does not bring it back.
+ */
+async function testAWriteKeepsAShaderParameterTheShaderLacks(): Promise<void> {
+  await withASceneProject(
+    'stale shader parameter kept',
+    {
+      's.gdshader': 'shader_type spatial;\nuniform float kept = 1.0;\nuniform float other = 1.0;\n',
+      'view.tscn': staleShaderScene,
+    },
+    async ({ written, fileOf }) => {
+      const other = { op: 'set', scenePath: 'view.tscn', nodePath: 'Other' };
+      await written('scene_node', { ...other, properties: { position: [3, 4, 5] } });
+      const kept = fileOf('view.tscn');
+      assert.match(kept, /shader_parameter\/kept = 2\.0\nshader_parameter\/stale = 3\.0\n/, kept);
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'view.tscn',
+        nodePath: 'Mesh',
+        unset: ['material_override/shader_parameter/stale'],
+      });
+      await written('scene_node', { ...other, properties: { position: [5, 4, 3] } });
+      const taken = fileOf('view.tscn');
+      assert.doesNotMatch(taken, /shader_parameter\/stale/, taken);
+      assert.match(taken, /shader_parameter\/kept = 2\.0/, taken);
+    },
+  );
+}
+
 /** scene_node set, add, duplicate, get and scene_signal connect and list on a scene, with no editor. */
 async function testASceneNodeIsWrittenAndReadWithNoEditor(): Promise<void> {
   await withASceneProject(
@@ -119538,6 +119569,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASceneNodeIsWrittenAndReadWithNoEditor,
   testASceneIsEditedAsSavedWithNoEditor,
   testAStaleShaderParameterIsUnset,
+  testAWriteKeepsAShaderParameterTheShaderLacks,
   testAConnectionIsWrittenAndJudgedAgainstItsMethodWithNoEditor,
   testAReconnectKeepsBindsAndFlagsWithNoEditor,
   testAConnectionMadeByAnInstancedSceneIsNotEditableWhereItIsInstanced,

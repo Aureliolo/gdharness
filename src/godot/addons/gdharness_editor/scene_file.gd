@@ -1835,11 +1835,110 @@ func _write(check: Callable) -> Dictionary:
 		values.append_array(_stored_at(state, index).values())
 	var carried: Dictionary = GdhHeadlessCheck.embedded_in(values, {})
 	var written: Dictionary = save_packed(packed, path, keep)
-	if not written.is_empty() or not headless or not path.ends_with(".tscn"):
-		if written.is_empty():
-			also_saved.append_array(also)
-		return written
-	return _settled_write(packed, keep, values, carried, previous, also)
+	if written.is_empty() and not (headless and path.ends_with(".tscn")):
+		also_saved.append_array(also)
+	elif written.is_empty():
+		written = _settled_write(packed, keep, values, carried, previous, also)
+	if written.is_empty():
+		var unkept: String = _keep_stale_parameters(previous, carried)
+		if not unkept.is_empty():
+			return refuse(unkept)
+	return written
+
+
+## Puts back into the text scene just saved each shader parameter the file held that its material
+## still holds and its shader does not declare. The engine lists only the parameters a shader
+## declares, so a save leaves out the others, though a call that never asked for them gone had no
+## reason to lose their lines. An unset takes the value off the material, and so is not put back.
+## [param previous] is the file before the save and [param carried] the resources the pack holds,
+## by id. Answers "" or why the file could not be written again.
+func _keep_stale_parameters(previous: Variant, carried: Dictionary) -> String:
+	if not path.ends_with(".tscn") or not previous is PackedByteArray:
+		return ""
+	var bytes: PackedByteArray = previous
+	var saved: String = FileAccess.get_file_as_string(path)
+	var lost: Dictionary = _stale_parameter_lines(
+		GdhHeadlessCheck.sections(bytes.get_string_from_utf8()),
+		GdhHeadlessCheck.sections(saved),
+		carried
+	)
+	if lost.is_empty():
+		return ""
+	var file: FileAccess = FileAccess.open(written_at(path), FileAccess.WRITE)
+	if file == null:
+		return (
+			(
+				"%s was saved without the shader parameters its shaders no longer declare, and "
+				+ "could not be opened again to put them back: %s"
+			)
+			% [path, error_string(FileAccess.get_open_error())]
+		)
+	var _stored: bool = file.store_string(_with_lines_added(saved, lost))
+	file.close()
+	refresh(path)
+	return ""
+
+
+## The lines of the shader parameters in [param before], the sections of the file before a save,
+## that [param after], those of the file saved, lacks while the ShaderMaterial of [param carried]
+## still holds them and its shader declares no such uniform, as an array of lines by the id of the
+## sub-resource.
+static func _stale_parameter_lines(
+	before: Dictionary, after: Dictionary, carried: Dictionary
+) -> Dictionary:
+	var lost: Dictionary = {}
+	for key: Variant in before:
+		var section: String = str(key)
+		var material: ShaderMaterial = carried.get(section.trim_prefix("sub:")) as ShaderMaterial
+		if material == null or not section.begins_with("sub:") or not after.has(key):
+			continue
+		var filed: Dictionary = GdhHeadlessCheck.entries_of(before[key])
+		var saved: Dictionary = GdhHeadlessCheck.entries_of(after[key])
+		var lines: PackedStringArray = []
+		for name: Variant in filed:
+			var property: String = str(name)
+			if (
+				property.begins_with("shader_parameter/")
+				and not saved.has(property)
+				and material.get(property) != null
+				and not _declares(material, property.trim_prefix("shader_parameter/"))
+			):
+				var _added: bool = lines.append("%s = %s" % [property, filed[name]])
+		if not lines.is_empty():
+			lost[section.trim_prefix("sub:")] = lines
+	return lost
+
+
+## Whether the shader of [param material] declares the uniform [param uniform].
+static func _declares(material: ShaderMaterial, uniform: String) -> bool:
+	if material.shader == null:
+		return false
+	for entry: Dictionary in material.shader.get_shader_uniform_list():
+		if str(entry["name"]) == uniform:
+			return true
+	return false
+
+
+## [param text], a text scene, with the lines of [param lost], by sub-resource id, added at the end
+## of that sub-resource's section.
+static func _with_lines_added(text: String, lost: Dictionary) -> String:
+	var lines: PackedStringArray = text.split("\n")
+	for id: Variant in lost:
+		var head: String = 'id="%s"' % str(id)
+		for index: int in lines.size():
+			if not (lines[index].begins_with("[sub_resource") and lines[index].contains(head)):
+				continue
+			var end: int = index + 1
+			while end < lines.size() and not lines[end].begins_with("["):
+				end += 1
+			while lines[end - 1].is_empty():
+				end -= 1
+			var added: PackedStringArray = lost[id]
+			for line: String in added:
+				lines.insert(end, line)
+				end += 1
+			break
+	return "\n".join(lines)
 
 
 ## What a write outside an editor does to [param packed] before it saves, as [packed scene,
