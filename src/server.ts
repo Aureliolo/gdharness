@@ -210,7 +210,14 @@ import {
   ENGINE_PASSES,
   HEADLESS_OPERATIONS,
 } from './headless-operations.js';
-import { IDLE_CLOSE_SETTING, idleClosed, idleSettled, portsIn, stillQuitting } from './idle-close.js';
+import {
+  IDLE_CLOSE_SETTING,
+  idleClosed,
+  idleSettled,
+  portsIn,
+  stillQuitting,
+  usesTheEditor,
+} from './idle-close.js';
 import { importedIntoTheProject, staleImports } from './import-freshness.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
@@ -5941,12 +5948,22 @@ export class GodotServer {
    */
   private readonly greetedEditors = new Set<number>();
 
+  /** A number for a call to [param tool], noting whether it uses the editor. */
+  private takeCall(tool: string): number {
+    if (usesTheEditor(tool)) {
+      this.editorCallsTaken++;
+    }
+    return this.callsTaken++;
+  }
+
   /** The calls being answered, by a number of their own, which the lifecycle log's ended line names. */
   private readonly inFlight = new Map<number, CallInFlight>();
   /** The runtime calls being answered, each with the game it went to. */
   private readonly callsOnGames = new Set<CallOnAGame>();
   private callsTaken = 0;
-  /** [member callsTaken] when the editor was last told calls are being made. */
+  /** The calls taken that use the editor or its game. */
+  private editorCallsTaken = 0;
+  /** [member editorCallsTaken] when the editor was last told calls are being made. */
   private callsToldOf = 0;
   /** Where answers too large to send are written, made the first time one is. */
   private answersDirectory: string | undefined;
@@ -6218,16 +6235,17 @@ export class GodotServer {
   }
 
   /**
-   * Tells the connected editor, every [function activityMs], that calls came in since it was last
-   * told or are still being answered. A hidden editor counts its idle minutes from what it last
-   * heard, and most calls never reach it.
+   * Tells the connected editor, every [function activityMs], that calls using it or its game came
+   * in since it was last told or are still being answered. A hidden editor counts its idle minutes
+   * from what it last heard, and calls to other tools never reach it, so they do not count.
    */
   private tellTheEditorItIsInUse(): void {
     const tell = setInterval(() => {
-      if (this.callsTaken === this.callsToldOf && this.inFlight.size === 0) {
+      const inUse = [...this.inFlight.values()].some((call) => usesTheEditor(call.tool));
+      if (this.editorCallsTaken === this.callsToldOf && !inUse) {
         return;
       }
-      this.callsToldOf = this.callsTaken;
+      this.callsToldOf = this.editorCallsTaken;
       this.godotBridge.noteActivity();
     }, activityMs());
     tell.unref();
@@ -6616,7 +6634,7 @@ export class GodotServer {
                   this.logDebug(`Progress for ${spec.name} was not sent: ${errorMessage(error)}`);
                 });
             };
-      const call = this.callsTaken++;
+      const call = this.takeCall(spec.name);
       this.inFlight.set(call, { tool: spec.name, op: checked.op ?? '', startedAt: Date.now() });
       const slotWaits: SlotWaits = { ms: 0, said: undefined };
       const notes = newCallNotes();

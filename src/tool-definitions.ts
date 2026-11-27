@@ -1887,7 +1887,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       hidden: {
         type: 'boolean',
         ops: ['open', 'restart'],
-        description: `Open the editor out of sight. Default false on open, and on restart how the editor was started. A hidden editor quits after ${String(IDLE_CLOSE_MINUTES)} minutes with no call. The setting ${IDLE_CLOSE_SETTING} changes that, and 0 turns it off.`,
+        description: `Open the editor out of sight. Default false on open, and on restart how the editor was started. A hidden editor quits after ${String(IDLE_CLOSE_MINUTES)} minutes with no editor_* or runtime_* call. ${IDLE_CLOSE_SETTING} changes that, 0 turns it off.`,
       },
       silent: {
         type: 'boolean',

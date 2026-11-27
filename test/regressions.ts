@@ -13559,6 +13559,17 @@ async function aCallMetByAnEditorQuitting(dropsItsReply: boolean): Promise<void>
     const told = heardFirst.length;
     await delay(1000);
     assert.equal(heardFirst.length, told, `nothing is said without calls: ${heardFirst.join(', ')}`);
+    // A call that never uses the editor does not keep it open, and one that does is told of.
+    await server.request('tools/call', { name: 'project_info', arguments: { projectPath: project } });
+    await delay(1000);
+    assert.equal(heardFirst.length, told, `a call to another tool is not told of: ${heardFirst.join(', ')}`);
+    await status();
+    await delay(1000);
+    assert.ok(
+      heardFirst.slice(told).includes('activity'),
+      `an editor call is told of: ${heardFirst.slice(told).join(', ')}`,
+    );
+    await delay(1000);
 
     // The editor writes its record as it quits, and the stand-in still running is the one quitting.
     writeRecord();
