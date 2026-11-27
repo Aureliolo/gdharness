@@ -88,6 +88,27 @@ const OTHER_PROJECT_CLOSE_CODE = 4001;
  */
 const ONE_SHOT_CLOSE_CODE = 4002;
 
+/** How long a connection turned away as a second one has to greet before it is refused unread. */
+const SECOND_GREETING_WAIT_MS = 5000;
+
+/** The pid a connection's greeting names, or undefined for anything else, or for an editor a server opened. */
+function greetedPid(data: RawData): number | undefined {
+  try {
+    const parsed: unknown = JSON.parse(Buffer.isBuffer(data) ? data.toString('utf8') : '');
+    if (!isRecord(parsed)) {
+      return undefined;
+    }
+    const said = parsed;
+    return said['type'] === 'godot_ready' &&
+      said['opened_by_a_server'] !== true &&
+      typeof said['editor_pid'] === 'number'
+      ? said['editor_pid']
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** What the bridge last turned away as a one-shot engine run, for editor_status to say. */
 interface TurnedAway {
   readonly pid: number;
@@ -921,7 +942,7 @@ export class GodotBridge extends EventEmitter {
   private handleConnection(nextSocket: WebSocket): void {
     if (this.socket && this.socket.readyState !== WebSocket.CLOSED) {
       this.log('warn', 'Rejecting second Godot connection');
-      nextSocket.close(SECOND_CONNECTION_CLOSE_CODE, 'Godot already connected');
+      this.refuseSecondConnection(nextSocket);
       return;
     }
 
@@ -958,6 +979,67 @@ export class GodotBridge extends EventEmitter {
           new EditorDisconnected(`Godot disconnected during request: ${error.message}`),
         );
       }
+    });
+  }
+
+  /**
+   * Turns away a connection that came while an editor is held: as one job that quits when its
+   * command line says so, which is quiet, and as a second editor otherwise, which the addon warns
+   * of. A gate's `--import` during an upgrade dials the old server's address, and was told another
+   * editor was served for as long as the real one stayed open.
+   *
+   * The pid comes with the greeting, so the answer waits for it, and a connection that never
+   * greets is refused as a second editor.
+   */
+  private refuseSecondConnection(second: WebSocket): void {
+    const reader = this.oneShotReader;
+    if (reader === null) {
+      second.close(SECOND_CONNECTION_CLOSE_CODE, 'Godot already connected');
+      return;
+    }
+    let decided = false;
+    const decide = (option: string | null, pid?: number): void => {
+      if (decided) {
+        return;
+      }
+      decided = true;
+      clearTimeout(giveUp);
+      if (second.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      if (option === null || pid === undefined) {
+        second.close(SECOND_CONNECTION_CLOSE_CODE, 'Godot already connected');
+        return;
+      }
+      this.oneShots.set(pid, option);
+      const said = `pid ${pid} was started with ${option}, which does one job and quits, so it is not an editor`;
+      this.log('info', `Turning away an engine run: ${said}`);
+      this.turnedAway = { pid, option, at: new Date() };
+      second.close(ONE_SHOT_CLOSE_CODE, closeReason(said, 'start'));
+    };
+    const giveUp = setTimeout(() => {
+      decide(null);
+    }, SECOND_GREETING_WAIT_MS);
+    giveUp.unref();
+    second.on('error', () => {
+      decide(null);
+    });
+    second.once('message', (data) => {
+      const pid = greetedPid(data);
+      if (pid === undefined) {
+        decide(null);
+        return;
+      }
+      const known = this.oneShots.get(pid);
+      if (known !== undefined) {
+        decide(known, pid);
+        return;
+      }
+      void reader(pid)
+        .catch(() => undefined)
+        .then((option) => {
+          decide(typeof option === 'string' ? option : null, pid);
+        });
     });
   }
 

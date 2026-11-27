@@ -1411,6 +1411,60 @@ async function testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly(): Promise<voi
 }
 
 /**
+ * A one-shot run that dials in while an editor is held is turned away as a one-shot, not as a second
+ * editor. A gate's `--import` during an upgrade reached the old server's address and warned that
+ * the address already served another editor (#1727). A second editor is still told so, and one that
+ * never greets is refused as a second editor too.
+ */
+async function testAOneShotRunBesideAHeldEditorIsTurnedAwayQuietly(): Promise<void> {
+  const mine = resolve('/gdharness-one-shot-held');
+  const bridge = createBridge(0, 1000, '127.0.0.1', mine);
+  bridge.identifyEditorsWith((pid) => Promise.resolve(pid === 301 ? '--import' : null));
+  const hello = (socket: FakeSocket, pid: number): void => {
+    socket.emit('message', Buffer.from(JSON.stringify(greeting(mine, { editor_pid: pid }))));
+  };
+  const opened: FakeSocket[] = [];
+  const socket = (name: string): FakeSocket => {
+    const made = new FakeSocket(name);
+    opened.push(made);
+    connectFake(bridge, made);
+    return made;
+  };
+  try {
+    const editor = socket('the held editor');
+    hello(editor, 300);
+    await delay(20);
+    assert.equal(bridge.getStatus().connected, true, 'the editor is served');
+
+    const importing = socket('an import');
+    hello(importing, 301);
+    await delay(20);
+    assert.equal(
+      importing.closedWith?.code,
+      4002,
+      `closed as a one-shot: ${JSON.stringify(importing.closedWith)}`,
+    );
+    assert.match(importing.closedWith.reason, /pid 301 was started with --import/);
+    assert.equal(editor.closedWith, null, 'and the held editor is left alone');
+
+    const second = socket('a second editor');
+    hello(second, 302);
+    await delay(20);
+    assert.equal(
+      second.closedWith?.code,
+      4000,
+      `a second editor is told it is one too many: ${JSON.stringify(second.closedWith)}`,
+    );
+  } finally {
+    for (const made of opened) {
+      if (made.readyState !== 3) {
+        made.close();
+      }
+    }
+  }
+}
+
+/**
  * The debugger names the errors its own calls made the engine print: a pause reaching a game already
  * held, at any time, and an Expression error only while it evaluates, since the game's own
  * expressions raise the same one.
@@ -119733,6 +119787,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnOpenConnectionDoesNotHoldItsProcess,
   testOneServerOneProjectRegression,
   testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly,
+  testAOneShotRunBesideAHeldEditorIsTurnedAwayQuietly,
   testEngineEntriesFoldAndScriptErrorsAreKnown,
   testAnEvaluatesErrorIsNotTheGames,
   testAPathReadsErrorIsNotTheGames,
