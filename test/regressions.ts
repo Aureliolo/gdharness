@@ -78783,6 +78783,31 @@ async function testTheLocksOfTheOsAreFilesNoReleasedVersionReads(): Promise<void
   }
 }
 
+/**
+ * A lent slot named by something that is no file, such as a bare slot number, lends nothing and
+ * leaves no file behind: the take holds a slot of its own.
+ */
+function testALentSlotNamingNoFileMakesNone(): void {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lent-nothing-'));
+  const before = process.env['GODOT_ENGINE_HELD'];
+  const named = join(directory, '2');
+  process.env['GODOT_ENGINE_HELD'] = named;
+  try {
+    const slots = new EngineSlots(join(directory, 'slots'), 2);
+    const slot = slots.takeFree();
+    assert.equal(slot, join(directory, 'slots', '0.held'), 'the take holds a slot of its own');
+    assert.ok(!existsSync(named), 'and makes no file of the name it was lent');
+    slots.releaseAll();
+  } finally {
+    if (before === undefined) {
+      delete process.env['GODOT_ENGINE_HELD'];
+    } else {
+      process.env['GODOT_ENGINE_HELD'] = before;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 /** The Python snippet docs/test-runs.md gives for taking a slot as another program, as written there. */
 function documentedSlotRecipe(): string {
   const docs = readFileSync(join('docs', 'test-runs.md'), 'utf8');
@@ -120745,6 +120770,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryEngineWaitsForAMachineSlot,
   testASlotIsAnOsLockHeldForAsLongAsItsProcessLives,
   testTheLocksOfTheOsAreFilesNoReleasedVersionReads,
+  testALentSlotNamingNoFileMakesNone,
   testAPythonProcessAndGdharnessExcludeEachOnTheSameSlot,
   testPinnedToolsInstallOutsideTheTemporaryFolder,
   testEveryToolFindsOneCacheFolderAndIgnoresARelativeVariable,

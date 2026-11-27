@@ -30,7 +30,7 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { availableParallelism, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
@@ -332,6 +332,11 @@ export class EngineSlots {
   private inheritedByOne(): string | null {
     const named = nonEmpty(process.env[HELD_VARIABLE]);
     if (this.inherited !== null || named === undefined || this.held.has(named)) {
+      return null;
+    }
+    // The probe opens to create, so a name that is no file would be made, and nothing can hold a
+    // file that is not there. A bare slot number left a numbered empty file in each checkout.
+    if (!existsSync(named)) {
       return null;
     }
     try {
