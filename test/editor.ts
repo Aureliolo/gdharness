@@ -2972,6 +2972,69 @@ async function testAMovedNodeKeepsItsPathsInTheEditor({ call, refusal, project }
   }
 }
 
+/**
+ * A write edits the scene as saved. A script that is not a tool runs nowhere in an editor, and one
+ * that is a tool is not run by a tool call either, so a child its _ready moves stays where the file
+ * has it. And a save never holds fewer nodes than the file did, bar those the call removed.
+ */
+async function testASceneIsEditedAsSavedInTheEditor({ call, refusal, project }: Editor): Promise<void> {
+  mkdirSync(join(project, 'page'), { recursive: true });
+  const moving = (tool: string): string =>
+    tool +
+    'extends Node2D\n\n\nfunc _ready() -> void:\n\tvar holder := Node2D.new()\n\tholder.name = "Holder"\n\tadd_child(holder)\n' +
+    '\tvar facing: Node = get_node("Facing")\n\tremove_child(facing)\n\tholder.add_child(facing)\n';
+  const dropping =
+    '@tool\nextends Node2D\n\n@export var drop: bool = false:\n\tset(value):\n\t\tdrop = value\n' +
+    '\t\tif value and has_node("Facing"):\n\t\t\tget_node("Facing").free()\n';
+  const scene = (script: string): string =>
+    '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://page/' +
+    script +
+    '" id="1_s"]\n\n' +
+    '[node name="Page" type="Node2D"]\nscript = ExtResource("1_s")\n\n[node name="Facing" type="Node2D" parent="."]\n';
+  writeFileSync(join(project, 'page', 'plain.gd'), moving(''));
+  writeFileSync(join(project, 'page', 'tooled.gd'), moving('@tool\n'));
+  writeFileSync(join(project, 'page', 'dropper.gd'), dropping);
+  for (const name of ['plain', 'tooled', 'dropper']) {
+    writeFileSync(join(project, 'page', name + '.tscn'), scene(name + '.gd'));
+  }
+  try {
+    await call('editor_rescan', { projectPath: project });
+    for (const name of ['plain', 'tooled']) {
+      const page = { projectPath: project, scenePath: 'res://page/' + name + '.tscn' };
+      await call('scene_node', {
+        ...page,
+        op: 'add',
+        nodeType: 'Node2D',
+        nodeName: 'Eye',
+        parentNodePath: 'Facing',
+      });
+      await call('scene_node', { ...page, op: 'set', nodePath: '.', properties: { position: [3, 4] } });
+      await call('scene_node', { ...page, op: 'set', nodePath: '.', properties: { script: null } });
+      const saved = fileText(project, 'page/' + name + '.tscn');
+      assert.doesNotMatch(saved, /Holder/, saved);
+      assert.match(saved, /\[node name="Facing" type="Node2D" parent="\."/, saved);
+      assert.match(saved, /\[node name="Eye" type="Node2D" parent="Facing"/, saved);
+    }
+    const before = fileText(project, 'page/dropper.tscn');
+    const refused = await refusal('scene_node', {
+      projectPath: project,
+      scenePath: 'res://page/dropper.tscn',
+      op: 'set',
+      nodePath: '.',
+      properties: { drop: true },
+    });
+    assert.match(
+      refused,
+      /Nothing was written: .*would hold fewer nodes than .* when it was read.*Missing: Facing/s,
+      refused,
+    );
+    assert.equal(fileText(project, 'page/dropper.tscn'), before, 'and the file is as it was');
+  } finally {
+    rmSync(join(project, 'page'), { recursive: true, force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
 /** An animation and a track on it, read back out of the sub-resources the scene gained. */
 async function testSceneAnimation({ call, refusal, project }: Editor): Promise<void> {
   const scene = { projectPath: project, scenePath: SCENE };
@@ -9831,6 +9894,7 @@ async function main(): Promise<void> {
       testAShaderReadSeesALostIncludeFunctionInTheEditor,
     ],
     ['testAMovedNodeKeepsItsPathsInTheEditor', testAMovedNodeKeepsItsPathsInTheEditor],
+    ['testASceneIsEditedAsSavedInTheEditor', testASceneIsEditedAsSavedInTheEditor],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
     [
       'testAClassReloadedOnceItsBaseExistsReachesItsUsers',

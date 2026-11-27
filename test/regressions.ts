@@ -102102,6 +102102,84 @@ async function testAServerThatDiesMidCallSaysHowItEnded(): Promise<void> {
   }
 }
 
+// _ready moves Facing under a node it makes, which a write must not run: it is edited as saved.
+const reparentingScript =
+  'extends Node2D\n\n\nfunc _ready() -> void:\n\tvar holder := Node2D.new()\n\tholder.name = "Holder"\n\tadd_child(holder)\n' +
+  '\tvar facing: Node = get_node("Facing")\n\tremove_child(facing)\n\tholder.add_child(facing)\n';
+// A tool script runs in an editor too, so what it drops is what an editor's save would drop as well.
+const droppingScript =
+  '@tool\nextends Node2D\n\n@export var drop: bool = false:\n\tset(value):\n\t\tdrop = value\n' +
+  '\t\tif value and has_node("Facing"):\n\t\t\tget_node("Facing").free()\n';
+const twoNodeScene = (script: string): string =>
+  '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://' +
+  script +
+  '" id="1_s"]\n\n' +
+  '[node name="Page" type="Node2D"]\nscript = ExtResource("1_s")\n\n[node name="Facing" type="Node2D" parent="."]\n';
+
+/**
+ * A write edits the scene as saved: a script that is not a tool never runs, so one that moves a
+ * child in _ready leaves it where the file has it. And a save never holds fewer nodes than the
+ * file did, bar those the call removed, which is refused with the file as it was.
+ */
+async function testASceneIsEditedAsSavedWithNoEditor(): Promise<void> {
+  await withASceneProject(
+    'edit as saved',
+    {
+      'page.gd': reparentingScript,
+      'page.tscn': twoNodeScene('page.gd'),
+      'dropper.gd': droppingScript,
+      'dropper.tscn': twoNodeScene('dropper.gd'),
+    },
+    async ({ call, written, fileOf }) => {
+      await written('scene_node', {
+        op: 'add',
+        scenePath: 'page.tscn',
+        nodeType: 'Node2D',
+        nodeName: 'Eye',
+        parentNodePath: 'Facing',
+      });
+      assert.match(
+        fileOf('page.tscn'),
+        /\[node name="Eye" type="Node2D" parent="Facing"/,
+        fileOf('page.tscn'),
+      );
+      assert.doesNotMatch(fileOf('page.tscn'), /Holder/, 'the script never ran');
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'page.tscn',
+        nodePath: '.',
+        properties: { position: [3, 4] },
+      });
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'page.tscn',
+        nodePath: '.',
+        properties: { script: null },
+      });
+      const saved = fileOf('page.tscn');
+      assert.match(saved, /\[node name="Facing" type="Node2D" parent="\."/, saved);
+      assert.match(saved, /\[node name="Eye" type="Node2D" parent="Facing"/, saved);
+
+      const before = fileOf('dropper.tscn');
+      const refused =
+        textOf(
+          await call('scene_node', {
+            op: 'set',
+            scenePath: 'dropper.tscn',
+            nodePath: '.',
+            properties: { drop: true },
+          }),
+        ) ?? '';
+      assert.match(
+        refused,
+        /^Nothing was written: .*would hold fewer nodes than .* when it was read.*Missing: Facing/s,
+        refused,
+      );
+      assert.equal(fileOf('dropper.tscn'), before, 'and the file is as it was');
+    },
+  );
+}
+
 /** scene_node set, add, duplicate, get and scene_signal connect and list on a scene, with no editor. */
 async function testASceneNodeIsWrittenAndReadWithNoEditor(): Promise<void> {
   await withASceneProject(
@@ -119286,6 +119364,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAReadWithNoEditorAnswersFromTheFile,
   testAServerThatDiesMidCallSaysHowItEnded,
   testASceneNodeIsWrittenAndReadWithNoEditor,
+  testASceneIsEditedAsSavedWithNoEditor,
   testAConnectionIsWrittenAndJudgedAgainstItsMethodWithNoEditor,
   testAReconnectKeepsBindsAndFlagsWithNoEditor,
   testAConnectionMadeByAnInstancedSceneIsNotEditableWhereItIsInstanced,
