@@ -50,10 +50,7 @@
     {
       "description": "A version with the SHA-256 or SHA-512 of the file it names on the next line: Bun, uv, actionlint, mcp-publisher, syft and the engine. The tag and the digest move together, and the datasource finds the new digest in the checksum file the release publishes.",
       "customType": "regex",
-      "managerFilePatterns": [
-        "/^\\.github/.+\\.ya?ml$/",
-        "/^scripts/.+\\.ts$/"
-      ],
+      "managerFilePatterns": ["/^\\.github/.+\\.ya?ml$/", "/^scripts/.+\\.ts$/"],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>github-release-attachments) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\n\\s*[A-Z0-9_]+_TAG: (?<currentValue>\\S+)\\n\\s*[A-Z0-9_]+_SHA256: (?<currentDigest>[0-9a-f]{64})",
         "// renovate: datasource=(?<datasource>github-release-attachments) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\n\\s*tag: '(?<currentValue>[^']+)',\\n\\s*digest:\\s*'(?<currentDigest>[0-9a-f]{128})'"
@@ -63,9 +60,7 @@
       "description": "The Bun in packageManager, which the install action requires to name the Bun it pins: raised alone, the action's three tags moved to 1.4.3 and every job stopped at the install, refusing the disagreement. Same depName and release as those tags, so the two land in the same pull request.",
       "customType": "regex",
       "managerFilePatterns": ["/^package\\.json$/"],
-      "matchStrings": [
-        "\"packageManager\": \"bun@(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\""
-      ],
+      "matchStrings": ["\"packageManager\": \"bun@(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\""],
       "datasourceTemplate": "github-releases",
       "depNameTemplate": "oven-sh/bun",
       "extractVersionTemplate": "^bun-v(?<version>.+)$"
