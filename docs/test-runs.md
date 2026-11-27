@@ -721,7 +721,7 @@ still take a slot. Inside an engine's slot (`GODOT_ENGINE_HELD`) an import runs 
 engine does.
 
 These engines of one project run one at a time across the machine, since each writes the project's
-`.godot`. Each takes the project's lock, `<directory>/projects/<key>.lock`, an operating system lock
+`.godot`. Each takes the project's lock, `<directory>/projects/<key>.held`, an operating system lock
 as a slot's is, and waits while another process holds it. The key is the first 16 hex digits of the
 SHA-256 of the project's resolved path, lower-cased on Windows. An engine for another project does
 not wait. A tool call waiting for the lock is told as for a slot, below.
@@ -766,7 +766,7 @@ file is read at each take, the variable once per process.
 ### Taking a slot from another program
 
 A program that wants to count against the same slots locks the same files, the same way. The slots
-are `<directory>/<n>.lock` for `n` from 0 below the count. Try each in turn and keep the first you
+are `<directory>/<n>.held` for `n` from 0 below the count. Try each in turn and keep the first you
 lock without waiting. Hold it, open, for as long as your engine runs. When none is free, look again
 about a second later.
 

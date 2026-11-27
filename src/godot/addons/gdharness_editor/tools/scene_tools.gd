@@ -485,6 +485,7 @@ func delete_node(args: Dictionary) -> Dictionary:
 		if under.owner == scene.root:
 			went.append(scene.path_of(under))
 	var cut: Array[Dictionary] = _connections_with(scene, at)
+	scene.removed(node)
 	node.get_parent().remove_child(node)
 	node.free()
 	var carried: GdhPaths = GdhPaths.new()
