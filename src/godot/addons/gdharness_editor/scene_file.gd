@@ -32,6 +32,8 @@ const PUTTING_BACK_PASSES: int = 4
 const PROPERTY_NAME_MASK: int = (1 << 30) - 1
 ## The type of a node entry in a bundle for a node another file makes (TYPE_INSTANTIATED).
 const NODE_MADE_ELSEWHERE: int = 0x7fffffff
+## The bit that marks a property of a node entry as one holding a node (FLAG_PATH_PROPERTY_IS_NODE).
+const HOLDS_A_NODE: int = 1 << 30
 ## The bit that marks a node entry's parent or a connection's end as a path (FLAG_ID_IS_PATH).
 const NAMED_BY_PATH: int = 1 << 30
 const GdhFileReads = preload("file_reads.gd")
@@ -205,11 +207,122 @@ func _load_packed(for_writing: bool, failed: GdhHeadlessCheck.GdhParseErrors) ->
 	)
 	if packed != null:
 		var held: Array[Array] = GdhHeadlessCheck.embedded_held(packed)
-		root = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
+		root = _instantiated(packed)
 		GdhHeadlessCheck.hold_embedded(held)
 	if watching:
 		OS.remove_logger(failed)
 	return packed
+
+
+## [param packed] instantiated as an editor does, which runs the scripts that are tools and none of
+## the others. Outside an editor every script runs as the scene is made, and one that answers
+## NOTIFICATION_SCENE_INSTANTIATED can move the scene's own nodes before any tool sees them. So the
+## scripts that are not tools are cut out of the bundle for the instantiate and set on their nodes
+## after it, which runs their [code]_init[/code] and none of the instantiate's notifications. What
+## the scripts hold is put back to the file's values by [method settle], and the connections their
+## signals make are made here, since the engine skips them while the script is absent.
+func _instantiated(packed: PackedScene) -> Node:
+	var bundled: Dictionary = packed.get("_bundled")
+	var variants: Array = bundled["variants"]
+	var names: PackedStringArray = bundled["names"]
+	var nodes: PackedInt32Array = bundled["nodes"]
+	var state: SceneState = packed.get_state()
+	var scripts: Dictionary[int, Script] = {}
+	# The properties that hold a node, which the engine sets once every node is made.
+	var holding: Dictionary[int, Array] = {}
+	var cut: Array = variants.duplicate()
+	var at: int = 0
+	for index: int in state.get_node_count():
+		var listed: int = nodes[at + 5]
+		at += 6
+		for _property: int in listed:
+			var property_name: String = names[nodes[at] & PROPERTY_NAME_MASK]
+			if property_name == "script":
+				var script: Variant = variants[nodes[at + 1]]
+				if GdhHeadlessCheck.untooled(script):
+					scripts[index] = script
+					cut[nodes[at + 1]] = null
+			if nodes[at] & HOLDS_A_NODE != 0:
+				var held_names: Array = holding.get_or_add(index, [])
+				held_names.append(property_name)
+			at += 2
+		at += 1 + nodes[at]
+	if Engine.is_editor_hint() or scripts.is_empty():
+		return packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
+	var stripped: Dictionary = bundled.duplicate()
+	stripped["variants"] = cut
+	# The connections wait too: the engine reports each one whose method or signal a script gives.
+	stripped["conns"] = PackedInt32Array()
+	stripped["conn_count"] = 0
+	packed.set("_bundled", stripped)
+	var made: Node = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
+	packed.set("_bundled", bundled)
+	if made == null:
+		return null
+	for index: int in scripts:
+		var node: Node = _found_in(made, str(state.get_node_path(index)))
+		var held_here: Array = holding.get(index, [])
+		if node != null:
+			_scripted(node, scripts[index], state, index, held_here)
+	for index: int in scripts:
+		var node: Node = _found_in(made, str(state.get_node_path(index)))
+		var held_here: Array = holding.get(index, [])
+		for name: String in held_here:
+			node.set(name, node.get_node_or_null(_value_of(state, index, name)))
+	_reconnected(made, state)
+	return made
+
+
+## Sets [param script] on [param node] and then what the file holds for it, in the order the engine
+## does when the script is there from the start: the script's own [code]_init[/code] may name the
+## node or set values, and the file's values come after.
+static func _scripted(
+	node: Node, script: Script, state: SceneState, index: int, holding: Array
+) -> void:
+	var named: StringName = node.name
+	node.set_script(script)
+	node.name = named
+	for property: int in state.get_node_property_count(index):
+		var name: StringName = state.get_node_property_name(index, property)
+		if name != &"script" and not holding.has(str(name)):
+			node.set(name, state.get_node_property_value(index, property))
+
+
+## The node at [param node_path], as a bundle names it, below [param top].
+static func _found_in(top: Node, node_path: String) -> Node:
+	var at: String = _relative(node_path)
+	return top if at == "." else top.get_node_or_null(NodePath(at))
+
+
+## The value [param state] holds for [param name] on its node [param index].
+static func _value_of(state: SceneState, index: int, name: String) -> NodePath:
+	for property: int in state.get_node_property_count(index):
+		if state.get_node_property_name(index, property) == StringName(name):
+			return state.get_node_property_value(index, property)
+	return NodePath()
+
+
+## Makes each connection of [param state] as the engine makes them, once the scripts are on.
+func _reconnected(top: Node, state: SceneState) -> void:
+	for index: int in state.get_connection_count():
+		var source: Node = top.get_node_or_null(state.get_connection_source(index))
+		var target: Node = top.get_node_or_null(state.get_connection_target(index))
+		var signal_name: StringName = state.get_connection_signal(index)
+		var method: StringName = state.get_connection_method(index)
+		if source == null or target == null or not source.has_signal(signal_name):
+			continue
+		var binds: Array = state.get_connection_binds(index)
+		var unbinds: int = state.get_connection_unbinds(index)
+		if (not binds.is_empty() or unbinds > 0) and not target.has_method(method):
+			continue
+		var callable: Callable = Callable(target, method)
+		if not binds.is_empty():
+			callable = callable.bindv(binds)
+		if unbinds > 0:
+			callable = callable.unbind(unbinds)
+		if not source.is_connected(signal_name, callable):
+			var flags: int = state.get_connection_flags(index) | Object.CONNECT_PERSIST
+			var _made: Error = source.connect(signal_name, callable, flags)
 
 
 ## Records what the file holds for each node, as it was opened.
@@ -252,7 +365,7 @@ func _dropped() -> PackedStringArray:
 	var gone: PackedStringArray = []
 	for id: Variant in _loaded:
 		if not held.has(id) and not _removed.has(id):
-			gone.append(str(_loaded[id]))
+			var _added: bool = gone.append(str(_loaded[id]))
 	return gone
 
 
@@ -1825,7 +1938,7 @@ func _headless_packed(packed: PackedScene) -> Array:
 func _failed_check(packed: PackedScene, check: Callable) -> String:
 	# The copy holds the scene's own embedded resources, and its scripts run on them once more.
 	var held: Array[Array] = GdhHeadlessCheck.embedded_held(packed)
-	var saved: Node = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
+	var saved: Node = _instantiated(packed)
 	GdhHeadlessCheck.hold_embedded(held)
 	if saved == null:
 		return "The packed copy of %s did not instantiate, so nothing was written." % path
