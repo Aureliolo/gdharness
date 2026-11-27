@@ -96959,6 +96959,31 @@ function testAScriptIsReadTheWayItsTokenizerReadsIt(): void {
   assert.equal(kindAt(source, 'Told in a block'), 'string');
   assert.equal(kindAt(source, 'Told.new'), 'code', 'the block string ends where its fence does');
 
+  // A string literal spans lines in either quote form, so the cases below it are still declared.
+  for (const quote of ['"', "'"]) {
+    const suite = [
+      'extends GdUnitTestSuite',
+      '',
+      'func test_a() -> void:',
+      `\tassert_array(x).override_failure_message(${quote}`,
+      `${quote}.join(x)).is_empty()`,
+      '',
+      'func test_b() -> void:',
+      '\tpass',
+      '',
+      'func test_c() -> void:',
+      '\tpass',
+      '',
+    ].join('\n');
+    assert.deepEqual(
+      scriptShapeOf(suite)
+        .body.declarations.filter((one) => one.kind === 'func')
+        .map((one) => one.name),
+      ['test_a', 'test_b', 'test_c'],
+      `a ${quote} string spanning two lines should not hide the cases after it`,
+    );
+  }
+
   const uses = occurrencesOf('var Told := 1\nx.Told\nx\n\t.Told\nclass_name Told\nTold.new()', 'Told');
   assert.deepEqual(
     uses.map((one) => [one.afterDot, one.declaredAs]),
