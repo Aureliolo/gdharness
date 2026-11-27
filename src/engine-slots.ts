@@ -1,7 +1,7 @@
 /**
  * The engine slots a machine's test engines share, so that every tool starting one counts it.
  *
- * Each slot is a file, ${directory}/<n>.lock for n from 0 below the count, locked for as long as its
+ * Each slot is a file, ${directory}/<n>.held for n from 0 below the count, locked for as long as its
  * engine runs by an exclusive lock of the operating system ({@link tryOsLock}). The process that
  * lives as long as the engine holds the lock: the server, or the keeper of a game the keeper runs.
  * The operating system frees it when that process ends, however it ends. Nothing is written to a
@@ -19,6 +19,10 @@
  *
  * An engine started on a slot has the slot's file in {@link HELD_VARIABLE}, so a program it starts
  * that takes a slot runs on the engine's slot while the file is still locked.
+ *
+ * The files are named `.held` because releases before the operating system lock read a `.lock` file's
+ * content to judge its holder, which Windows refuses on a locked file. Neither scheme touches the
+ * other's files, so old and new versions can share the folder.
  *
  * Other programs take slots the same way, which is the point of it: docs/test-runs.md gives the
  * lock each platform uses, and a change here is a change there.
@@ -278,7 +282,7 @@ export class EngineSlots {
       return inherited;
     }
     for (let slot = 0; slot < this.cap; slot += 1) {
-      const path = join(this.directory, `${String(slot)}.lock`);
+      const path = join(this.directory, `${String(slot)}.held`);
       if (this.keptBackForKeeper(path)) {
         continue;
       }
@@ -535,7 +539,7 @@ export function projectLockOf(
     project === undefined
       ? 'none'
       : createHash('sha256').update(comparable(project)).digest('hex').slice(0, 16);
-  return join(directory, PROJECTS_FOLDER, `${key}.lock`);
+  return join(directory, PROJECTS_FOLDER, `${key}.held`);
 }
 
 /** [param path] resolved, and lower-cased on Windows, which is how projects are compared. */

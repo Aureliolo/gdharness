@@ -81,7 +81,7 @@ function heldIn(slots: string, folder: string): string[] {
   const path = folder === '' ? slots : join(slots, folder);
   return existsSync(path)
     ? readdirSync(path)
-        .filter((name) => name.endsWith('.lock') && lockHeld(join(path, name)))
+        .filter((name) => name.endsWith('.held') && lockHeld(join(path, name)))
         .map((name) => (folder === '' ? name : `${folder}/${name}`))
     : [];
 }
