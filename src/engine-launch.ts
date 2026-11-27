@@ -33,6 +33,7 @@ import {
   helperPid,
   helperStep,
   spawnOnDesktop,
+  windowedDesktop,
 } from './desktop.js';
 import { startedUntilItRuns } from './engine-run.js';
 import { handedOver, type ShareHandoff, shareMarker, shareText } from './engine-shares.js';
@@ -277,6 +278,8 @@ export interface EngineLaunch {
   readonly sample?: () => Promise<Sample>;
   /** The lane the engine runs in, counting from 0, which its `lane.json` names. Lane 0 where unset. */
   readonly lane?: number;
+  /** Whether the engine has a window, which on Windows gives it the desktop of its lane. */
+  readonly windowed?: boolean;
 }
 
 /**
@@ -525,7 +528,7 @@ async function startOnHiddenDesktop(start: EngineStart): Promise<Started> {
     };
   }
   const how = {
-    desktop: HIDDEN_DESKTOP,
+    desktop: launch.windowed === true ? windowedDesktop(lane) : HIDDEN_DESKTOP,
     directory: launch.projectPath,
     endsWithHelper: true,
     scratch: directory,

@@ -99,6 +99,7 @@ import {
   type Unit,
   unitsOf,
   viewportOf,
+  windowedEnginesFor,
   windowedSaid,
   writeJson,
   writeJsonAsync,
@@ -1069,7 +1070,7 @@ function dealtRun(context: RunContext, suites: readonly DeclaredSuite[]): Deal {
   const units = unitsOf(suites, times, splitPast);
   const plans =
     options.order === null
-      ? dealt(units, declared, room.engines)
+      ? dealt(units, declared, room.engines, windowedEnginesFor())
       : inEngines(ordered(units, options.order, options.selected), declared);
   return { times, room, units, splitPast, plans };
 }
@@ -1082,7 +1083,7 @@ function dealSaid(context: RunContext, suites: readonly DeclaredSuite[], deal: D
   const asked = unitsOf(suites, times, splitPastFor(suites, times, options.engines));
   const how =
     options.order === null
-      ? `${windowedSaid(plans)}${roomSaid(plans.length, lanesOf(plans), lanesOf(dealt(asked, declared, options.engines)), room.held, options.engines)}`
+      ? `${windowedSaid(plans)}${roomSaid(plans.length, lanesOf(plans), lanesOf(dealt(asked, declared, options.engines, windowedEnginesFor())), room.held, options.engines)}`
       : options.order === 'reversed'
         ? `, in reverse order of path${windowedSaid(plans)}`
         : options.order === 'named'
@@ -1217,6 +1218,7 @@ async function ranEngines(
         taken,
         (plan, index, lock, reuse) => runEngine(launch, plan, index, times, lock, reuse),
         handed,
+        windowedEnginesFor(),
       )
     : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null, handed))))
         .flat()
@@ -1840,8 +1842,9 @@ export async function runShares<
   taken: readonly string[],
   run: (plan: EnginePlan, index: number, lock: string, reuse?: ShareReuse<T>) => Promise<T>,
   handed?: HandedSlot,
+  windowedMost = 1,
 ): Promise<T[]> {
-  const shares = new Shares(units, declared, lanes);
+  const shares = new Shares(units, declared, lanes, windowedMost);
   const handedOut = new AbortController();
   if (shares.empty) {
     handedOut.abort();
@@ -2083,7 +2086,7 @@ async function runEngine(
   let end: EngineEnd;
   try {
     end = await watchedEngine(
-      { ...launch, lane: plan.lane },
+      { ...launch, lane: plan.lane, ...(plan.windowed ? { windowed: true } : {}) },
       lock,
       args,
       directory,

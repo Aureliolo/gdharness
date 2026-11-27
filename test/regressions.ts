@@ -126,6 +126,7 @@ import {
   retireHelper,
   spawnOnDesktop,
   throughHelper,
+  windowedDesktop,
   windowsCommandLine,
 } from '../src/desktop.js';
 import { HelpedChild, helperFor, ServedHelper } from '../src/desktop-process.js';
@@ -726,6 +727,7 @@ import {
   timesAfter,
   type Unit,
   unitsOf,
+  windowedEnginesFor,
   windowedSaid,
   windowNeedsOf,
   writeJson,
@@ -117074,6 +117076,78 @@ async function testTurnsRunInOrderAFailureBlocksNoneAndASettledKeyIsForgotten():
 }
 
 /**
+ * Windowed suites are dealt over several windowed engines, each in a lane and on a desktop of its
+ * own, and one engine keeps them all in one. No engine starts here, so CI's engine legs need not
+ * run it for the dealing to be checked.
+ */
+function testWindowedSuitesAreDealtOverWindowedEngines(): void {
+  const unit = (name: string, windowed: boolean): Unit => ({
+    suite: `res://tests/${name}_test.gd`,
+    cases: ['test_one'],
+    cost: 100,
+    timed: true,
+    windowed,
+    accessible: false,
+    headless: !windowed,
+  });
+  const windowed = ['a', 'b', 'c', 'd', 'e', 'f'].map((name) => unit(name, true));
+  const all = [...windowed, unit('h1', false), unit('h2', false)];
+  const declaredOf = (units: readonly Unit[]): Map<string, readonly string[]> =>
+    new Map(units.map((one) => [one.suite, one.cases]));
+  const windowedPlans = (plans: readonly EnginePlan[]): EnginePlan[] => plans.filter((plan) => plan.windowed);
+
+  const many = windowedPlans(dealt(all, declaredOf(all), 3, Number.POSITIVE_INFINITY));
+  assert.deepEqual(
+    many.map((plan) => plan.lane),
+    [0, 1, 2],
+    'six windowed suites and three engines make three windowed engines, each in a lane of its own',
+  );
+  assert.deepEqual(
+    many.flatMap((plan) => plan.suites.map((suite) => suite.path)).toSorted(),
+    windowed.map((one) => one.suite).toSorted(),
+    'and between them they hold every windowed suite once',
+  );
+  assert.deepEqual(
+    many.map((plan) => plan.suites.length),
+    [2, 2, 2],
+    'dealt evenly',
+  );
+  assert.equal(
+    windowedPlans(dealt(all, declaredOf(all), 1, Number.POSITIVE_INFINITY)).length,
+    1,
+    'a run of one engine keeps the windowed suites in one',
+  );
+  assert.equal(
+    windowedPlans(dealt(all, declaredOf(all), 3)).length,
+    1,
+    'a platform allowing one windowed engine keeps them in one',
+  );
+  assert.equal(windowedEnginesFor('linux'), 1, 'Linux has one display for every window');
+  assert.equal(windowedEnginesFor('darwin'), 1, 'and so does macOS');
+  assert.equal(windowedEnginesFor('win32'), Number.POSITIVE_INFINITY, 'Windows gives each its own desktop');
+
+  const shares = new Shares(all, declaredOf(all), 3, Number.POSITIVE_INFINITY);
+  const drawn = [shares.next(0), shares.next(1), shares.next(2)];
+  assert.deepEqual(
+    drawn.map((plan) => plan?.windowed),
+    [true, true, true],
+    'shares hand each of the first three lanes a windowed part',
+  );
+  assert.deepEqual(
+    drawn.map((plan) => plan?.suites.length),
+    [2, 2, 2],
+    'of equal size',
+  );
+  assert.equal(shares.next(0)?.windowed, false, 'and what follows is headless');
+  const alone = new Shares(all, declaredOf(all), 1, Number.POSITIVE_INFINITY);
+  assert.equal(alone.next(0)?.suites.length, 6, 'one lane takes every windowed suite whole');
+
+  const desktops = [0, 1, 2].map(windowedDesktop);
+  assert.equal(desktops[0], HIDDEN_DESKTOP, 'the first lane keeps the shared desktop');
+  assert.equal(new Set(desktops).size, 3, 'and every lane has a desktop of its own');
+}
+
+/**
  * An engine runs the cheap end of what it was dealt first, while the units go to lanes slowest first
  * as ever. A slow unit run first meets its sibling engines starting and ranks first again for it.
  */
@@ -120303,6 +120377,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInnerClassBaseIsFollowedToTheInnerClass,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testAnEngineRunsTheCheapEndOfItsUnitsFirst,
+  testWindowedSuitesAreDealtOverWindowedEngines,
   testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn,
   testAMixedSetIsCutIntoEnginesAfterWhatIsLeftOut,
   testACutRunIsDrivenThroughItsEngines,
