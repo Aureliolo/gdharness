@@ -60446,7 +60446,7 @@ async function testALayeredWordIsOneSignAndAShapeHasExtent(): Promise<void> {
  * relays what the game prints and not what it reports: a `push_error` raised in one reached
  * neither `editor_output` nor the transcript, and a run whose game had just refused something
  * out loud was answered `clean: true`. Every clean verdict a project had read off a played run
- * was in question. The runtime addon now takes the report where it is made, with a Logger in the
+ * was in question. The runtime addon takes the report where it is made, with a Logger in the
  * game, and the server reads it beside the announcement.
  *
  * A real engine stands in for the editor's game: the fake editor starts it on `play_scene` with
@@ -63688,7 +63688,7 @@ async function testACommandLineOutsideAsciiIsListedWhole(): Promise<void> {
  * The process table read from the kernel says what WMI says about the same processes.
  *
  * Every check that judges a parent link, a start or a command line on Windows was written against
- * WMI's answers, and now reads the kernel's table: a start a millisecond off is a recorded run
+ * WMI's answers, and reads the kernel's table instead: a start a millisecond off is a recorded run
  * refused as another process, and a parent read from the wrong field is a stop that ends nothing. So
  * this process and a child it starts are read both ways and compared field by field, the processor
  * time against Node's own, and the child's exit code through the handle the table holds, the way a
@@ -107958,7 +107958,7 @@ async function testAnInheritedSceneFindsItsBaseAsTheEngineDoes(): Promise<void> 
       );
     }
 
-    // The engine finds a value entry whose node was renamed in the scene it comes from by its
+    // The engine finds a value entry whose node carries a new name in the scene it comes from by its
     // unique_id, and so must a read of the file.
     const renamed = await written('scene_node', {
       op: 'set',
