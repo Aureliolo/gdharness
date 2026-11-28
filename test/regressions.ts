@@ -117546,7 +117546,7 @@ function testWindowedSuitesAreDealtOverWindowedEngines(): void {
   );
   assert.equal(windowedEnginesFor('linux'), 1, 'Linux has one display for every window');
   assert.equal(windowedEnginesFor('darwin'), 1, 'and so does macOS');
-  assert.equal(windowedEnginesFor('win32'), Number.POSITIVE_INFINITY, 'Windows gives each its own desktop');
+  assert.equal(windowedEnginesFor('win32'), 1, 'and Windows, whose windowed engines share one GPU');
 
   const shares = new Shares(all, declaredOf(all), 3, Number.POSITIVE_INFINITY);
   const drawn = [shares.next(0), shares.next(1), shares.next(2)];
