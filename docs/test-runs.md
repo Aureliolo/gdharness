@@ -516,12 +516,12 @@ first suite starts. A run that could not ask prints why, starting with
 
 ### The windowed engine
 
-The windowed suites are dealt over windowed engines, which start first, count toward `--engines`
-and run nothing else. On Windows each has a hidden desktop of its own, so its focus, input events
-and window size are what it gets alone, and the suites are dealt as the headless ones are: no more
-windowed engines than `--engines`, free slots or work for them. Elsewhere every window shares one
-display, so all the windowed suites stay in one engine. A suite there sees the machine's real screen
-size, scale and keyboard layout, and runs slower for drawing frames.
+The windowed suites run in one windowed engine, which starts first, counts toward `--engines` and
+runs nothing else. Elsewhere than Windows every window shares one display, where two windows contend
+for the focus. On Windows the engine has a hidden desktop of its own, so its focus, input events and
+window size are what it gets alone. Several windowed engines at once would share the one GPU, and
+twelve of them left a game's GPU copies unfinished. A suite elsewhere than Windows sees the
+machine's real screen size, scale and keyboard layout, and runs slower for drawing frames.
 
 ### After the windowed engine
 

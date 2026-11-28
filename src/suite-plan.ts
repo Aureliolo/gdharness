@@ -1101,12 +1101,14 @@ export class Shares {
 }
 
 /**
- * How many windowed engines may run at once on [param platform]. Windows gives each its own hidden
- * desktop, so each keeps its own focus, input and window size. Elsewhere they share the one display,
- * where two windows contend for the focus, so they stay in one engine.
+ * How many windowed engines may run at once on [param platform]: one everywhere. Elsewhere than
+ * Windows they share the one display, where two windows contend for the focus. On Windows each would
+ * have a hidden desktop of its own, but they share the one GPU: twelve windowed engines at once, one
+ * a slot, left a game's GPU copies unfinished after 10 s, and one engine running all the windowed
+ * suites has never done so. A larger number needs a run measured at it.
  */
-export function windowedEnginesFor(platform: NodeJS.Platform = process.platform): number {
-  return platform === 'win32' ? Number.POSITIVE_INFINITY : 1;
+export function windowedEnginesFor(_platform: NodeJS.Platform = process.platform): number {
+  return 1;
 }
 
 /** How many slots [param plans] take at once: one a lane. */
