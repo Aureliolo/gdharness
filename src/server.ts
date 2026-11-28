@@ -14417,7 +14417,7 @@ export class GodotServer {
     // The note of a place holds one run, so a start here would replace the note of a game another
     // live server is running in the same place.
     const placeTaken = readRunRecord(project.value.path, undefined, run.asked.savesIn);
-    if (placeTaken !== null && this.heldByAnotherServer(placeTaken) && alive(placeTaken.pid)) {
+    if (placeTaken !== null && this.anotherServersGameGoing(placeTaken)) {
       return this.anotherServersGameRefusal(placeTaken, true);
     }
     let ended: EndedRun | null = null;
@@ -16868,6 +16868,15 @@ export class GodotServer {
   }
 
   /**
+   * Whether [param record] notes a game another live server is running now. A note keeps the pid of
+   * a game that ended while its server lives on, and Windows hands that number to a later game, so
+   * the note of a game that ended names nothing.
+   */
+  private anotherServersGameGoing(record: RunRecord): boolean {
+    return this.heldByAnotherServer(record) && record.endedAt === undefined && alive(record.pid);
+  }
+
+  /**
    * The note of a game another live server started, among the games going with one of [param pids]
    * as their process or as a process under it, or null. A worker a game opened is under its run's
    * process, so the process tree is read once and only when such a server has a game going.
@@ -16876,7 +16885,7 @@ export class GodotServer {
     if (pids.length === 0) {
       return null;
     }
-    const going = everyRunRecord().filter((one) => this.heldByAnotherServer(one) && alive(one.pid));
+    const going = everyRunRecord().filter((one) => this.anotherServersGameGoing(one));
     if (going.length === 0) {
       return null;
     }

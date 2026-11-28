@@ -66255,6 +66255,73 @@ async function testAServerLeavesAnotherLiveServersGameAlone(): Promise<void> {
 }
 
 /**
+ * A game another live server started and that has ended names nothing, though its server runs on.
+ * Windows hands its pid to a later game, and that game was refused as the other server's.
+ */
+async function testAnEndedGameOfAnotherLiveServerHoldsNothing(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ended-other-'));
+  const project = join(root, 'project');
+  const runtimeDir = join(root, 'runtime');
+  mkdirSync(project);
+  mkdirSync(join(runtimeDir, 'runs'), { recursive: true });
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Ended game"\n',
+  );
+  const standIn = (): ChildProcess =>
+    spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const reused = standIn();
+  const otherServer = standIn();
+  const pid = reused.pid ?? 0;
+  assert.ok(pid > 0 && (otherServer.pid ?? 0) > 0, 'the fixture needs two stand-in processes');
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
+  try {
+    const transcript = join(runtimeDir, 'runs', 'run-1.log');
+    writeFileSync(transcript, "the other server's game, long over\n");
+    const startedAt = Date.now() - 60_000;
+    writeRunRecord({
+      pid,
+      transcript,
+      startedAt,
+      startedBy: startedAt,
+      projectPath: join(root, 'elsewhere'),
+      servedBy: join(root, 'elsewhere'),
+      serverPid: otherServer.pid ?? 0,
+      arguments: ['--path', join(root, 'elsewhere')],
+      command: process.execPath,
+      exitCode: 0,
+      endedAt: startedAt + 30_000,
+    });
+    await withStdioServer(
+      async (call) => {
+        for (const [name, args] of [
+          ['editor_run', { op: 'stop', pid }],
+          ['runtime_inspect', { op: 'tree', pid }],
+        ] as const) {
+          const said = await call(name, args);
+          assert.ok(
+            !said.includes('was started by the server of'),
+            `${name} ${JSON.stringify(args)} is not refused as the other server's game: ${said}`,
+          );
+        }
+        assert.ok(isAlive(pid), 'no call ended the process');
+      },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    );
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    reused.kill();
+    otherServer.kill();
+    sweep(root);
+  }
+}
+
+/**
  * A run noted as started by a server that has gone is taken over by the next server of its folder,
  * and one noted as started by a server that is running is not read at all.
  */
@@ -120648,6 +120715,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunEndedUnwatchedIsStillReadable,
   testTheRunAdoptedIsTheLatestStarted,
   testAServerLeavesAnotherLiveServersGameAlone,
+  testAnEndedGameOfAnotherLiveServerHoldsNothing,
   testAGoneServersRunIsTakenOverAndALiveOnesIsNot,
   testASecondServerOfAFolderLeavesTheFirstsGameAndTakesItOnceItIsGone,
   testAPickedUpRunKeepsItsProfile,
